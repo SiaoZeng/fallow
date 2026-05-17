@@ -672,38 +672,53 @@ fn collect_nested_type_bindings(
 
 /// Extract typed instance bindings from a class: pairs of
 /// `(local_name, type_name)` for non-private typed constructor parameters
-/// with accessibility modifiers and non-private typed property declarations.
+/// with accessibility modifiers, non-private typed property declarations, and
+/// non-private typed getters.
 ///
-/// Angular templates reference these bindings by their local name
+/// Analysis uses these bindings to follow chains such as
+/// `factory.service.method()` from the factory class to the service class.
+/// Angular templates also reference these bindings by their local name
 /// (`dataService.getTotal()` in the template maps to
-/// `this.dataService` -> `DataService`). Private bindings are excluded
-/// because they are not visible in Angular templates.
+/// `this.dataService` -> `DataService`). Private bindings are excluded.
 #[must_use]
 pub fn extract_class_instance_bindings(class: &Class<'_>) -> Vec<(String, String)> {
     let mut bindings: Vec<(String, String)> = Vec::new();
     for element in &class.body.body {
         match element {
             ClassElement::MethodDefinition(method) => {
-                if !matches!(method.kind, MethodDefinitionKind::Constructor) {
-                    continue;
-                }
-                for param in &method.value.params.items {
-                    let Some(accessibility) = param.accessibility else {
-                        continue;
-                    };
-                    if matches!(accessibility, TSAccessibility::Private) {
+                if matches!(method.kind, MethodDefinitionKind::Constructor) {
+                    for param in &method.value.params.items {
+                        let Some(accessibility) = param.accessibility else {
+                            continue;
+                        };
+                        if matches!(accessibility, TSAccessibility::Private) {
+                            continue;
+                        }
+                        let BindingPattern::BindingIdentifier(id) = &param.pattern else {
+                            continue;
+                        };
+                        let Some(type_annotation) = param.type_annotation.as_deref() else {
+                            continue;
+                        };
+                        let Some(type_name) = extract_type_annotation_name(type_annotation) else {
+                            continue;
+                        };
+                        bindings.push((id.name.to_string(), type_name));
+                    }
+                } else if matches!(method.kind, MethodDefinitionKind::Get) {
+                    if matches!(method.accessibility, Some(TSAccessibility::Private)) {
                         continue;
                     }
-                    let BindingPattern::BindingIdentifier(id) = &param.pattern else {
+                    let Some(name) = method.key.static_name() else {
                         continue;
                     };
-                    let Some(type_annotation) = param.type_annotation.as_deref() else {
+                    let Some(type_annotation) = method.value.return_type.as_deref() else {
                         continue;
                     };
                     let Some(type_name) = extract_type_annotation_name(type_annotation) else {
                         continue;
                     };
-                    bindings.push((id.name.to_string(), type_name));
+                    bindings.push((name.to_string(), type_name));
                 }
             }
             ClassElement::PropertyDefinition(prop) => {

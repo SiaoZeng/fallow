@@ -99,7 +99,7 @@ pub(crate) struct ModuleInfoExtractor {
     /// (e.g., `import * as ns`, `const mod = require(...)`, `const mod = await import(...)`).
     /// Used to detect destructuring patterns like `const { a, b } = ns`.
     namespace_binding_names: Vec<String>,
-    /// Local bindings and `this.<field>` aliases resolved to a target symbol name.
+    /// Local bindings and dotted instance aliases resolved to a target symbol name.
     /// Used so `x.method()` or `this.service.method()` can be mapped back to the
     /// imported/exported class or interface that owns the member.
     binding_target_names: FxHashMap<String, String>,
@@ -442,11 +442,32 @@ impl ModuleInfoExtractor {
         }
     }
 
+    fn resolve_bound_object_name(&self, object: &str) -> Option<String> {
+        if let Some(target_name) = self.binding_target_names.get(object) {
+            return Some(target_name.clone());
+        }
+
+        self.binding_target_names
+            .iter()
+            .filter_map(|(binding, target_name)| {
+                let suffix = object.strip_prefix(binding.as_str())?.strip_prefix('.')?;
+                if target_name.starts_with(crate::FACTORY_CALL_SENTINEL) {
+                    return None;
+                }
+                Some((binding.len(), format!("{target_name}.{suffix}")))
+            })
+            .max_by_key(|(len, _)| *len)
+            .map(|(_, object_name)| object_name)
+    }
+
     /// Map bound member accesses to their target symbol member accesses.
     ///
     /// When `const x = new Foo()` and later `x.bar()`, or `const x: Service`
     /// and later `x.bar()`, emit an additional `MemberAccess` against the
     /// resolved symbol name so the analysis layer can track the member usage.
+    /// Dotted receivers are preserved (`factory.service.call()` becomes
+    /// `Factory.service.call()`) so analysis can follow typed instance bindings
+    /// declared on the intermediate class.
     fn resolve_bound_member_accesses(&mut self) {
         if self.binding_target_names.is_empty() {
             return;
@@ -455,10 +476,9 @@ impl ModuleInfoExtractor {
             .member_accesses
             .iter()
             .filter_map(|access| {
-                self.binding_target_names
-                    .get(&access.object)
-                    .map(|target_name| MemberAccess {
-                        object: target_name.clone(),
+                self.resolve_bound_object_name(&access.object)
+                    .map(|object| MemberAccess {
+                        object,
                         member: access.member.clone(),
                     })
             })
@@ -466,7 +486,7 @@ impl ModuleInfoExtractor {
         let additional_whole: Vec<String> = self
             .whole_object_uses
             .iter()
-            .filter_map(|name| self.binding_target_names.get(name).cloned())
+            .filter_map(|name| self.resolve_bound_object_name(name))
             .collect();
         self.member_accesses.extend(additional_accesses);
         self.whole_object_uses.extend(additional_whole);

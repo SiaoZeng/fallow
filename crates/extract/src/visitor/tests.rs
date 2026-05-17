@@ -2669,6 +2669,69 @@ fn instance_whole_object_mapped() {
 }
 
 #[test]
+fn typed_getter_records_instance_binding() {
+    let info = parse(
+        r"
+        import { Service } from './service';
+
+        export class Factory {
+            get service(): Service {
+                return new Service();
+            }
+        }
+        ",
+    );
+
+    assert!(
+        info.class_heritage.iter().any(|heritage| {
+            heritage.export_name == "Factory"
+                && heritage
+                    .instance_bindings
+                    .contains(&("service".to_string(), "Service".to_string()))
+        }),
+        "typed getter should be recorded as an instance binding, found: {:?}",
+        info.class_heritage
+    );
+}
+
+#[test]
+fn dotted_bound_receiver_preserves_suffix() {
+    let info = parse(
+        r"
+        import { Factory } from './factory';
+        const factory = new Factory();
+        factory.service.queryEvents();
+        ",
+    );
+
+    assert!(
+        info.member_accesses
+            .iter()
+            .any(|a| a.object == "Factory.service" && a.member == "queryEvents"),
+        "bound dotted receiver should preserve the suffix for later analysis, found: {:?}",
+        info.member_accesses
+    );
+}
+
+#[test]
+fn dotted_bound_whole_object_preserves_suffix() {
+    let info = parse(
+        r"
+        import { Factory } from './factory';
+        const factory = new Factory();
+        Object.keys(factory.service);
+        ",
+    );
+
+    assert!(
+        info.whole_object_uses
+            .contains(&"Factory.service".to_string()),
+        "bound dotted whole-object use should preserve the suffix for later analysis, found: {:?}",
+        info.whole_object_uses
+    );
+}
+
+#[test]
 fn multiple_instances_same_class_mapped() {
     let info = parse(
         r"

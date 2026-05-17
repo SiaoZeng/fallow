@@ -566,6 +566,174 @@ fn propagate_accesses_through_instance_exports(
     }
 }
 
+fn build_typed_instance_binding_targets(
+    graph: &ModuleGraph,
+    resolved_modules: &[ResolvedModule],
+    modules: &[ModuleInfo],
+) -> FxHashMap<ExportKey, FxHashMap<String, Vec<ExportKey>>> {
+    let resolved_by_file: FxHashMap<FileId, &ResolvedModule> = resolved_modules
+        .iter()
+        .map(|module| (module.file_id, module))
+        .collect();
+    let mut targets_by_class: FxHashMap<ExportKey, FxHashMap<String, Vec<ExportKey>>> =
+        FxHashMap::default();
+
+    for module in modules {
+        let Some(resolved) = resolved_by_file.get(&module.file_id) else {
+            continue;
+        };
+        let local_to_export_keys = build_local_to_export_keys(resolved);
+        for heritage in &module.class_heritage {
+            if heritage.instance_bindings.is_empty() {
+                continue;
+            }
+            let class_key = ExportKey::new(module.file_id, heritage.export_name.clone());
+            let member_targets = targets_by_class.entry(class_key).or_default();
+
+            for (member_name, type_name) in &heritage.instance_bindings {
+                let Some(seed_keys) = local_to_export_keys.get(type_name.as_str()) else {
+                    continue;
+                };
+                let targets = member_targets.entry(member_name.clone()).or_default();
+                for seed_key in seed_keys {
+                    push_export_key(targets, seed_key.clone());
+                    for origin in walk_re_export_origins(
+                        graph,
+                        seed_key.file_id,
+                        seed_key.export_name.as_str(),
+                    ) {
+                        push_export_key(targets, origin);
+                    }
+                }
+            }
+        }
+    }
+
+    targets_by_class
+}
+
+fn chained_typed_instance_targets(
+    graph: &ModuleGraph,
+    typed_instance_targets: &FxHashMap<ExportKey, FxHashMap<String, Vec<ExportKey>>>,
+    seed_key: &ExportKey,
+    segments: &[&str],
+) -> Vec<ExportKey> {
+    let mut current = vec![seed_key.clone()];
+    for origin in walk_re_export_origins(graph, seed_key.file_id, seed_key.export_name.as_str()) {
+        push_export_key(&mut current, origin);
+    }
+
+    for segment in segments {
+        let mut next = Vec::new();
+        for class_key in &current {
+            let Some(member_targets) = typed_instance_targets.get(class_key) else {
+                continue;
+            };
+            let Some(targets) = member_targets.get(*segment) else {
+                continue;
+            };
+            for target in targets {
+                push_export_key(&mut next, target.clone());
+            }
+        }
+        if next.is_empty() {
+            return Vec::new();
+        }
+        current = next;
+    }
+
+    current
+}
+
+fn resolve_typed_instance_chain_targets(
+    graph: &ModuleGraph,
+    typed_instance_targets: &FxHashMap<ExportKey, FxHashMap<String, Vec<ExportKey>>>,
+    local_to_export_keys: &FxHashMap<&str, Vec<ExportKey>>,
+    object_name: &str,
+) -> Vec<ExportKey> {
+    let mut segments = object_name.split('.');
+    let Some(root_local) = segments.next() else {
+        return Vec::new();
+    };
+    let path_segments: Vec<&str> = segments.collect();
+    if path_segments.is_empty() {
+        return Vec::new();
+    }
+    let Some(root_keys) = local_to_export_keys.get(root_local) else {
+        return Vec::new();
+    };
+
+    let mut targets = Vec::new();
+    for root_key in root_keys {
+        for target_key in
+            chained_typed_instance_targets(graph, typed_instance_targets, root_key, &path_segments)
+        {
+            push_export_key(&mut targets, target_key);
+        }
+    }
+    targets
+}
+
+fn propagate_accesses_through_typed_instance_bindings(
+    graph: &ModuleGraph,
+    resolved_modules: &[ResolvedModule],
+    modules: &[ModuleInfo],
+    accessed_members: &mut FxHashMap<ExportKey, FxHashSet<String>>,
+    whole_object_used_exports: &mut FxHashSet<ExportKey>,
+) {
+    let typed_instance_targets =
+        build_typed_instance_binding_targets(graph, resolved_modules, modules);
+    if typed_instance_targets.is_empty() {
+        return;
+    }
+
+    for resolved in resolved_modules {
+        let local_to_export_keys = build_local_to_export_keys(resolved);
+        for access in &resolved.member_accesses {
+            if access.object.starts_with(INSTANCE_EXPORT_SENTINEL)
+                || access.object.starts_with(FACTORY_CALL_SENTINEL)
+                || access.object.starts_with(PLAYWRIGHT_FIXTURE_DEF_SENTINEL)
+                || access.object.starts_with(PLAYWRIGHT_FIXTURE_USE_SENTINEL)
+                || access.object == ANGULAR_TPL_SENTINEL
+            {
+                continue;
+            }
+
+            for target_key in resolve_typed_instance_chain_targets(
+                graph,
+                &typed_instance_targets,
+                &local_to_export_keys,
+                &access.object,
+            ) {
+                accessed_members
+                    .entry(target_key)
+                    .or_default()
+                    .insert(access.member.clone());
+            }
+        }
+
+        for object_name in &resolved.whole_object_uses {
+            if object_name.starts_with(INSTANCE_EXPORT_SENTINEL)
+                || object_name.starts_with(FACTORY_CALL_SENTINEL)
+                || object_name.starts_with(PLAYWRIGHT_FIXTURE_DEF_SENTINEL)
+                || object_name.starts_with(PLAYWRIGHT_FIXTURE_USE_SENTINEL)
+                || object_name == ANGULAR_TPL_SENTINEL
+            {
+                continue;
+            }
+
+            for target_key in resolve_typed_instance_chain_targets(
+                graph,
+                &typed_instance_targets,
+                &local_to_export_keys,
+                object_name,
+            ) {
+                whole_object_used_exports.insert(target_key);
+            }
+        }
+    }
+}
+
 /// Decode a `FACTORY_CALL_SENTINEL{callee_object}:{callee_method}` access object
 /// into its `(callee_object, callee_method)` components. Returns `None` when the
 /// object is not sentinel-prefixed or the embedded delimiter is missing.
@@ -868,6 +1036,13 @@ pub fn find_unused_members(
     // file's `members`. See issue #178.
     propagate_playwright_fixture_accesses(graph, resolved_modules, &mut accessed_members);
     propagate_factory_call_accesses(graph, resolved_modules, &mut accessed_members);
+    propagate_accesses_through_typed_instance_bindings(
+        graph,
+        resolved_modules,
+        modules,
+        &mut accessed_members,
+        &mut whole_object_used_exports,
+    );
     propagate_accesses_through_re_exports(graph, &mut accessed_members);
     propagate_whole_object_through_re_exports(graph, &mut whole_object_used_exports);
     let instance_targets = build_instance_export_targets(graph, resolved_modules);

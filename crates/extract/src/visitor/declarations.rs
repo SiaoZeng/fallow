@@ -60,11 +60,7 @@ impl ModuleInfoExtractor {
                     let members = extract_class_members(class, is_angular);
                     let super_class = extract_super_class_name(class);
                     let implemented_interfaces = extract_implemented_interface_names(class);
-                    let instance_bindings = if is_angular {
-                        extract_class_instance_bindings(class)
-                    } else {
-                        Vec::new()
-                    };
+                    let instance_bindings = extract_class_instance_bindings(class);
                     if super_class.is_some()
                         || !implemented_interfaces.is_empty()
                         || !instance_bindings.is_empty()

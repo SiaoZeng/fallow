@@ -946,11 +946,8 @@ impl<'a> Visit<'a> for ModuleInfoExtractor {
                     if let Some(id) = class.id.as_ref() {
                         self.record_local_type_declaration(&id.name, id.span);
                         let is_angular = has_angular_class_decorator(class);
-                        let instance_bindings = if is_angular {
-                            super::helpers::extract_class_instance_bindings(class)
-                        } else {
-                            Vec::new()
-                        };
+                        let instance_bindings =
+                            super::helpers::extract_class_instance_bindings(class);
                         self.record_local_class_export(
                             id.name.to_string(),
                             extract_class_members(class, is_angular),
@@ -1176,11 +1173,7 @@ impl<'a> Visit<'a> for ModuleInfoExtractor {
         let (members, super_class, implemented_interfaces, instance_bindings) =
             if let ExportDefaultDeclarationKind::ClassDeclaration(class) = &decl.declaration {
                 let is_angular = has_angular_class_decorator(class);
-                let bindings = if is_angular {
-                    super::helpers::extract_class_instance_bindings(class)
-                } else {
-                    Vec::new()
-                };
+                let bindings = super::helpers::extract_class_instance_bindings(class);
                 (
                     extract_class_members(class, is_angular),
                     extract_super_class_name(class),
@@ -1565,9 +1558,9 @@ impl<'a> Visit<'a> for ModuleInfoExtractor {
                 member.property.name.as_str(),
                 "values" | "keys" | "entries" | "getOwnPropertyNames"
             )
-            && let Some(Argument::Identifier(arg_ident)) = expr.arguments.first()
+            && let Some(arg_name) = expr.arguments.first().and_then(static_argument_object_name)
         {
-            self.whole_object_uses.push(arg_ident.name.to_string());
+            self.whole_object_uses.push(arg_name);
         }
 
         // Detect import.meta.glob() — Vite pattern
@@ -2084,6 +2077,19 @@ impl<'a> Visit<'a> for ModuleInfoExtractor {
             }
         }
         walk::walk_tagged_template_expression(self, expr);
+    }
+}
+
+fn static_argument_object_name(arg: &Argument<'_>) -> Option<String> {
+    match arg {
+        Argument::Identifier(ident) => Some(ident.name.to_string()),
+        Argument::ThisExpression(_) => Some("this".to_string()),
+        Argument::StaticMemberExpression(member) => Some(format!(
+            "{}.{}",
+            static_member_object_name(&member.object)?,
+            member.property.name
+        )),
+        _ => None,
     }
 }
 

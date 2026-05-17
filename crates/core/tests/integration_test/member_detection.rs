@@ -235,6 +235,34 @@ fn playwright_nested_fixture_pom_methods_are_credited_from_tests() {
 }
 
 #[test]
+fn playwright_fixture_teardown_credits_factory_getter_member_usage() {
+    let root = fixture_path("issue-386-playwright-fixture-teardown");
+    let config = create_config(root);
+    let results = fallow_core::analyze(&config).expect("analysis should succeed");
+
+    let unused_class_members: Vec<String> = results
+        .unused_class_members
+        .iter()
+        .map(|m| format!("{}.{}", m.parent_name, m.member_name))
+        .collect();
+
+    assert!(
+        !unused_class_members.contains(&"ProcessEventsService.queryEventsForProcessId".to_string()),
+        "ProcessEventsService.queryEventsForProcessId should be credited through a Playwright fixture teardown factory getter, found: {unused_class_members:?}"
+    );
+    assert!(
+        unused_class_members.contains(&"ProcessEventsService.unusedServiceMethod".to_string()),
+        "genuinely unused service methods should still be reported, found: {unused_class_members:?}"
+    );
+    assert!(
+        !unused_class_members
+            .iter()
+            .any(|member| member.starts_with("AuditService.")),
+        "Object.keys(factory.auditService) should credit the whole target service through the typed getter chain, found: {unused_class_members:?}"
+    );
+}
+
+#[test]
 fn angular_inject_fields_credit_service_member_usage() {
     let root = fixture_path("angular-inject-class-members");
     let config = create_config(root);
