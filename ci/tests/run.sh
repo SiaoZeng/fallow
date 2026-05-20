@@ -106,24 +106,24 @@ run_gitlab_install() {
 
 OUT=$(run_gitlab_install "$INSTALL_TMP/pinned" "")
 assert_contains "$OUT" "Using fallow version from" "install: reads package.json pin"
-assert_contains "$OUT" "DRY RUN: npm install -g fallow@2.7.3" "install: installs project pin"
+assert_contains "$OUT" "DRY RUN: npm install -g --ignore-scripts fallow@2.7.3" "install: installs project pin"
 
 OUT=$(run_gitlab_install "$INSTALL_TMP/range" "")
-assert_contains "$OUT" "DRY RUN: npm install -g fallow@^2.52.0" "install: supports package.json semver range"
+assert_contains "$OUT" "DRY RUN: npm install -g --ignore-scripts fallow@^2.52.0" "install: supports package.json semver range"
 
 OUT=$(run_gitlab_install "$INSTALL_TMP/pinned" "latest")
 assert_contains "$OUT" "Using fallow version from FALLOW_VERSION: latest" "install: explicit FALLOW_VERSION wins"
-assert_contains "$OUT" "DRY RUN: npm install -g fallow" "install: explicit latest installs latest"
+assert_contains "$OUT" "DRY RUN: npm install -g --ignore-scripts fallow" "install: explicit latest installs latest"
 
 OUT=$(run_gitlab_install "$INSTALL_TMP/unsafe" "")
 assert_contains "$OUT" "Ignoring unsupported fallow package.json spec" "install: warns on unsupported package spec"
-assert_contains "$OUT" "DRY RUN: npm install -g fallow" "install: unsupported package spec falls back to latest"
+assert_contains "$OUT" "DRY RUN: npm install -g --ignore-scripts fallow" "install: unsupported package spec falls back to latest"
 
 OUT=$(run_gitlab_install "$INSTALL_TMP/empty" "")
-assert_contains "$OUT" "DRY RUN: npm install -g fallow" "install: no package spec falls back to latest"
+assert_contains "$OUT" "DRY RUN: npm install -g --ignore-scripts fallow" "install: no package spec falls back to latest"
 
 OUT=$(run_gitlab_install "$INSTALL_TMP/empty" "2.0.0 - 2.5.0")
-assert_contains "$OUT" "DRY RUN: npm install -g fallow@2.0.0 - 2.5.0" "install: supports npm hyphen ranges"
+assert_contains "$OUT" "DRY RUN: npm install -g --ignore-scripts fallow@2.0.0 - 2.5.0" "install: supports npm hyphen ranges"
 
 OUT=$(run_gitlab_install "$INSTALL_TMP/empty" "file:../fallow")
 cmd_status=$?
@@ -172,8 +172,8 @@ parity_run_gitlab() {
 }
 
 extract_install_arg() {
-  printf '%s\n' "$1" | grep -Eo 'DRY RUN: npm install -g .*' | head -n 1 \
-    | sed 's/^DRY RUN: npm install -g //'
+  printf '%s\n' "$1" | grep -Eo 'DRY RUN: npm install -g --ignore-scripts .*' | head -n 1 \
+    | sed 's/^DRY RUN: npm install -g --ignore-scripts //'
 }
 
 assert_parity() {

@@ -15,14 +15,6 @@ concurrency:
 
 permissions: {}
 
-env:
-  # This workflow runs the checked-out Action against the currently published
-  # npm package. During the PR window before a release, the verifier can be
-  # newer than the published platform packages and would fail on missing .sig
-  # files. The verifier's fail-closed behavior is covered by action/tests/run.sh
-  # and npm/fallow/scripts/verify-binary.test.js.
-  FALLOW_SKIP_BINARY_VERIFY: "1"
-
 jobs:
   test-jq-scripts:
     name: Test jq scripts
@@ -53,6 +45,13 @@ jobs:
       - name: Run action with SARIF format
         id: fallow
         uses: ./
+        env:
+          # These smoke jobs run the checked-out Action against the currently
+          # published npm package. During the PR window before a release, the
+          # verifier can be newer than published platform packages and fail on
+          # missing .sig files. The fail-closed verifier path is covered by
+          # action/tests/run.sh and npm/fallow/scripts/verify-binary.test.js.
+          FALLOW_SKIP_BINARY_VERIFY: "1"
         with:
           root: tests/fixtures/basic-project
           format: sarif
@@ -104,6 +103,8 @@ jobs:
       - name: Run action with JSON format
         id: fallow
         uses: ./
+        env:
+          FALLOW_SKIP_BINARY_VERIFY: "1"
         with:
           command: dead-code
           root: tests/fixtures/basic-project
@@ -169,6 +170,8 @@ jobs:
       - name: Run action against clean project
         id: fallow
         uses: ./
+        env:
+          FALLOW_SKIP_BINARY_VERIFY: "1"
         with:
           root: /tmp/clean-project
           format: json
@@ -204,6 +207,8 @@ jobs:
       - name: Run action with dupes command
         id: fallow
         uses: ./
+        env:
+          FALLOW_SKIP_BINARY_VERIFY: "1"
         with:
           command: dupes
           root: tests/fixtures/duplicate-code
@@ -253,6 +258,8 @@ jobs:
       - name: Run action with fix command
         id: fallow
         uses: ./
+        env:
+          FALLOW_SKIP_BINARY_VERIFY: "1"
         with:
           command: fix
           root: tests/fixtures/basic-project
@@ -302,6 +309,8 @@ jobs:
       - name: Run action with dead-code command
         id: fallow
         uses: ./
+        env:
+          FALLOW_SKIP_BINARY_VERIFY: "1"
         with:
           command: dead-code
           root: tests/fixtures/basic-project
@@ -339,6 +348,8 @@ jobs:
       - name: Run action with no command (bare invocation)
         id: fallow
         uses: ./
+        env:
+          FALLOW_SKIP_BINARY_VERIFY: "1"
         with:
           root: tests/fixtures/basic-project
           format: json
@@ -385,6 +396,8 @@ jobs:
       - name: Run action with PR comment
         id: fallow
         uses: ./
+        env:
+          FALLOW_SKIP_BINARY_VERIFY: "1"
         with:
           root: tests/fixtures/basic-project
           format: json
