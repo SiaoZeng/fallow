@@ -167,6 +167,53 @@ fn node_module_register_specifier(call: &CallExpression<'_>) -> Option<String> {
     }
 }
 
+/// Node `module.register()` invokes loader-hook exports reflectively. The
+/// allowlist covers the current Node 22+ hook set (`initialize`, `resolve`,
+/// `load`, `globalPreload`) plus the legacy hooks (`getFormat`, `getSource`,
+/// `transformSource`) that older Node versions still in the wild (16.x with
+/// `--experimental-loader`, downstream forks) invoke. Extra entries are
+/// inert: if the loader file does not export them, no symbol reference is
+/// recorded. See issue #589.
+const NODE_MODULE_REGISTER_HOOK_EXPORTS: &[&str] = &[
+    "initialize",
+    "resolve",
+    "load",
+    "globalPreload",
+    "getFormat",
+    "getSource",
+    "transformSource",
+];
+
+fn loader_hook_exports_for_source(source: &str) -> Vec<String> {
+    if source.starts_with("./")
+        || source.starts_with("../")
+        || source.starts_with('/')
+        || source.starts_with("file:")
+    {
+        NODE_MODULE_REGISTER_HOOK_EXPORTS
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect()
+    } else {
+        Vec::new()
+    }
+}
+
+fn new_url_import_source(expr: &NewExpression<'_>) -> Option<String> {
+    if let Expression::Identifier(callee) = &expr.callee
+        && callee.name == "URL"
+        && expr.arguments.len() == 2
+        && let Some(Argument::StringLiteral(path_lit)) = expr.arguments.first()
+        && is_meta_url_arg(&expr.arguments[1])
+        && (path_lit.value.starts_with("./") || path_lit.value.starts_with("../"))
+        && !path_lit.value.ends_with('/')
+    {
+        Some(path_lit.value.to_string())
+    } else {
+        None
+    }
+}
+
 #[derive(Default)]
 struct PlaywrightFixtureMemberCollector {
     fixture_by_local: FxHashMap<String, String>,
@@ -458,6 +505,25 @@ fn fixture_type_reference_name(ty: &TSType<'_>) -> Option<(String, Span)> {
 }
 
 impl ModuleInfoExtractor {
+    fn record_node_module_register_url_binding(&mut self, name: String, sources: Vec<String>) {
+        let entry = self
+            .node_module_register_url_bindings
+            .entry(name)
+            .or_default();
+        for source in sources {
+            if !entry.contains(&source) {
+                entry.push(source);
+            }
+        }
+    }
+
+    fn node_module_register_url_binding(&self, name: &str) -> Vec<String> {
+        self.node_module_register_url_bindings
+            .get(name)
+            .cloned()
+            .unwrap_or_default()
+    }
+
     fn record_local_type_declaration(&mut self, name: &str, span: Span) {
         if self
             .local_type_declarations
@@ -812,17 +878,65 @@ impl ModuleInfoExtractor {
             }
             _ => false,
         };
-        if register_match
-            && let Some(source) = node_module_register_specifier(expr)
-            && !source.is_empty()
-        {
+        if !register_match {
+            return;
+        }
+
+        let sources = self.node_module_register_sources(expr);
+        for source in sources.into_iter().filter(|source| !source.is_empty()) {
+            let destructured_names = loader_hook_exports_for_source(&source);
             self.dynamic_imports.push(DynamicImportInfo {
                 source,
                 span: expr.span,
-                destructured_names: Vec::new(),
+                destructured_names,
                 local_name: None,
                 is_speculative: false,
             });
+        }
+    }
+
+    fn node_module_register_sources(&self, call: &CallExpression<'_>) -> Vec<String> {
+        if let Some(source) = node_module_register_specifier(call) {
+            return vec![source];
+        }
+
+        let Some(first_arg) = call.arguments.first() else {
+            return Vec::new();
+        };
+        first_arg
+            .as_expression()
+            .map(|expr| self.node_module_register_sources_from_expression(expr))
+            .unwrap_or_default()
+    }
+
+    fn node_module_register_sources_from_expression(&self, expr: &Expression<'_>) -> Vec<String> {
+        match expr {
+            Expression::Identifier(ident) => {
+                self.node_module_register_url_binding(ident.name.as_str())
+            }
+            Expression::NewExpression(new_expr) => {
+                new_url_import_source(new_expr).into_iter().collect()
+            }
+            Expression::ConditionalExpression(conditional) => {
+                let mut sources =
+                    self.node_module_register_sources_from_expression(&conditional.consequent);
+                sources.extend(
+                    self.node_module_register_sources_from_expression(&conditional.alternate),
+                );
+                sources.sort();
+                sources.dedup();
+                sources
+            }
+            Expression::ParenthesizedExpression(paren) => {
+                self.node_module_register_sources_from_expression(&paren.expression)
+            }
+            Expression::TSAsExpression(ts_as) => {
+                self.node_module_register_sources_from_expression(&ts_as.expression)
+            }
+            Expression::TSSatisfiesExpression(ts_sat) => {
+                self.node_module_register_sources_from_expression(&ts_sat.expression)
+            }
+            _ => Vec::new(),
         }
     }
 
@@ -1512,6 +1626,13 @@ impl<'a> Visit<'a> for ModuleInfoExtractor {
                 continue;
             };
 
+            if let BindingPattern::BindingIdentifier(id) = &declarator.id {
+                let sources = self.node_module_register_sources_from_expression(init);
+                if !sources.is_empty() {
+                    self.record_node_module_register_url_binding(id.name.to_string(), sources);
+                }
+            }
+
             if let BindingPattern::BindingIdentifier(id) = &declarator.id
                 && let Expression::CallExpression(call) = init
             {
@@ -1857,16 +1978,9 @@ impl<'a> Visit<'a> for ModuleInfoExtractor {
         // not a file URL; the canonical __dirname idiom
         // `fileURLToPath(new URL('./', import.meta.url))` must not surface as an import.
         // See issue #399.
-        if let Expression::Identifier(callee) = &expr.callee
-            && callee.name == "URL"
-            && expr.arguments.len() == 2
-            && let Some(Argument::StringLiteral(path_lit)) = expr.arguments.first()
-            && is_meta_url_arg(&expr.arguments[1])
-            && (path_lit.value.starts_with("./") || path_lit.value.starts_with("../"))
-            && !path_lit.value.ends_with('/')
-        {
+        if let Some(source) = new_url_import_source(expr) {
             self.dynamic_imports.push(DynamicImportInfo {
-                source: path_lit.value.to_string(),
+                source,
                 span: expr.span,
                 destructured_names: Vec::new(),
                 local_name: None,

@@ -631,6 +631,134 @@ fn node_module_register_non_string_first_argument_ignored() {
 }
 
 #[test]
+fn node_module_register_new_url_binding_credits_loader_hook_exports() {
+    let info = parse_source(
+        "import { register } from 'node:module';\n\
+         const url = new URL('./hooks/json-loader.ts', import.meta.url);\n\
+         register(url);",
+    );
+    let loader = info
+        .dynamic_imports
+        .iter()
+        .find(|imp| {
+            imp.source == "./hooks/json-loader.ts"
+                && imp.destructured_names.iter().any(|name| name == "load")
+        })
+        .expect("register(url) should credit loader hook exports");
+
+    assert!(loader.destructured_names.contains(&"resolve".to_string()));
+    assert!(
+        loader
+            .destructured_names
+            .contains(&"initialize".to_string())
+    );
+}
+
+#[test]
+fn node_module_register_relative_string_credits_loader_hook_exports() {
+    let info = parse_source(
+        "import { register } from 'node:module';\n\
+         register('./hooks/json-loader.ts', import.meta.url);",
+    );
+
+    assert!(
+        info.dynamic_imports.iter().any(|imp| {
+            imp.source == "./hooks/json-loader.ts"
+                && ["initialize", "resolve", "load", "globalPreload"]
+                    .iter()
+                    .all(|name| imp.destructured_names.contains(&(*name).to_string()))
+        }),
+        "relative module.register specifiers should credit Node loader hooks"
+    );
+}
+
+#[test]
+fn node_module_register_conditional_url_binding_credits_both_loader_targets() {
+    let info = parse_source(
+        "import { register } from 'node:module';\n\
+         const srcUrl = new URL('./hooks/src-loader.ts', import.meta.url);\n\
+         const distUrl = new URL('./hooks/dist-loader.ts', import.meta.url);\n\
+         const url = process.env.SRC ? srcUrl : distUrl;\n\
+         register(url);",
+    );
+
+    for expected in ["./hooks/src-loader.ts", "./hooks/dist-loader.ts"] {
+        assert!(
+            info.dynamic_imports.iter().any(|imp| {
+                imp.source == expected && imp.destructured_names.contains(&"load".to_string())
+            }),
+            "{expected} should be credited as a registered Node loader target"
+        );
+    }
+}
+
+#[test]
+fn node_module_register_url_bindings_accumulate_across_shadowing() {
+    // The visitor keeps a module-flat map from local name to every URL ever
+    // bound to that name. When `url` is re-declared inside a nested block the
+    // outer specifier is preserved (over-credit, not replaced), so every
+    // `register(url)` call in the module credits BOTH loader files. This is
+    // safe: over-credit produces extra `DynamicImportInfo` entries whose
+    // sources either resolve correctly or fail to resolve (no-op). Losing the
+    // outer binding would silently miss real loader hooks for the post-block
+    // call.
+    let info = parse_source(
+        "import { register } from 'node:module';\n\
+         const url = new URL('./hooks/top-loader.ts', import.meta.url);\n\
+         if (enabled) {\n\
+           const url = new URL('./hooks/block-loader.ts', import.meta.url);\n\
+           register(url);\n\
+         }\n\
+         register(url);",
+    );
+
+    for expected in ["./hooks/top-loader.ts", "./hooks/block-loader.ts"] {
+        assert!(
+            info.dynamic_imports.iter().any(|imp| {
+                imp.source == expected && imp.destructured_names.contains(&"load".to_string())
+            }),
+            "{expected} should be credited with loader hook exports"
+        );
+    }
+}
+
+#[test]
+fn node_module_register_credits_legacy_loader_hook_exports() {
+    // Issue #589: include the legacy hook names alongside the current ones.
+    // Node 16.x with --experimental-loader and downstream forks still invoke
+    // `getFormat` / `getSource` / `transformSource`; crediting them is inert
+    // when the loader does not export them and prevents a false `unused-export`
+    // finding when it does.
+    let info = parse_source(
+        "import { register } from 'node:module';\n\
+         register('./hooks/json-loader.ts', import.meta.url);",
+    );
+    let loader = info
+        .dynamic_imports
+        .iter()
+        .find(|imp| imp.source == "./hooks/json-loader.ts" && !imp.destructured_names.is_empty())
+        .expect("relative module.register specifier should credit loader hook exports");
+
+    for legacy in ["getFormat", "getSource", "transformSource"] {
+        assert!(
+            loader.destructured_names.contains(&legacy.to_string()),
+            "{legacy} legacy hook should be credited so loader files that still \
+             export it survive `unused-export` detection. destructured_names={:?}",
+            loader.destructured_names
+        );
+    }
+
+    // `getGlobalPreload` was never a documented Node hook name (the documented
+    // form is `globalPreload`); confirm we are not inventing spurious names.
+    assert!(
+        !loader
+            .destructured_names
+            .contains(&"getGlobalPreload".to_string()),
+        "getGlobalPreload is not a hook name; do not credit it"
+    );
+}
+
+#[test]
 fn node_module_register_template_literal_specifier_supported() {
     let info = parse_source(
         "import { register } from 'node:module';\n\
