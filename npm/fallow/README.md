@@ -1,14 +1,18 @@
 # fallow
 
-Codebase intelligence for TypeScript and JavaScript, built in Rust.
+**Deterministic codebase intelligence for TypeScript and JavaScript.**
+
+Quality, risk, architecture, dependencies, duplication, and safe cleanup evidence for humans, CI, and agents.
 
 [![CI](https://github.com/fallow-rs/fallow/actions/workflows/ci.yml/badge.svg)](https://github.com/fallow-rs/fallow/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/fallow.svg)](https://www.npmjs.com/package/fallow)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/fallow-rs/fallow/blob/main/LICENSE)
 
-Static analysis finds what is connected. Runtime intelligence finds what actually runs. Both land in the same report. The free static layer analyzes your codebase for unused files, exports, dependencies, and types, detects circular dependencies, finds duplicated code blocks, surfaces complexity hotspots, and enforces architecture boundaries. An optional paid runtime layer (Fallow Runtime) adds production execution evidence so you can delete and refactor with confidence. **5-41x faster** than [knip](https://knip.dev) v5 (**2-18x faster** than knip v6), **8-29x faster** than [jscpd](https://github.com/kucherenko/jscpd) for duplication detection, with no Node.js runtime dependency.
+Fallow turns a JS/TS repository into a trusted quality report: health score, changed-code risk, hotspots, duplication, architecture issues, dependency hygiene, and cleanup opportunities.
 
-Static analysis is free and open source. Runtime intelligence is the paid team layer.
+It helps you answer: what changed, what got riskier, what should be reviewed, what should be refactored, and what can be safely removed. No AI inside the analyzer. Fallow produces deterministic findings, typed output contracts, and traceable explanations that downstream tools can trust.
+
+Static analysis is free and open source. An optional paid runtime layer (Fallow Runtime) adds production execution evidence. Rust-native, sub-second, 96 framework plugins, 5-41x faster than [knip](https://knip.dev) v5 (2-18x faster than knip v6), 8-29x faster than [jscpd](https://github.com/kucherenko/jscpd) for duplication detection, with no Node.js runtime dependency for analysis.
 
 ## Installation
 
@@ -36,31 +40,29 @@ import type { CheckOutput, FallowJsonOutput } from "fallow/types";
 
 The types are generated from the same schema as the VS Code extension and pin to the CLI version you install. See [docs.fallow.tools](https://docs.fallow.tools) for the full output contract.
 
-## Usage
+## Quick start
 
 ```bash
-fallow                           # All analyses -- zero config, sub-second
-fallow dead-code                 # Unused code only
-fallow dupes                     # Duplication detection -- find copy-paste clones
-fallow dupes --mode semantic     # Catch clones with renamed variables
-fallow health                    # Complexity metrics -- cyclomatic + cognitive
-fallow fix --dry-run             # Preview auto-removal of unused exports and deps
+npx fallow audit                 # PR-style audit: verdict pass / warn / fail
+npx fallow audit --format json   # Machine-readable audit (for CI and agents)
+npx fallow health --score        # Quality score and grade
+npx fallow                       # Full codebase analysis: health + duplication + cleanup
+npx fallow dead-code             # Cleanup-specific findings
+npx fallow fix --dry-run         # Preview automatic cleanup
 ```
 
-## What it finds
+## What Fallow reports
 
-- **Unused files** -- not reachable from any entry point
-- **Unused exports** -- exported symbols never imported elsewhere
-- **Unused types** -- type aliases and interfaces never referenced
-- **Unused dependencies** -- packages in `dependencies` never imported
-- **Unused devDependencies** -- dev packages not referenced
-- **Unused enum members** -- enum values never referenced
-- **Unused class members** -- class methods and properties never referenced (tracks instance usage: `const svc = new MyService(); svc.greet()` counts `greet` as used)
-- **Unresolved imports** -- import specifiers that cannot be resolved
-- **Unlisted dependencies** -- imported packages missing from `package.json`
-- **Duplicate exports** -- same symbol exported from multiple modules
-- **Circular dependencies** -- import cycles in the module graph
-- **Type-only dependencies** -- production deps only used via `import type`
+- **Quality score** -- compact health score with grade and trend delta when snapshot history is enabled
+- **PR risk** -- changed-code analysis with pass / warn / fail verdict and per-finding attribution
+- **Hotspots** -- functions, files, and packages combining complexity, churn, size, and coupling
+- **Duplication** -- clone families across four detection modes (strict, mild, weak, semantic)
+- **Architecture** -- circular dependencies, boundary violations, re-export chains
+- **Dependency hygiene** -- unused, unlisted, unresolved, duplicate, and type-only deps; pnpm catalog and overrides
+- **Cleanup opportunities** -- unused files, exports, types, enum members, class members, stale suppressions
+- **Runtime intelligence (optional, paid)** -- hot paths, cold code, runtime-weighted health, stale flags
+
+Cleanup opportunities are findings that look safe to review for removal because no graph evidence supports keeping them. Dead code is one category of cleanup, not the product identity.
 
 ## Code duplication
 
@@ -71,11 +73,24 @@ fallow dupes --threshold 5         # Fail CI if duplication exceeds 5%
 fallow dupes --save-baseline       # Save current duplication as baseline
 ```
 
-4 detection modes (strict, mild, weak, semantic), clone family grouping with refactoring suggestions, baseline tracking, and cross-language TS/JS matching.
+Four detection modes (strict, mild, weak, semantic), clone family grouping with refactoring suggestions, baseline tracking, and cross-language TS/JS matching.
+
+## Built for agents
+
+Fallow gives AI agents structured repo truth instead of forcing them to infer everything from grep. Agents call the CLI or the MCP server to answer:
+
+- Who imports this symbol?
+- Why is this export considered used or unused?
+- What changed in this PR?
+- Which files are risky to touch?
+- What duplicate siblings exist?
+- What cleanup action is safest?
+
+Every issue in `--format json` carries a machine-actionable `actions` array with an `auto_fixable` flag so agents can self-correct.
 
 ## Framework support
 
-95 built-in plugins covering Next.js, Nuxt, Remix, Qwik, SvelteKit, Gatsby, Astro, Angular, NestJS, AdonisJS, Expo Router, Vite, Webpack, Vitest, Jest, Playwright, Cypress, Storybook, ESLint, TypeScript, Tailwind, UnoCSS, Prisma, Drizzle, Convex, Turborepo, Hardhat, and many more. Auto-detected from your `package.json`.
+96 built-in plugins covering Next.js, Nuxt, Remix, Qwik, SvelteKit, Gatsby, Astro, Angular, NestJS, AdonisJS, Expo Router, Vite, Webpack, Vitest, Jest, Playwright, Cypress, Storybook, ESLint, TypeScript, Tailwind, UnoCSS, Prisma, Drizzle, Convex, Turborepo, Hardhat, and many more. Auto-detected from your `package.json`.
 
 ## Configuration
 

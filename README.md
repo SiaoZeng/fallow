@@ -7,11 +7,10 @@
 </p>
 
 <p align="center">
-  <strong>Codebase intelligence for TypeScript & JavaScript.</strong><br>
-  Free static analysis for unused code, duplication, complexity, and architecture drift.<br>
-  Optional runtime intelligence for hot paths, cold paths, and runtime-backed code decisions.<br>
-  <strong>Built for AI-assisted development. No AI inside.</strong><br>
-  <strong>Rust-native. Zero config. Sub-second.</strong>
+  <strong>Deterministic codebase intelligence for TypeScript and JavaScript.</strong><br>
+  Quality, risk, architecture, dependencies, duplication, and safe cleanup evidence for humans, CI, and agents.<br>
+  Static analysis is free and open source. Optional runtime intelligence (Fallow Runtime) adds production execution evidence.<br>
+  <strong>Rust-native. Zero config. Sub-second. No AI inside the analyzer.</strong>
 </p>
 
 <p align="center">
@@ -25,42 +24,82 @@
 
 ---
 
+Fallow turns a JS/TS repository into a trusted quality report: health score, changed-code risk, hotspots, duplication, architecture issues, dependency hygiene, and cleanup opportunities. It helps you answer:
+
+- What changed?
+- What got riskier?
+- What should I review?
+- What should I refactor?
+- What can be safely removed?
+
+Fallow is built for maintainers, CI pipelines, editors, and AI agents that need structured evidence instead of guesses. No AI inside the analyzer. Fallow produces deterministic findings, typed output contracts, and traceable explanations that downstream tools can trust.
+
+## Quick start
+
+Run a changed-code audit:
+
 ```bash
-npx fallow --summary
+npx fallow audit
 ```
 
+Example output:
+
 ```
-Dead Code Summary
+Audit scope: 7 changed files vs main
 
-      12  Unused files
-      47  Unused exports
-       8  Unused types
-       3  Unused dependencies
-       2  Circular dependencies
+-- Dead Code ---------------------------------------
 
-      72  Total
+x 7 unused dependencies · 14 dev/optional dependencies
+  21 issues · 1 suppressed · 0 stale suppressions
 
-Duplication Summary
+-- Duplication -------------------------------------
 
-      18  Clone families
-      53  Clone groups
-   2,140  Duplicated lines
-    4.2%  Duplication rate
+x 3 clone families touching changed files
 
-Health Summary
+-- Complexity --------------------------------------
 
-     612  Functions analyzed
-       9  Above threshold
-    89.4  Average maintainability (good)
+! 2 changed functions above threshold
 ```
 
-**Static analysis is free and open source. Runtime intelligence is optional.**
+Cleanup opportunities include unused files, unused exports, unused dependencies, stale suppressions, and other code that no longer appears to carry product value.
+
+For machine-readable output:
+
+```bash
+npx fallow audit --format json
+```
+
+For quality scoring and refactor targets:
+
+```bash
+npx fallow health --score --hotspots --targets
+```
+
+For cleanup-specific findings:
+
+```bash
+npx fallow dead-code
+```
 
 96 framework plugins. No Node.js runtime required for static analysis. No config needed for the first run.
 
-Fallow builds a project-wide understanding of your TS/JS codebase instead of checking one file at a time. Use it to review AI-generated changes faster, clean up dead code, reduce duplication, find risky complexity, and enforce architecture boundaries. Add the runtime layer when you want to know what actually executed in production.
+## What is Fallow?
 
-**Fallow is the codebase truth layer your coding agent can call. It is not an AI assistant.**
+Fallow is a codebase intelligence engine for TypeScript and JavaScript projects.
+
+It analyzes your repository as a system, not just as a list of files. It connects static structure, dependency relationships, duplication, complexity, architecture boundaries, package hygiene, and optional runtime evidence into one quality report.
+
+Fallow helps teams:
+
+- review risky pull requests before they merge
+- track quality trends over time
+- find architectural hotspots
+- understand dependency hygiene
+- detect duplicated logic
+- explain why code is used, unused, risky, or safe to remove
+- provide structured repo context to AI agents and editor tools
+
+Linters check files. TypeScript checks types. Fallow checks the codebase. Fallow does not use AI to invent findings. It produces deterministic evidence that humans and agents can inspect.
 
 ## Install
 
@@ -81,44 +120,84 @@ npm install @fallow-cli/fallow-node   # or: pnpm/yarn/bun add @fallow-cli/fallow
 ```ts
 import { detectDeadCode, detectDuplication, computeHealth } from '@fallow-cli/fallow-node';
 
-const deadCode = await detectDeadCode({ root: process.cwd() });
+const findings = await detectDeadCode({ root: process.cwd() });
 const dupes = await detectDuplication({ root: process.cwd(), mode: 'mild', minTokens: 30 });
 const health = await computeHealth({ root: process.cwd(), score: true, ownershipEmails: 'handle' });
 ```
 
-## Start here
+## What Fallow reports
+
+### Quality score
+
+A compact health score for the current state of the repository, with targets for maintainability, complexity, duplication, dependency hygiene, and architecture.
+
+### PR risk
+
+Changed-code analysis (`fallow audit`) that highlights files and symbols most likely to need review before merge. Returns a verdict (pass / warn / fail) and an attribution split between findings the PR introduced and pre-existing ones.
+
+### Hotspots
+
+Functions, files, and packages that combine complexity, churn, size, coupling, and (with the runtime layer) runtime importance.
+
+### Duplication
+
+Clone families and duplicated implementation patterns that increase maintenance cost. Four detection modes from exact token match to semantic clones with renamed variables.
+
+### Architecture
+
+Circular dependencies, boundary violations across layers and modules, re-export chains, and other dependency-graph issues. Zero-config presets for bulletproof, layered, hexagonal, and feature-sliced architectures.
+
+### Dependency hygiene
+
+Unused dependencies, unresolved imports, duplicate exports, unlisted imports, type-only production deps, test-only production deps, and pnpm catalog and overrides hygiene.
+
+### Cleanup opportunities
+
+Unused files, unused exports, unused types, unused enum members, unused class members, stale suppression comments, and code paths that appear safe to review for removal. Opt-in API hygiene checks such as private type leaks live here too.
+
+### Runtime intelligence (optional)
+
+Static analysis answers what is connected. Runtime intelligence answers what actually ran in production. Hot paths, cold code, runtime-weighted health, stale flags, runtime-backed PR review. See the [Runtime intelligence](#runtime-intelligence-optional) section below.
+
+### Agent-ready context
+
+Structured JSON, an MCP server, and an LSP for answering "what depends on this?", "why is this used?", "what changed?", and "what action is safest?".
+
+## Built for agents
+
+Fallow gives AI agents structured repo truth instead of forcing them to infer everything from grep.
+
+Agents can ask:
+
+- Who imports this symbol?
+- Why is this export considered used?
+- Why is this export considered unused?
+- What changed in this PR?
+- Which files are risky to touch?
+- Which files are architectural hotspots?
+- What duplicate siblings exist?
+- What cleanup action is safest?
+- What evidence supports this finding?
+
+Fallow exposes this through JSON output, typed output contracts (`import type { CheckOutput } from "fallow/types"`), the MCP server, and the LSP. Every issue in `--format json` carries a machine-actionable `actions` array with an `auto_fixable` flag so agents can self-correct.
+
+Common agent workflow:
+
+1. generate or edit code
+2. run `fallow audit --format json`
+3. inspect findings and per-issue `actions`
+4. apply safe fixes or adjust the patch before opening a PR
+5. hand the result to a human reviewer with better evidence
 
 ```bash
-fallow                      # Dead code + duplication + health
-fallow dead-code            # Cleanup candidates
-fallow dupes                # Repeated logic
-fallow health               # Complexity + refactor targets
-fallow fix --dry-run        # Preview automatic cleanup
+npx fallow audit --format json
+npx fallow --format json
+npx fallow fix --dry-run --format json
 ```
 
-## What it finds
+For full adoption instead of one-off review, see the [Fallow compliance happy path](https://github.com/fallow-rs/fallow/blob/main/docs/fallow-compliance.md). It defines the end state and includes a copy-paste agent onboarding prompt.
 
-- **Dead code**: unused files, exports, dependencies, types, cycles, boundaries, stale suppressions, unused pnpm `catalog:` entries, empty named pnpm catalog groups, unresolved pnpm `catalog:` references (a `package.json` references a catalog that does not declare the package, so `pnpm install` would fail), unused or misconfigured pnpm `overrides:` entries (an override forces a version no workspace package declares or resolves in `pnpm-lock.yaml`, or an override key/value is malformed), GraphQL documents linked by `#import`, plus opt-in API hygiene checks such as private type leaks
-- **Duplication**: repeated blocks from exact to semantic clones
-- **Complexity**: high-risk functions, file scores, hotspots, and refactor targets
-- **Architecture drift**: boundary violations across layers and modules
-
-## Why Fallow exists
-
-Linters check files. TypeScript checks types. Fallow checks the codebase.
-
-It builds a module graph across the whole project so it can find problems that file-local tools cannot:
-
-| What | Linter | Fallow |
-|---|---|---|
-| Unused variable in a function | yes | no |
-| Unused export that nothing imports | no | yes |
-| File that nothing imports | no | yes |
-| Circular dependency across modules | no | yes |
-| Duplicate code blocks across files | no | yes |
-| Dependency in package.json never imported | no | yes |
-
-[Full comparison: fallow vs ESLint, Biome, knip, ts-prune](https://docs.fallow.tools/explanations/fallow-vs-linters)
+See [Agent integration](https://docs.fallow.tools/integrations/mcp) for MCP setup and the full list of structured tools.
 
 ## Why teams using AI need Fallow
 
@@ -126,48 +205,29 @@ AI accelerates code creation. It does not eliminate review, cleanup, or architec
 
 When Claude Code, Codex, Cursor, or other tools generate changes, teams still need to know:
 
-- did this introduce dead code?
+- did this introduce risky complexity?
 - did it duplicate logic that already existed?
-- did complexity get worse?
-- did the change cross a boundary it should not cross?
+- did the change cross an architectural boundary it should not cross?
+- did it leave behind unused code or stale dependencies?
 - is this code on a hot path or a cold one?
 - what should the reviewer read closely first?
 
 Fallow answers those questions with deterministic, graph-based analysis and structured output, so both humans and agents can act on facts instead of guesses.
 
-## How agents use Fallow
-
-Agents do not need to guess from limited context. They can call Fallow directly via the CLI or MCP.
-
-Common agent workflow:
-
-1. generate or edit code
-2. run `fallow --format json`
-3. inspect dead code, duplication, health findings, and per-issue `actions`
-4. apply safe fixes or adjust the patch before opening a PR
-5. hand the result to a human reviewer with better evidence
-
-```bash
-npx fallow --format json
-npx fallow audit --format json
-npx fallow fix --dry-run --format json
-```
-
-For full adoption instead of one-off review, see the [Fallow compliance happy path](https://github.com/fallow-rs/fallow/blob/main/docs/fallow-compliance.md). It defines the end state clearly: repo-wide dead code and duplication findings are fixed or explicitly documented, `fallow health` reaches `Above threshold: 0` for the repo's chosen thresholds, and `fallow audit` becomes the change-set gate once adoption is wired in. It also includes a copy-paste agent onboarding prompt.
-
-See [Agent integration](https://docs.fallow.tools/integrations/mcp) for MCP setup and the full list of structured tools.
-
 ## More static commands
 
 ```bash
+fallow                       # Full codebase analysis: cleanup + duplication + health
 fallow audit                 # Audit changed files (verdict: pass/warn/fail)
+fallow health                # Complexity + refactor targets
+fallow dupes                 # Repeated logic
+fallow dead-code             # Cleanup candidates
 fallow explain unused-export # Explain a rule without analyzing
-fallow --production-health   # Combined mode: production health, full dead-code/dupes
 fallow watch                 # Re-analyze on file changes
-fallow fix                   # Apply automatic cleanup after previewing
+fallow fix --dry-run         # Preview automatic cleanup
 ```
 
-Combined mode and `fallow audit` support per-analysis production mode. Precedence is CLI flags, then environment variables, then config:
+Combined mode (`fallow`) and `fallow audit` support per-analysis production mode. Precedence is CLI flags, then environment variables, then config:
 
 ```jsonc
 {
@@ -198,9 +258,9 @@ FALLOW_PRODUCTION=false FALLOW_PRODUCTION_HEALTH=true fallow
 fallow --production
 ```
 
-## Dead code
+## Cleanup opportunities
 
-Finds unused files, exports, dependencies, types, enum members, class members, unresolved imports, unlisted dependencies, duplicate exports, circular dependencies (including cross-package cycles in monorepos), boundary violations, type-only dependencies, test-only production dependencies, and stale suppression comments. Workspace package dependencies are checked like external packages, so unused or undeclared internal package edges are visible in monorepos. Entry points are auto-detected from package.json fields, framework conventions, and plugin patterns. Arrow-wrapped dynamic imports (`React.lazy`, `loadable`, `defineAsyncComponent`) are tracked as references. Script multiplexers (`concurrently`, `npm-run-all`) are analyzed to discover transitive script dependencies. JSDoc tags (`@public`, `@internal`, `@beta`, `@alpha`, `@expected-unused`) control export visibility. Private type leaks are currently opt-in API hygiene findings via `--private-type-leaks` or the `private-type-leaks` rule.
+Cleanup opportunities are code that no longer appears to carry product value: unused files, exports, dependencies, types, enum members, class members, unresolved imports, unlisted dependencies, duplicate exports, circular dependencies (including cross-package cycles in monorepos), boundary violations, type-only dependencies, test-only production dependencies, and stale suppression comments. Workspace package dependencies are checked like external packages, so unused or undeclared internal package edges are visible in monorepos. Entry points are auto-detected from package.json fields, framework conventions, and plugin patterns. Arrow-wrapped dynamic imports (`React.lazy`, `loadable`, `defineAsyncComponent`) are tracked as references. Script multiplexers (`concurrently`, `npm-run-all`) are analyzed to discover transitive script dependencies. JSDoc tags (`@public`, `@internal`, `@beta`, `@alpha`, `@expected-unused`) control export visibility. Private type leaks are currently opt-in API hygiene findings via `--private-type-leaks` or the `private-type-leaks` rule.
 
 ```bash
 fallow dead-code                          # All dead code issues
@@ -310,7 +370,7 @@ Read more: [Static vs runtime intelligence](https://docs.fallow.tools/explanatio
 
 ## Audit
 
-Quality gate for AI-generated code and PRs. Combines dead code + complexity + duplication scoped to changed files.
+PR risk gate for human and AI-generated code. Combines changed-file cleanup findings from the dead-code pass with changed-file complexity and duplication findings, then emits a verdict.
 
 ```bash
 fallow audit                              # Auto-detects base branch
@@ -548,14 +608,15 @@ See the [full configuration reference](https://docs.fallow.tools/configuration/o
 
 [Full plugin list](https://docs.fallow.tools/frameworks/built-in) -- missing one? Add a [custom plugin](https://docs.fallow.tools/frameworks/custom-plugins) or [open an issue](https://github.com/fallow-rs/fallow/issues).
 
-## Editor & AI support
+## Editor and agent integrations
 
-Fallow is not an AI assistant. It is the codebase truth layer your assistant can call.
+Fallow is not an AI assistant. It is the deterministic codebase intelligence layer that your assistant, your editor, and your CI pipeline can call.
 
 - **VS Code extension** -- tree views, status bar, one-click fixes, auto-download LSP binary ([Marketplace](https://github.com/fallow-rs/fallow/tree/main/editors/vscode))
 - **LSP server** -- real-time diagnostics, hover info, code actions, Code Lens with reference counts
 - **Agent Skill + MCP server** -- version-matched AI agent guidance ships in the npm package, with MCP integration for Claude Code, Codex, Cursor, Windsurf, and other agents ([fallow-skills](https://github.com/fallow-rs/fallow-skills))
 - **JSON `actions` array** -- every issue in `--format json` output includes fix suggestions with `auto_fixable` flag, so agents can self-correct
+- **Typed output contract** -- `import type { CheckOutput } from "fallow/types"` version-pinned to your installed CLI
 
 ## Performance
 
@@ -607,7 +668,7 @@ Set `ignoreExportsUsedInFile: true` when exported helpers should stay quiet whil
 
 ## Limitations
 
-fallow uses syntactic analysis -- no type information. This is what makes it fast, but type-level dead code is out of scope. Use [inline suppression comments](#suppressing-findings) or [`ignoreExports`](https://docs.fallow.tools/configuration/overview#ignoring-specific-exports) for edge cases.
+fallow uses syntactic analysis -- no type information. This is what makes it fast and deterministic, but findings that require a type-checker (cross-module type narrowing, conditional types, type-level reachability) are out of scope. Use [inline suppression comments](#suppressing-findings) or [`ignoreExports`](https://docs.fallow.tools/configuration/overview#ignoring-specific-exports) for edge cases.
 
 ## Documentation
 
