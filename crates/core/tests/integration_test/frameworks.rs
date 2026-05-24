@@ -1458,7 +1458,7 @@ fn fumadocs_source_config_content_roots_and_virtual_imports_are_used() {
                 .strip_prefix(root)
                 .unwrap_or(&file.file.path)
                 .to_string_lossy()
-                .to_string()
+                .replace('\\', "/")
         })
         .collect();
     let unresolved_specs: Vec<&str> = results

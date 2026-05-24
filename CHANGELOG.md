@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.80.0] - 2026-05-24
+
 ### Added
 
 - **Inline review comments can include optional rule guidance.** Set `FALLOW_REVIEW_GUIDANCE=true` (or GitHub Action `review-guidance: true`) to append collapsed "What to do" blocks to `review-github` / `review-gitlab` comments using the existing rule guides from `fallow explain`. The default remains off so existing review bodies stay stable. `fallow/unused-type` review comments now also get the same safe one-line export-stripping suggestions as `unused-export` when the source line is directly fixable. (Closes [#659](https://github.com/fallow-rs/fallow/issues/659).)
@@ -26,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **TanStack Start `:v` virtual modules no longer surface as unlisted dependencies.** Before, imports such as `tanstack-start-manifest:v` and `tanstack-start-injected-head-scripts:v` were treated as package names in TanStack Start projects. After, the TanStack Router / Start plugin registers those colon-prefixed runtime modules as framework virtual modules, so they are skipped by unlisted-dependency and unresolved-import reporting only when the TanStack plugin is active. Thanks [@BartWaardenburg](https://github.com/BartWaardenburg) for the report. (Closes [#636](https://github.com/fallow-rs/fallow/issues/636).)
 
 - **Node package-script and forked runner entrypoints no longer report as unused.** Package scripts such as `node scripts/process-messages` now resolve extensionless directory paths to `scripts/process-messages/index.*` after exact-file and source-extension probing. Statically resolvable local `child_process.fork()` targets from proven `node:child_process` / `child_process` imports or requires are also credited as dynamic entrypoints, including the `const runner = path.resolve(filename, "../runner.js"); fork(runner)` shape where `filename` comes from `fileURLToPath(import.meta.url)`. The extractor cache version is bumped so warm caches re-extract files with forked runner targets. (Closes [#638](https://github.com/fallow-rs/fallow/issues/638).)
+
+- **Windows CI is green again.** The Fumadocs integration test now normalizes `\\` to `/` on the `unused_files` paths it asserts against, restoring the Windows leg of `ci.yml`. No user-visible behavior change.
 
 ## [2.79.0] - 2026-05-22
 
@@ -2499,7 +2503,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--changed-since` and `--fail-on-issues` for CI
 - Cross-workspace resolution for npm/yarn/pnpm workspaces
 
-[Unreleased]: https://github.com/fallow-rs/fallow/compare/v2.79.0...HEAD
+[Unreleased]: https://github.com/fallow-rs/fallow/compare/v2.80.0...HEAD
+[2.80.0]: https://github.com/fallow-rs/fallow/compare/v2.79.0...v2.80.0
 [2.79.0]: https://github.com/fallow-rs/fallow/compare/v2.78.1...v2.79.0
 [2.78.1]: https://github.com/fallow-rs/fallow/compare/v2.78.0...v2.78.1
 [2.78.0]: https://github.com/fallow-rs/fallow/compare/v2.77.0...v2.78.0
