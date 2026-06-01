@@ -1106,7 +1106,9 @@ fn crap_coverage_note(report: &crate::health_types::HealthReport) -> Option<Stri
             }
             _ => String::new(),
         };
-        return Some(format!("CRAP scores use Istanbul coverage data{match_info}."));
+        return Some(format!(
+            "CRAP scores use Istanbul coverage data{match_info}."
+        ));
     }
 
     Some(
