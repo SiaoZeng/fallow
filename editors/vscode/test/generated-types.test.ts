@@ -23,7 +23,6 @@ import type {
 describe("generated/output-contract.d.ts", () => {
   it("exposes CombinedOutput with optional check/dupes/health branches", () => {
     const sample: CombinedOutput = {
-      kind: "combined",
       schema_version: 7,
       version: "0.0.0-test",
       elapsed_ms: 0,
@@ -35,7 +34,6 @@ describe("generated/output-contract.d.ts", () => {
 
   it("requires the schema_version / version / elapsed_ms / total_issues envelope on CheckOutput", () => {
     const sample: CheckOutput = {
-      kind: "dead-code",
       schema_version: 7,
       version: "0.0.0-test",
       elapsed_ms: 0,

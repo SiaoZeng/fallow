@@ -76,7 +76,6 @@ interface TestRange {
 }
 
 const emptyCheck = (): FallowCheckResult => ({
-  kind: "dead-code",
   schema_version: 7,
   version: "0.0.0-test",
   elapsed_ms: 0,

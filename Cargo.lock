@@ -400,6 +400,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
+name = "cobs"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0fa961b519f0b462e3a3b4a34b64d119eeaca1d59af726fe450bbba07a9fc0a1"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -518,6 +527,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8b2a41393f66f16b0823bb79094d54ac5fbd34ab292ddafb9a0456ac9f87d201"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "crc32fast"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9481c1c90cbf2ac953f07c8d4a58aa3945c425b7185c9154d67a65e4230da511"
+dependencies = [
+ "cfg-if",
 ]
 
 [[package]]
@@ -812,6 +830,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 
 [[package]]
+name = "embedded-io"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef1a6892d9eef45c8fa6b9e0086428a2cca8491aca8f787c534a3d6d0bcb3ced"
+
+[[package]]
+name = "embedded-io"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
+
+[[package]]
 name = "encode_unicode"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -870,7 +900,7 @@ dependencies = [
  "sha2 0.11.0",
  "signal-hook",
  "similar 3.1.0",
- "srcmap-sourcemap 0.3.7",
+ "srcmap-sourcemap",
  "syn",
  "tempfile",
  "toml",
@@ -1103,6 +1133,16 @@ name = "fixedbitset"
 version = "0.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d674e81391d1e1ab681a28d99df07927c6d4aa5b027d7da16ba32d1d21ecd99"
+
+[[package]]
+name = "flate2"
+version = "1.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
+dependencies = [
+ "crc32fast",
+ "miniz_oxide",
+]
 
 [[package]]
 name = "float-cmp"
@@ -1837,6 +1877,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
 dependencies = [
  "adler2",
+ "simd-adler32",
 ]
 
 [[package]]
@@ -2045,6 +2086,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d211803b9b6b570f68772237e415a029d5a50c65d382910b879fb19d3271f94d"
 
 [[package]]
+name = "oxc-browserslist"
+version = "3.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed057e45c57a87f33e7942215417089e3c038ba6c5dd5e4a6b3ecaa09bbd58d8"
+dependencies = [
+ "flate2",
+ "postcard",
+ "rustc-hash 2.1.2",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "oxc-miette"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2147,10 +2201,23 @@ dependencies = [
 ]
 
 [[package]]
-name = "oxc_coverage_instrument"
-version = "0.5.1"
+name = "oxc_compat"
+version = "0.126.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1f04a0e58552e31cc5736f2764476c425ed35742f0ea8a3473cffaf94c66cb59"
+checksum = "f77da0005857510f28764642bfd0f299924dbd5169c6d35752f754a0c35062ce"
+dependencies = [
+ "cow-utils",
+ "oxc-browserslist",
+ "oxc_syntax",
+ "rustc-hash 2.1.2",
+ "serde",
+]
+
+[[package]]
+name = "oxc_coverage_instrument"
+version = "0.7.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4bb65d227afca44320dcff101b568751cdad251b7e2b8374e0001ef2f6802526"
 dependencies = [
  "oxc_allocator",
  "oxc_ast",
@@ -2163,29 +2230,30 @@ dependencies = [
  "oxc_sourcemap",
  "oxc_span",
  "oxc_syntax",
+ "oxc_transformer",
  "oxc_traverse",
- "serde",
  "serde_json",
+ "sha2 0.11.0",
  "srcmap-remapping",
- "srcmap-sourcemap 0.3.6",
+ "srcmap-sourcemap",
 ]
 
 [[package]]
 name = "oxc_coverage_source_maps"
-version = "0.1.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "03344d79cd2f8f46a2e7ef50c4051196cf76c2adc4eac73edd13ef0bd4d6a300"
+checksum = "23274ed8594c1cd6c82675e86833a15ecb498714ffa05b35f38466af4f34ef8f"
 dependencies = [
  "oxc_coverage_types",
  "serde_json",
- "srcmap-sourcemap 0.3.6",
+ "srcmap-sourcemap",
 ]
 
 [[package]]
 name = "oxc_coverage_types"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc8dd266b15f6ef3dc684efb900afdb8b4f519253a0620224b6f1908da64e0e2"
+checksum = "1665a1ece2c4449dea2c5477f38d97f6b6c6d5587b092eb888fbfc97ca5317b1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2193,9 +2261,9 @@ dependencies = [
 
 [[package]]
 name = "oxc_coverage_v8"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0052d141446971582d1ade9e395ce37c1f113b4c90e12b86d004e2aaa4548ae6"
+checksum = "e20928420ad2dd9763d015c4d9b3b5b9c87d998e1d95069d52891a90745e856e"
 dependencies = [
  "oxc_coverage_types",
  "serde",
@@ -2207,6 +2275,9 @@ name = "oxc_data_structures"
 version = "0.126.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fdea5ebbfe376448e83f9749828f31a0ad9b85a1b01e31f70597565b74f809a"
+dependencies = [
+ "ropey",
+]
 
 [[package]]
 name = "oxc_diagnostics"
@@ -2397,6 +2468,36 @@ dependencies = [
  "oxc_str",
  "phf",
  "unicode-id-start",
+]
+
+[[package]]
+name = "oxc_transformer"
+version = "0.126.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0d6604b8394fe33df53a4641388d4e8c36efdaf36c8e0e1d60313c0b554e7c2"
+dependencies = [
+ "base64",
+ "compact_str",
+ "indexmap",
+ "itoa",
+ "memchr",
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_ast_visit",
+ "oxc_compat",
+ "oxc_data_structures",
+ "oxc_diagnostics",
+ "oxc_ecmascript",
+ "oxc_regular_expression",
+ "oxc_semantic",
+ "oxc_span",
+ "oxc_str",
+ "oxc_syntax",
+ "oxc_traverse",
+ "rustc-hash 2.1.2",
+ "serde",
+ "serde_json",
+ "sha1",
 ]
 
 [[package]]
@@ -2594,6 +2695,18 @@ name = "portable-atomic"
 version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c33a9471896f1c69cecef8d20cbe2f7accd12527ce60845ff44c153bb2a21b49"
+
+[[package]]
+name = "postcard"
+version = "1.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6764c3b5dd454e283a30e6dfe78e9b31096d9e32036b5d1eaac7a6119ccb9a24"
+dependencies = [
+ "cobs",
+ "embedded-io 0.4.0",
+ "embedded-io 0.6.1",
+ "serde",
+]
 
 [[package]]
 name = "potential_utf"
@@ -2880,6 +2993,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ropey"
+version = "1.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93411e420bcd1a75ddd1dc3caf18c23155eda2c090631a85af21ba19e97093b5"
+dependencies = [
+ "smallvec",
+ "str_indices",
+]
+
+[[package]]
 name = "rustc-demangle"
 version = "0.1.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3136,6 +3259,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha1"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aacc4cc499359472b4abe1bf11d0b12e688af9a805fa5e3016f9a386dc2d0214"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.3.0",
+ "digest 0.11.3",
+]
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3200,6 +3334,12 @@ checksum = "77549399552de45a898a580c1b41d445bf730df867cc44e6c0233bbc4b8329de"
 dependencies = [
  "rand_core 0.6.4",
 ]
+
+[[package]]
+name = "simd-adler32"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "703d5c7ef118737c72f1af64ad2f6f8c5e1921f818cdcb97b8fe6fc69bf66214"
 
 [[package]]
 name = "simd-json"
@@ -3267,75 +3407,51 @@ dependencies = [
 
 [[package]]
 name = "srcmap-codec"
-version = "0.3.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb59e0dc99488e5df4228114213cc2cfc1fa6071ab1b90706ba999fba866bee8"
-
-[[package]]
-name = "srcmap-codec"
 version = "0.3.7"
-source = "git+https://github.com/fallow-rs/srcmap?tag=v0.3.7#7ed61678f530bac7d28536dfecffe1739896f5de"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3055ba823d3081f805f5313d265475f34d1506d350f1f1bf4e9b15a47a5ddabd"
 
 [[package]]
 name = "srcmap-generator"
-version = "0.3.6"
+version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "217a648dc740bafed246c92226fbbffde1d9ee1ab1cb7c7f7dd4d3f4a140a725"
+checksum = "44cf229a462ea05040d2b9d4eec8134055888721b657c4c5752edbdb65fafdf8"
 dependencies = [
  "rustc-hash 2.1.2",
- "srcmap-codec 0.3.6",
- "srcmap-scopes 0.3.6",
- "srcmap-sourcemap 0.3.6",
+ "srcmap-codec",
+ "srcmap-scopes",
+ "srcmap-sourcemap",
 ]
 
 [[package]]
 name = "srcmap-remapping"
-version = "0.3.6"
+version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "54bfd3f72f8d61b4992eac122212a6afc60388d4df703ca027379244bae7daab"
+checksum = "e4e547cb651c93a5af5cf78223ad176d912c905db4423a3bed3bd680bd990f9a"
 dependencies = [
  "srcmap-generator",
- "srcmap-sourcemap 0.3.6",
-]
-
-[[package]]
-name = "srcmap-scopes"
-version = "0.3.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45412ac7dcc91d43395072a2aa2480022963895c9791e52b519ab922e03c401a"
-dependencies = [
- "srcmap-codec 0.3.6",
+ "srcmap-sourcemap",
 ]
 
 [[package]]
 name = "srcmap-scopes"
 version = "0.3.7"
-source = "git+https://github.com/fallow-rs/srcmap?tag=v0.3.7#7ed61678f530bac7d28536dfecffe1739896f5de"
-dependencies = [
- "srcmap-codec 0.3.7",
-]
-
-[[package]]
-name = "srcmap-sourcemap"
-version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6cfb6ac3ef26caf22443bda4db17468e936a4adeaf073ac5235d9d367d98115d"
+checksum = "a59173df4412d58131fdf2dcf29e2a2ddd19dd2a37a4ac47e5f4eb46822545a4"
 dependencies = [
- "serde",
- "serde_json",
- "srcmap-codec 0.3.6",
- "srcmap-scopes 0.3.6",
+ "srcmap-codec",
 ]
 
 [[package]]
 name = "srcmap-sourcemap"
 version = "0.3.7"
-source = "git+https://github.com/fallow-rs/srcmap?tag=v0.3.7#7ed61678f530bac7d28536dfecffe1739896f5de"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0cc3738fff4071fcfc3c74e33fca910fa14de9c183d5fe60264e35d61bb076d"
 dependencies = [
  "serde",
  "serde_json",
- "srcmap-codec 0.3.7",
- "srcmap-scopes 0.3.7",
+ "srcmap-codec",
+ "srcmap-scopes",
 ]
 
 [[package]]
@@ -3349,6 +3465,12 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
+
+[[package]]
+name = "str_indices"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d08889ec5408683408db66ad89e0e1f93dff55c73a4ccc71c427d5b277ee47e6"
 
 [[package]]
 name = "strsim"

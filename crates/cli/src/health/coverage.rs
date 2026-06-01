@@ -20,7 +20,7 @@ use globset::GlobSet;
 use oxc_coverage_instrument::{FileCoverage, FnEntry, Location, Position};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Deserialize;
-use srcmap_sourcemap_037::{GeneratedLocation, GeneratedOffsetLookup, SourceMap};
+use srcmap_sourcemap::{GeneratedLocation, GeneratedOffsetLookup, SourceMap};
 use tempfile::TempDir;
 use url::Url;
 
@@ -128,7 +128,7 @@ impl GeneratedPositionLookup<'_> {
         &self,
         sourcemap: &SourceMap,
         v8_source_offset: u32,
-    ) -> Option<srcmap_sourcemap_037::OriginalLocation> {
+    ) -> Option<srcmap_sourcemap::OriginalLocation> {
         let position = self.generated_position_for_offset(v8_source_offset)?;
         sourcemap.original_position_for(position.line, position.column)
     }
@@ -1503,6 +1503,7 @@ fn write_istanbul_coverage_file(
                 b: BTreeMap::new(),
                 b_t: None,
                 input_source_map: None,
+                x_fallow_function_map: None,
             },
         );
     }
