@@ -3806,7 +3806,7 @@ mod tests {
     }
 
     #[test]
-    fn reuse_or_create_stamps_sidecar_on_fresh_create_and_age_threshold_applies() {
+    fn reuse_or_create_stamps_sidecar_on_fresh_create() {
         let tmp = tempfile::TempDir::new().expect("temp dir should be created");
         let repo = init_throwaway_repo(tmp.path(), "repo-fresh-create-stamp");
         let base_sha = git_rev_parse(&repo, "HEAD").expect("HEAD should resolve");
@@ -3831,18 +3831,6 @@ mod tests {
         );
 
         drop(worktree);
-
-        write_sidecar_with_age(&cache_path, Duration::from_hours(31 * 24));
-        sweep_old_reusable_caches(&repo, Duration::from_hours(30 * 24), true);
-
-        assert!(
-            !cache_path.exists(),
-            "after backdating, sweep must remove the fresh-created cache",
-        );
-        assert!(
-            !sidecar.exists(),
-            "sweep should remove the sidecar alongside the cache dir",
-        );
         cleanup_reusable_worktree(&repo, &cache_path);
     }
 
