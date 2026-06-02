@@ -313,19 +313,44 @@ fn unsafe_deserialization_default_off_emits_nothing() {
 
 #[test]
 fn prototype_pollution_non_literal_merge_fires() {
-    // A recursive merge of a non-literal (variable) source is the pollution shape.
+    // A recursive merge of a non-literal (variable) source is the pollution shape
+    // (sink.ts line 7).
     let results = analyze_with_security_sink("security-prototype-pollution");
     assert_candidate(&results, "src/sink.ts", "prototype-pollution", 1321);
 }
 
 #[test]
-fn prototype_pollution_inline_object_does_not_fire() {
-    // An inline object-literal merge source is the `object` arg shape, which the
-    // merge rows exclude (only `other`/`call` fire), so it must NOT be flagged.
+fn prototype_pollution_static_proto_assign_fires() {
+    // A direct static `obj.__proto__ = <non-literal>` member-assign (sink.ts line 14)
+    // flattens to the `*.__proto__` matcher. Asserted by line so it cannot be
+    // satisfied by the merge candidate alone.
+    let results = analyze_with_security_sink("security-prototype-pollution");
+    assert!(
+        results.security_findings.iter().any(|f| {
+            f.path
+                .to_string_lossy()
+                .replace('\\', "/")
+                .ends_with("src/sink.ts")
+                && f.category.as_deref() == Some("prototype-pollution")
+                && f.line == 14
+        }),
+        "a static `obj.__proto__ = x` assign must produce a prototype-pollution candidate at line 14"
+    );
+}
+
+#[test]
+fn prototype_pollution_safe_forms_do_not_fire() {
+    // Two negatives in src/safe.ts must both stay silent: an inline object-literal
+    // merge source (the `object` arg shape, excluded), and a TypeScript-cast
+    // `(obj as {...}).__proto__ = x` assign, which is a documented flattening blind
+    // spot (the cast object is not a bare identifier, so the callee path does not
+    // resolve to `*.__proto__`). The second is a conservative false-negative, not a
+    // safe pattern; this assertion flips if a future flattening change starts
+    // matching the cast form.
     let results = analyze_with_security_sink("security-prototype-pollution");
     assert!(
         !anchored_on(&results, "src/safe.ts"),
-        "an inline-object-literal merge source must not be flagged"
+        "neither an inline-object merge nor a cast-form __proto__ assign may be flagged"
     );
 }
 

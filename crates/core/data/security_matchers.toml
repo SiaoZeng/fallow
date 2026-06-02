@@ -388,7 +388,9 @@ path_patterns = ["*.search", "*.hash", "location.href", "*.location.href"]
 # Two distinct shapes, both source-model-free. (1) A static `obj.__proto__ = x`
 # member-assign with a non-literal RHS directly mutates the prototype; the
 # extract layer captures only static-member assigns, so `obj[key] = x` (the
-# computed form) is a documented blind spot, never a false positive. (2) A
+# computed form) AND a cast target `(obj as {...}).__proto__ = x` (whose object is
+# a TSAsExpression, not a bare identifier, so the callee path does not flatten to
+# `*.__proto__`) are documented blind spots, never false positives. (2) A
 # recursive-merge call (lodash `merge` / `mergeWith` / `defaultsDeep` / `setWith`,
 # bare or namespaced) with a non-literal source is the classic
 # CVE-shaped pollution vector when the source is attacker-controlled. We do NOT
