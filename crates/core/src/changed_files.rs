@@ -757,6 +757,7 @@ mod tests {
                 },
             ],
             actions: Vec::new(),
+            reachability: None,
         });
 
         let mut changed: FxHashSet<PathBuf> = FxHashSet::default();

@@ -25,9 +25,11 @@ use crate::graph::ModuleGraph;
 use crate::suppress::SuppressionContext;
 
 mod catalogue;
+mod rank;
 mod tainted_sink;
 
 pub use catalogue::catalogue_title;
+pub use rank::rank_security_findings;
 pub use tainted_sink::{CategoryFilter, find_tainted_sinks};
 
 /// The inline suppression kind token for the client-server-leak rule.
@@ -318,6 +320,7 @@ fn build_leak_finding(
         evidence,
         trace,
         actions: build_actions(),
+        reachability: None,
     }
 }
 
@@ -354,6 +357,7 @@ fn build_direct_finding(
             role: TraceHopRole::SecretSource,
         }],
         actions: build_actions(),
+        reachability: None,
     }
 }
 

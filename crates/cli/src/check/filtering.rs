@@ -1852,6 +1852,7 @@ mod tests {
                 },
             ],
             actions: Vec::new(),
+            reachability: None,
         });
 
         filter_results_by_diff(&mut results, &diff, root);

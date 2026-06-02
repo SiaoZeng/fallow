@@ -1961,6 +1961,7 @@ mod tests {
                 evidence: "transitively reaches DATABASE_URL".to_string(),
                 trace: vec![],
                 actions: vec![],
+                reachability: None,
             }],
             security_unresolved_edge_files: 2,
             security_unresolved_callee_sites: 0,

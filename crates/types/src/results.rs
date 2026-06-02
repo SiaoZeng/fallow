@@ -865,6 +865,32 @@ pub struct TraceHop {
     pub role: TraceHopRole,
 }
 
+/// Graph-derived reachability ranking signal for a security candidate. Computed
+/// from the EXISTING module graph (runtime reachability + reverse-dep fan-in)
+/// after detection, never proven exploitable. Used to surface candidates that
+/// sit on a request/runtime-reachable surface above isolated helpers or scripts.
+///
+/// This is a relative-ordering signal, NOT a `confidence` or `signal_strength`
+/// score: fallow does not prove the path is exploitable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct SecurityReachability {
+    /// Whether the anchor module is reachable from a runtime/application entry
+    /// point (route handlers, server entry, framework runtime roots), the
+    /// closest graph proxy for an external/request input surface. Code reachable
+    /// only from test entry points does not count.
+    pub reachable_from_entry: bool,
+    /// Number of distinct modules that transitively depend on the anchor module
+    /// (fan-in via the graph's reverse-dependency index). A higher value means a
+    /// wider surface: more call sites could route untrusted input into the sink.
+    pub blast_radius: u32,
+    /// Whether the anchor module participates in an architecture-boundary
+    /// violation found in the same run (as the importing or imported file).
+    /// Optional pairing: a candidate that also crosses a declared boundary is a
+    /// stronger review target.
+    pub crosses_boundary: bool,
+}
+
 /// A local security CANDIDATE for downstream agent verification, NOT a verified
 /// vulnerability. Emitted only by `fallow security`, never under bare `fallow`
 /// or the `audit` gate. There is deliberately no `confidence` or
@@ -902,6 +928,12 @@ pub struct SecurityFinding {
     /// suppress hint (`auto_fixable: false`); there is no auto-fix because
     /// verification is the agent's job, not fallow's.
     pub actions: Vec<IssueAction>,
+    /// Graph-derived reachability ranking signal (issue #860). `None` until the
+    /// post-detection ranking pass fills it; additive on the wire (skipped when
+    /// absent). Drives the order findings are emitted in: candidates reachable
+    /// from a runtime entry point with a wider blast radius sort first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reachability: Option<SecurityReachability>,
 }
 
 /// A pnpm catalog entry declared in pnpm-workspace.yaml that no workspace package

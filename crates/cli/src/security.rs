@@ -292,6 +292,22 @@ pub fn render_human(output: &SecurityOutput) -> String {
                 finding.line,
             ));
             out.push_str(&format!("    {}\n", finding.evidence));
+            if let Some(reach) = finding.reachability {
+                let entry = if reach.reachable_from_entry {
+                    "reachable from a runtime entry point"
+                } else {
+                    "not reached from any runtime entry point"
+                };
+                let boundary = if reach.crosses_boundary {
+                    "; crosses an architecture boundary"
+                } else {
+                    ""
+                };
+                out.push_str(&format!(
+                    "    reach: {entry} (blast radius {}){boundary}\n",
+                    reach.blast_radius,
+                ));
+            }
             if !finding.trace.is_empty() {
                 out.push_str("    trace:\n");
                 for hop in &finding.trace {
@@ -554,6 +570,7 @@ mod tests {
             actions: vec![],
             category: None,
             cwe: None,
+            reachability: None,
         }
     }
 

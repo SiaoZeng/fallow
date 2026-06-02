@@ -9863,6 +9863,17 @@
             "$ref": "#/definitions/IssueAction"
           },
           "description": "Machine-actionable next steps. Always emitted (possibly empty for\nforward-compat). For security candidates this is a single file-level\nsuppress hint (`auto_fixable: false`); there is no auto-fix because\nverification is the agent's job, not fallow's."
+        },
+        "reachability": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SecurityReachability"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Graph-derived reachability ranking signal (issue #860). `None` until the\npost-detection ranking pass fills it; additive on the wire (skipped when\nabsent). Drives the order findings are emitted in: candidates reachable\nfrom a runtime entry point with a wider blast radius sort first."
         }
       },
       "required": [
@@ -9943,6 +9954,29 @@
         }
       ],
       "description": "The role a hop plays in a security finding's structural import trace."
+    },
+    "SecurityReachability": {
+      "type": "object",
+      "properties": {
+        "reachable_from_entry": {
+          "type": "boolean",
+          "description": "Whether the anchor module is reachable from a runtime/application entry\npoint (route handlers, server entry, framework runtime roots), the\nclosest graph proxy for an external/request input surface. Code reachable\nonly from test entry points does not count."
+        },
+        "blast_radius": {
+          "type": "integer",
+          "description": "Number of distinct modules that transitively depend on the anchor module\n(fan-in via the graph's reverse-dependency index). A higher value means a\nwider surface: more call sites could route untrusted input into the sink."
+        },
+        "crosses_boundary": {
+          "type": "boolean",
+          "description": "Whether the anchor module participates in an architecture-boundary\nviolation found in the same run (as the importing or imported file).\nOptional pairing: a candidate that also crosses a declared boundary is a\nstronger review target."
+        }
+      },
+      "required": [
+        "reachable_from_entry",
+        "blast_radius",
+        "crosses_boundary"
+      ],
+      "description": "Graph-derived reachability ranking signal for a security candidate. Computed\nfrom the EXISTING module graph (runtime reachability + reverse-dep fan-in)\nafter detection, never proven exploitable. Used to surface candidates that\nsit on a request/runtime-reachable surface above isolated helpers or scripts.\n\nThis is a relative-ordering signal, NOT a `confidence` or `signal_strength`\nscore: fallow does not prove the path is exploitable."
     }
   }
 }

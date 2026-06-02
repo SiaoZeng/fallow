@@ -4769,6 +4769,13 @@ trace: TraceHop[]
  * verification is the agent's job, not fallow's.
  */
 actions: IssueAction[]
+/**
+ * Graph-derived reachability ranking signal (issue #860). `None` until the
+ * post-detection ranking pass fills it; additive on the wire (skipped when
+ * absent). Drives the order findings are emitted in: candidates reachable
+ * from a runtime entry point with a wider blast radius sort first.
+ */
+reachability?: (SecurityReachability | null)
 }
 /**
  * One hop in a security finding's structural trace. Stored as an absolute path
@@ -4791,6 +4798,37 @@ line: number
  */
 col: number
 role: TraceHopRole
+}
+/**
+ * Graph-derived reachability ranking signal for a security candidate. Computed
+ * from the EXISTING module graph (runtime reachability + reverse-dep fan-in)
+ * after detection, never proven exploitable. Used to surface candidates that
+ * sit on a request/runtime-reachable surface above isolated helpers or scripts.
+ *
+ * This is a relative-ordering signal, NOT a `confidence` or `signal_strength`
+ * score: fallow does not prove the path is exploitable.
+ */
+export interface SecurityReachability {
+/**
+ * Whether the anchor module is reachable from a runtime/application entry
+ * point (route handlers, server entry, framework runtime roots), the
+ * closest graph proxy for an external/request input surface. Code reachable
+ * only from test entry points does not count.
+ */
+reachable_from_entry: boolean
+/**
+ * Number of distinct modules that transitively depend on the anchor module
+ * (fan-in via the graph's reverse-dependency index). A higher value means a
+ * wider surface: more call sites could route untrusted input into the sink.
+ */
+blast_radius: number
+/**
+ * Whether the anchor module participates in an architecture-boundary
+ * violation found in the same run (as the importing or imported file).
+ * Optional pairing: a candidate that also crosses a declared boundary is a
+ * stronger review target.
+ */
+crosses_boundary: boolean
 }
 /**
  * Bare `fallow --format json` envelope.

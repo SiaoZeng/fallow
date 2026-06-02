@@ -92,10 +92,11 @@ use fallow_types::results::{
     DependencyOverrideMisconfigReason, DependencyOverrideSource, DuplicateExport,
     DuplicateLocation, EmptyCatalogGroup, EntryPointSummary, ExportUsage, FeatureFlag,
     FlagConfidence, FlagKind, ImportSite, MisconfiguredDependencyOverride, PrivateTypeLeak,
-    ReferenceLocation, SecurityFinding, SecurityFindingKind, StaleSuppression, SuppressionOrigin,
-    TestOnlyDependency, TraceHop, TraceHopRole, TypeOnlyDependency, UnlistedDependency,
-    UnresolvedCatalogReference, UnresolvedImport, UnusedCatalogEntry, UnusedDependency,
-    UnusedDependencyOverride, UnusedExport, UnusedFile, UnusedMember,
+    ReferenceLocation, SecurityFinding, SecurityFindingKind, SecurityReachability,
+    StaleSuppression, SuppressionOrigin, TestOnlyDependency, TraceHop, TraceHopRole,
+    TypeOnlyDependency, UnlistedDependency, UnresolvedCatalogReference, UnresolvedImport,
+    UnusedCatalogEntry, UnusedDependency, UnusedDependencyOverride, UnusedExport, UnusedFile,
+    UnusedMember,
 };
 
 /// Workspace-relative path to the committed schema.
@@ -306,6 +307,7 @@ pub(crate) fn derived_definition_names() -> &'static [&'static str] {
         "SecuritySchemaVersion",
         "SecurityFinding",
         "SecurityFindingKind",
+        "SecurityReachability",
         "TraceHop",
         "TraceHopRole",
     ]
@@ -494,6 +496,7 @@ fn derived_definitions() -> Map<String, Value> {
     let _ = generator.subschema_for::<SecurityFindingKind>();
     let _ = generator.subschema_for::<TraceHopRole>();
     let _ = generator.subschema_for::<TraceHop>();
+    let _ = generator.subschema_for::<SecurityReachability>();
     let _ = generator.subschema_for::<SecurityFinding>();
     let _ = generator.subschema_for::<SecuritySchemaVersion>();
     let _ = generator.subschema_for::<SecurityOutput>();

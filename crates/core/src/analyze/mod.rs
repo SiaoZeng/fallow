@@ -848,6 +848,24 @@ pub fn find_dead_code_full(
         results.security_unresolved_callee_sites = sink_stats.sinks_skipped_dynamic_callee;
     }
 
+    // Reachability-weighted ranking (issue #860): order security candidates so
+    // those reachable from a runtime/application entry point with a wider
+    // blast radius surface above isolated helpers/scripts. Reuses the existing
+    // graph reachability + reverse-dep fan-in; pairs optionally with boundary
+    // crossings already computed this run. Pure graph-side glue + output order.
+    if !results.security_findings.is_empty() {
+        let boundary_anchor_paths: rustc_hash::FxHashSet<std::path::PathBuf> = results
+            .boundary_violations
+            .iter()
+            .flat_map(|b| [b.violation.from_path.clone(), b.violation.to_path.clone()])
+            .collect();
+        security::rank_security_findings(
+            graph,
+            &boundary_anchor_paths,
+            &mut results.security_findings,
+        );
+    }
+
     if config.rules.stale_suppressions != Severity::Off {
         results
             .stale_suppressions
