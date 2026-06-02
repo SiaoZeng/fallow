@@ -1,5 +1,5 @@
 name: 'Fallow - Codebase Intelligence'
-description: 'Deterministic codebase intelligence for TypeScript and JavaScript in CI: PR risk, quality score, hotspots, duplication, architecture, dependency hygiene, and cleanup evidence depending on the configured command and inputs.'
+description: 'Deterministic codebase intelligence for TypeScript/JavaScript in CI: quality, PR risk, hotspots, duplication, architecture.'
 author: 'Bart Waardenburg'
 
 branding:
