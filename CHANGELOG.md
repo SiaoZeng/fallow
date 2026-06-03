@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.88.2] - 2026-06-03
+
+### Fixed
+
+- **The VS Code extension's "binary in PATH is vX" version-mismatch warning no longer reports a bogus version.** `fallow-lsp` (and `fallow-mcp`) did not handle `--version`: they started their stdio server, hit end-of-input, and exited with no output. The extension's version probe therefore got nothing back from the language server, and its parser then accepted any number-shaped token from the surrounding output, so an unrelated value (a Node banner such as `Node.js v22.22.1`, a digit in a sentinel path, or the npm launcher's appended `verified:` line) could surface as a warning like "binary in PATH is v22.22.1". The language server and MCP server now answer `--version` / `-V` / `-v` with their real version, and the extension only accepts a version in fallow's own `<binary> <version>` format (otherwise it treats the version as unknown rather than guessing). Thanks [@melroy89](https://github.com/melroy89) for the screenshot that surfaced it.
+
 ## [2.88.1] - 2026-06-03
 
 ### Fixed
@@ -2767,7 +2773,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--changed-since` and `--fail-on-issues` for CI
 - Cross-workspace resolution for npm/yarn/pnpm workspaces
 
-[Unreleased]: https://github.com/fallow-rs/fallow/compare/v2.88.1...HEAD
+[Unreleased]: https://github.com/fallow-rs/fallow/compare/v2.88.2...HEAD
+[2.88.2]: https://github.com/fallow-rs/fallow/compare/v2.88.1...v2.88.2
 [2.88.1]: https://github.com/fallow-rs/fallow/compare/v2.88.0...v2.88.1
 [2.88.0]: https://github.com/fallow-rs/fallow/compare/v2.87.0...v2.88.0
 [2.87.0]: https://github.com/fallow-rs/fallow/compare/v2.86.0...v2.87.0
