@@ -60,7 +60,10 @@ test("describeVerified annotates the resolved version's signing status", () => {
   const { describeVerified } = require(RUN_BINARY);
   const ok = { ok: true, sentinelPath: "/c/s" };
   // Signed-era version: appended as `signed`.
-  assert.match(describeVerified(ok, "2.83.0"), /verified: yes \(sentinel \/c\/s\); fallow 2\.83\.0 signed/);
+  assert.match(
+    describeVerified(ok, "2.83.0"),
+    /verified: yes \(sentinel \/c\/s\); fallow 2\.83\.0 signed/,
+  );
   // Pre-signing version: the fleet pre-flight signal, most useful on skip.
   const skipped = { skipped: true, reason: "FALLOW_SKIP_BINARY_VERIFY is set" };
   assert.match(
