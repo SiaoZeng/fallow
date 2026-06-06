@@ -4450,6 +4450,127 @@ mod tests {
     }
 
     #[test]
+    fn audit_base_snapshot_cache_dir_writes_gitignore() {
+        let tmp = tempfile::TempDir::new().expect("temp dir should be created");
+        let cache_dir = audit_base_snapshot_cache_dir(tmp.path());
+
+        ensure_audit_base_snapshot_cache_dir(&cache_dir).expect("cache dir should be created");
+
+        assert_eq!(
+            fs::read_to_string(cache_dir.join(".gitignore")).expect("gitignore should read"),
+            "*\n"
+        );
+    }
+
+    #[test]
+    fn audit_base_snapshot_cache_roundtrips_from_disk() {
+        let tmp = tempfile::TempDir::new().expect("temp dir should be created");
+        let config_path = None;
+        let opts = AuditOptions {
+            root: tmp.path(),
+            config_path: &config_path,
+            output: OutputFormat::Json,
+            no_cache: false,
+            threads: 1,
+            quiet: true,
+            changed_since: Some("HEAD"),
+            production: false,
+            production_dead_code: None,
+            production_health: None,
+            production_dupes: None,
+            workspace: None,
+            changed_workspaces: None,
+            explain: false,
+            explain_skipped: false,
+            performance: false,
+            group_by: None,
+            dead_code_baseline: None,
+            health_baseline: None,
+            dupes_baseline: None,
+            max_crap: None,
+            coverage: None,
+            coverage_root: None,
+            gate: AuditGate::NewOnly,
+            include_entry_exports: false,
+            runtime_coverage: None,
+            min_invocations_hot: 100,
+        };
+        let key = AuditBaseSnapshotCacheKey {
+            hash: 0xfeed,
+            base_sha: "abc123".to_string(),
+        };
+        let snapshot = AuditKeySnapshot {
+            dead_code: std::iter::once("dead:a".to_string()).collect(),
+            health: std::iter::once("health:a".to_string()).collect(),
+            dupes: std::iter::once("dupe:a".to_string()).collect(),
+        };
+
+        save_cached_base_snapshot(&opts, &key, &snapshot);
+        let loaded = load_cached_base_snapshot(&opts, &key).expect("snapshot should load");
+
+        assert_eq!(loaded.dead_code, snapshot.dead_code);
+        assert_eq!(loaded.health, snapshot.health);
+        assert_eq!(loaded.dupes, snapshot.dupes);
+    }
+
+    #[test]
+    fn audit_base_snapshot_cache_rejects_mismatched_key() {
+        let tmp = tempfile::TempDir::new().expect("temp dir should be created");
+        let config_path = None;
+        let opts = AuditOptions {
+            root: tmp.path(),
+            config_path: &config_path,
+            output: OutputFormat::Json,
+            no_cache: false,
+            threads: 1,
+            quiet: true,
+            changed_since: Some("HEAD"),
+            production: false,
+            production_dead_code: None,
+            production_health: None,
+            production_dupes: None,
+            workspace: None,
+            changed_workspaces: None,
+            explain: false,
+            explain_skipped: false,
+            performance: false,
+            group_by: None,
+            dead_code_baseline: None,
+            health_baseline: None,
+            dupes_baseline: None,
+            max_crap: None,
+            coverage: None,
+            coverage_root: None,
+            gate: AuditGate::NewOnly,
+            include_entry_exports: false,
+            runtime_coverage: None,
+            min_invocations_hot: 100,
+        };
+        let key = AuditBaseSnapshotCacheKey {
+            hash: 0xbeef,
+            base_sha: "head".to_string(),
+        };
+        let cached = CachedAuditKeySnapshot {
+            version: AUDIT_BASE_SNAPSHOT_CACHE_VERSION,
+            cli_version: env!("CARGO_PKG_VERSION").to_string(),
+            key_hash: key.hash,
+            base_sha: "other".to_string(),
+            dead_code: vec!["dead:a".to_string()],
+            health: vec![],
+            dupes: vec![],
+        };
+        let cache_dir = audit_base_snapshot_cache_dir(tmp.path());
+        ensure_audit_base_snapshot_cache_dir(&cache_dir).expect("cache dir should be created");
+        fs::write(
+            audit_base_snapshot_cache_file(tmp.path(), &key),
+            bitcode::encode(&cached),
+        )
+        .expect("cache file should be written");
+
+        assert!(load_cached_base_snapshot(&opts, &key).is_none());
+    }
+
+    #[test]
     fn audit_base_snapshot_cache_key_includes_extended_config() {
         let tmp = tempfile::TempDir::new().expect("temp dir should be created");
         let root = tmp.path();
