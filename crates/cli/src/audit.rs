@@ -3510,6 +3510,55 @@ mod tests {
         root
     }
 
+    #[test]
+    fn auto_detect_base_branch_prefers_origin_head() {
+        let tmp = tempfile::TempDir::new().expect("temp dir should be created");
+        let repo = init_throwaway_repo(tmp.path(), "repo");
+        git(&repo, &["branch", "trunk"]);
+        git(&repo, &["update-ref", "refs/remotes/origin/trunk", "trunk"]);
+        git(
+            &repo,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/trunk",
+            ],
+        );
+
+        assert_eq!(auto_detect_base_branch(&repo), Some("trunk".to_string()));
+    }
+
+    #[test]
+    fn auto_detect_base_branch_falls_back_to_main() {
+        let tmp = tempfile::TempDir::new().expect("temp dir should be created");
+        let repo = init_throwaway_repo(tmp.path(), "repo");
+
+        assert_eq!(auto_detect_base_branch(&repo), Some("main".to_string()));
+    }
+
+    #[test]
+    fn auto_detect_base_branch_falls_back_to_master() {
+        let tmp = tempfile::TempDir::new().expect("temp dir should be created");
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).expect("repo root should be created");
+        fs::write(repo.join("README.md"), "seed\n").expect("seed file should be written");
+        git(&repo, &["init", "-b", "master"]);
+        git(&repo, &["add", "."]);
+        git(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "initial"],
+        );
+
+        assert_eq!(auto_detect_base_branch(&repo), Some("master".to_string()));
+    }
+
+    #[test]
+    fn auto_detect_base_branch_returns_none_outside_git_repo() {
+        let tmp = tempfile::TempDir::new().expect("temp dir should be created");
+
+        assert_eq!(auto_detect_base_branch(tmp.path()), None);
+    }
+
     fn worktree_is_registered_with_git(repo_root: &std::path::Path, worktree_path: &Path) -> bool {
         list_audit_worktrees(repo_root)
             .is_some_and(|paths| paths.iter().any(|p| paths_equal(p, worktree_path)))

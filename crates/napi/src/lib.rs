@@ -533,6 +533,13 @@ pub fn compute_health(
 mod tests {
     use super::*;
 
+    fn error_reason<T>(result: napi::Result<T>) -> String {
+        match result {
+            Ok(_) => panic!("option validation should fail"),
+            Err(error) => error.reason.clone(),
+        }
+    }
+
     #[test]
     fn omitted_production_option_defers_to_config() {
         let options = programmatic::DeadCodeOptions::try_from(DeadCodeOptions::default())
@@ -550,5 +557,99 @@ mod tests {
         .expect("options should map");
 
         assert_eq!(options.analysis.production_override, Some(false));
+    }
+
+    #[test]
+    fn detect_duplication_accepts_normalized_mode() {
+        let task = detect_duplication(Some(DuplicationOptions {
+            mode: Some(" STRICT ".to_string()),
+            ..DuplicationOptions::default()
+        }));
+
+        assert!(task.is_ok());
+    }
+
+    #[test]
+    fn detect_duplication_rejects_unknown_mode() {
+        let reason = error_reason(detect_duplication(Some(DuplicationOptions {
+            mode: Some("strictest".to_string()),
+            ..DuplicationOptions::default()
+        })));
+
+        assert_eq!(
+            reason,
+            "invalid `mode` value `strictest`; expected one of: strict, mild, weak, semantic"
+        );
+    }
+
+    #[test]
+    fn detect_duplication_rejects_single_min_occurrence() {
+        let reason = error_reason(detect_duplication(Some(DuplicationOptions {
+            min_occurrences: Some(1),
+            ..DuplicationOptions::default()
+        })));
+
+        assert_eq!(reason, "min_occurrences must be at least 2 (got 1)");
+    }
+
+    #[test]
+    fn compute_complexity_accepts_normalized_enum_options() {
+        let task = compute_complexity(Some(ComplexityOptions {
+            sort: Some(" LINES ".to_string()),
+            ownership_emails: Some("HASH".to_string()),
+            effort: Some("Medium".to_string()),
+            ..ComplexityOptions::default()
+        }));
+
+        assert!(task.is_ok());
+    }
+
+    #[test]
+    fn compute_complexity_rejects_unknown_sort() {
+        let reason = error_reason(compute_complexity(Some(ComplexityOptions {
+            sort: Some("risk".to_string()),
+            ..ComplexityOptions::default()
+        })));
+
+        assert_eq!(
+            reason,
+            "invalid `sort` value `risk`; expected one of: cyclomatic, cognitive, lines, severity"
+        );
+    }
+
+    #[test]
+    fn compute_complexity_rejects_unknown_ownership_email_mode() {
+        let reason = error_reason(compute_complexity(Some(ComplexityOptions {
+            ownership_emails: Some("masked".to_string()),
+            ..ComplexityOptions::default()
+        })));
+
+        assert_eq!(
+            reason,
+            "invalid `ownershipEmails` value `masked`; expected one of: raw, handle, anonymized, hash"
+        );
+    }
+
+    #[test]
+    fn compute_complexity_rejects_unknown_target_effort() {
+        let reason = error_reason(compute_complexity(Some(ComplexityOptions {
+            effort: Some("tiny".to_string()),
+            ..ComplexityOptions::default()
+        })));
+
+        assert_eq!(
+            reason,
+            "invalid `effort` value `tiny`; expected one of: low, medium, high"
+        );
+    }
+
+    #[test]
+    fn compute_complexity_rejects_out_of_range_u16_options() {
+        let reason = error_reason(compute_complexity(Some(ComplexityOptions {
+            max_cyclomatic: Some(u32::from(u16::MAX) + 1),
+            ..ComplexityOptions::default()
+        })));
+
+        assert_eq!(reason, "`maxCyclomatic` must be between 0 and 65535");
     }
 }
