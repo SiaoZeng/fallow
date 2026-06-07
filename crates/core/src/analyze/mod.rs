@@ -557,16 +557,7 @@ pub fn find_dead_code_full(
     ) = rayon::join(
         || {
             rayon::join(
-                || {
-                    if config.rules.unused_files != Severity::Off {
-                        find_unused_files(graph, &suppressions)
-                            .into_iter()
-                            .map(UnusedFileFinding::with_actions)
-                            .collect::<Vec<_>>()
-                    } else {
-                        Vec::new()
-                    }
-                },
+                || run_unused_file_detector(graph, config, &suppressions),
                 || {
                     let mut results = AnalysisResults::default();
                     if config.rules.unused_exports != Severity::Off
@@ -1011,6 +1002,24 @@ pub fn find_dead_code_full(
     results.sort();
 
     results
+}
+
+#[expect(
+    deprecated,
+    reason = "ADR-008 deprecates detector helpers for external callers; core orchestration still calls them internally"
+)]
+fn run_unused_file_detector(
+    graph: &ModuleGraph,
+    config: &ResolvedConfig,
+    suppressions: &crate::suppress::SuppressionContext<'_>,
+) -> Vec<UnusedFileFinding> {
+    if config.rules.unused_files == Severity::Off {
+        return Vec::new();
+    }
+    find_unused_files(graph, suppressions)
+        .into_iter()
+        .map(UnusedFileFinding::with_actions)
+        .collect()
 }
 
 #[cfg(test)]
