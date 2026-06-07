@@ -442,17 +442,17 @@ fn execute_health_inner(
         std::thread::scope(|s| {
             let churn_handle = s.spawn(|| hotspots::fetch_churn_data(opts, &config.cache_dir));
             let t = Instant::now();
-            let score_result = compute_filtered_file_scores(
-                &config,
-                &modules,
-                &file_paths,
-                changed_files.as_ref(),
-                ws_roots.as_deref(),
-                &ignore_set,
-                opts.output,
-                istanbul_coverage.as_ref(),
-                precomputed_for_scores,
-            );
+            let score_result = compute_filtered_file_scores(FileScoreInput {
+                config: &config,
+                modules: &modules,
+                file_paths: &file_paths,
+                changed_files: changed_files.as_ref(),
+                ws_roots: ws_roots.as_deref(),
+                ignore_set: &ignore_set,
+                output: opts.output,
+                istanbul_coverage: istanbul_coverage.as_ref(),
+                pre_computed: precomputed_for_scores,
+            });
             let fs_ms = t.elapsed().as_secs_f64() * 1000.0;
             let churn = churn_handle.join().expect("churn thread panicked");
             (score_result, fs_ms, churn)
@@ -460,17 +460,17 @@ fn execute_health_inner(
     } else {
         let t = Instant::now();
         let score_result = if needs_file_scores {
-            compute_filtered_file_scores(
-                &config,
-                &modules,
-                &file_paths,
-                changed_files.as_ref(),
-                ws_roots.as_deref(),
-                &ignore_set,
-                opts.output,
-                istanbul_coverage.as_ref(),
-                precomputed_for_scores,
-            )
+            compute_filtered_file_scores(FileScoreInput {
+                config: &config,
+                modules: &modules,
+                file_paths: &file_paths,
+                changed_files: changed_files.as_ref(),
+                ws_roots: ws_roots.as_deref(),
+                ignore_set: &ignore_set,
+                output: opts.output,
+                istanbul_coverage: istanbul_coverage.as_ref(),
+                pre_computed: precomputed_for_scores,
+            })
         } else {
             Ok((None, None, None))
         };
@@ -1257,58 +1257,60 @@ const fn severity_priority(severity: FindingSeverity) -> u8 {
 type FileScoreResult = (Option<scoring::FileScoreOutput>, Option<usize>, Option<f64>);
 
 /// Compute file scores, applying workspace and ignore filters.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "filter pipeline requires all these inputs"
-)]
-fn compute_filtered_file_scores(
-    config: &ResolvedConfig,
-    modules: &[fallow_core::extract::ModuleInfo],
-    file_paths: &rustc_hash::FxHashMap<fallow_core::discover::FileId, &std::path::PathBuf>,
-    changed_files: Option<&rustc_hash::FxHashSet<std::path::PathBuf>>,
-    ws_roots: Option<&[std::path::PathBuf]>,
-    ignore_set: &globset::GlobSet,
+struct FileScoreInput<'a> {
+    config: &'a ResolvedConfig,
+    modules: &'a [fallow_core::extract::ModuleInfo],
+    file_paths:
+        &'a rustc_hash::FxHashMap<fallow_core::discover::FileId, &'a std::path::PathBuf>,
+    changed_files: Option<&'a rustc_hash::FxHashSet<std::path::PathBuf>>,
+    ws_roots: Option<&'a [std::path::PathBuf]>,
+    ignore_set: &'a globset::GlobSet,
     output: OutputFormat,
-    istanbul_coverage: Option<&scoring::IstanbulCoverage>,
+    istanbul_coverage: Option<&'a scoring::IstanbulCoverage>,
     pre_computed: Option<fallow_core::AnalysisOutput>,
-) -> Result<FileScoreResult, ExitCode> {
+}
+
+fn compute_filtered_file_scores(input: FileScoreInput<'_>) -> Result<FileScoreResult, ExitCode> {
     #[expect(
         deprecated,
         reason = "ADR-008 deprecates fallow_core::analyze_with_parse_result externally; health still uses the workspace path dependency"
     )]
-    let analysis_output = if let Some(pre) = pre_computed {
+    let analysis_output = if let Some(pre) = input.pre_computed {
         pre
     } else {
-        fallow_core::analyze_with_parse_result(config, modules)
-            .map_err(|e| emit_error(&format!("analysis failed: {e}"), 2, output))?
+        fallow_core::analyze_with_parse_result(input.config, input.modules)
+            .map_err(|e| emit_error(&format!("analysis failed: {e}"), 2, input.output))?
     };
     match compute_file_scores(
-        modules,
-        file_paths,
-        changed_files,
+        input.modules,
+        input.file_paths,
+        input.changed_files,
         analysis_output,
-        istanbul_coverage,
-        &config.root,
+        input.istanbul_coverage,
+        &input.config.root,
     ) {
         Ok(mut output) => {
-            if let Some(ws) = ws_roots {
+            if let Some(ws) = input.ws_roots {
                 output
                     .scores
                     .retain(|s| ws.iter().any(|r| s.path.starts_with(r)));
             }
-            if !ignore_set.is_empty() {
+            if !input.ignore_set.is_empty() {
                 output.scores.retain(|s| {
-                    let relative = s.path.strip_prefix(&config.root).unwrap_or(&s.path);
-                    !ignore_set.is_match(relative)
+                    let relative = s
+                        .path
+                        .strip_prefix(&input.config.root)
+                        .unwrap_or(&s.path);
+                    !input.ignore_set.is_match(relative)
                 });
             }
             filter_coverage_gaps(
                 &mut output.coverage.report,
                 &mut output.coverage.runtime_paths,
-                config,
-                changed_files,
-                ws_roots,
-                ignore_set,
+                input.config,
+                input.changed_files,
+                input.ws_roots,
+                input.ignore_set,
             );
             let total_scored = output.scores.len();
             let avg = if total_scored > 0 {
