@@ -13,15 +13,24 @@ use crate::health::scoring::{FileScoreConcern, file_score_concern_axis};
 /// Docs base URL for health explanations.
 const DOCS_HEALTH: &str = "https://docs.fallow.tools/explanations/health";
 
-pub(in crate::report) fn print_health_human(
-    report: &crate::health_types::HealthReport,
-    root: &Path,
-    elapsed: Duration,
-    quiet: bool,
-    show_explain_tip: bool,
-    explain: bool,
-    skip_score_and_trend: bool,
-) {
+pub(in crate::report) struct PrintHealthHumanInput<'a> {
+    pub(in crate::report) report: &'a crate::health_types::HealthReport,
+    pub(in crate::report) root: &'a Path,
+    pub(in crate::report) elapsed: Duration,
+    pub(in crate::report) quiet: bool,
+    pub(in crate::report) show_explain_tip: bool,
+    pub(in crate::report) explain: bool,
+    pub(in crate::report) skip_score_and_trend: bool,
+}
+
+pub(in crate::report) fn print_health_human(input: &PrintHealthHumanInput<'_>) {
+    let report = input.report;
+    let root = input.root;
+    let elapsed = input.elapsed;
+    let quiet = input.quiet;
+    let show_explain_tip = input.show_explain_tip;
+    let explain = input.explain;
+    let skip_score_and_trend = input.skip_score_and_trend;
     if !quiet {
         eprintln!();
     }

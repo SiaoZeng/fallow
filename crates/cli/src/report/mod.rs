@@ -517,15 +517,15 @@ pub fn print_health_report(
                     ctx.summary_heading,
                 );
             } else {
-                human::print_health_human(
+                human::print_health_human(&human::PrintHealthHumanInput {
                     report,
-                    ctx.root,
-                    ctx.elapsed,
-                    ctx.quiet,
-                    ctx.show_explain_tip,
-                    ctx.explain,
-                    ctx.skip_score_and_trend,
-                );
+                    root: ctx.root,
+                    elapsed: ctx.elapsed,
+                    quiet: ctx.quiet,
+                    show_explain_tip: ctx.show_explain_tip,
+                    explain: ctx.explain,
+                    skip_score_and_trend: ctx.skip_score_and_trend,
+                });
                 if let Some(grouping) = grouping {
                     human::print_health_grouping(grouping, ctx.root, ctx.quiet);
                 }
