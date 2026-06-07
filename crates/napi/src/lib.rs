@@ -110,11 +110,7 @@ pub struct ComplexityOptions {
     pub coverage_root: Option<String>,
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "maps the shared analysis fields across multiple NAPI option objects"
-)]
-fn map_common_options(
+struct CommonOptionsInput {
     root: Option<String>,
     config_path: Option<String>,
     no_cache: Option<bool>,
@@ -126,27 +122,33 @@ fn map_common_options(
     changed_workspaces: Option<String>,
     explain: Option<bool>,
     legacy_envelope: Option<bool>,
-) -> napi::Result<programmatic::AnalysisOptions> {
-    let threads = threads.map(usize::try_from).transpose().map_err(|_| {
-        napi::Error::new(
-            Status::InvalidArg,
-            "`threads` does not fit into usize".to_string(),
-        )
-    })?;
+}
+
+fn map_common_options(input: CommonOptionsInput) -> napi::Result<programmatic::AnalysisOptions> {
+    let threads = input
+        .threads
+        .map(usize::try_from)
+        .transpose()
+        .map_err(|_| {
+            napi::Error::new(
+                Status::InvalidArg,
+                "`threads` does not fit into usize".to_string(),
+            )
+        })?;
 
     Ok(programmatic::AnalysisOptions {
-        root: root.map(std::path::PathBuf::from),
-        config_path: config_path.map(std::path::PathBuf::from),
-        no_cache: no_cache.unwrap_or(false),
+        root: input.root.map(std::path::PathBuf::from),
+        config_path: input.config_path.map(std::path::PathBuf::from),
+        no_cache: input.no_cache.unwrap_or(false),
         threads,
-        diff_file: diff_file.map(std::path::PathBuf::from),
-        production: production.unwrap_or(false),
-        production_override: production,
-        changed_since,
-        workspace,
-        changed_workspaces,
-        explain: explain.unwrap_or(false),
-        legacy_envelope: legacy_envelope.unwrap_or(false),
+        diff_file: input.diff_file.map(std::path::PathBuf::from),
+        production: input.production.unwrap_or(false),
+        production_override: input.production,
+        changed_since: input.changed_since,
+        workspace: input.workspace,
+        changed_workspaces: input.changed_workspaces,
+        explain: input.explain.unwrap_or(false),
+        legacy_envelope: input.legacy_envelope.unwrap_or(false),
     })
 }
 
@@ -247,19 +249,19 @@ impl TryFrom<DeadCodeOptions> for programmatic::DeadCodeOptions {
 
     fn try_from(value: DeadCodeOptions) -> Result<Self, Self::Error> {
         Ok(Self {
-            analysis: map_common_options(
-                value.root,
-                value.config_path,
-                value.no_cache,
-                value.threads,
-                value.diff_file,
-                value.production,
-                value.changed_since,
-                value.workspace,
-                value.changed_workspaces,
-                value.explain,
-                value.legacy_envelope,
-            )?,
+            analysis: map_common_options(CommonOptionsInput {
+                root: value.root,
+                config_path: value.config_path,
+                no_cache: value.no_cache,
+                threads: value.threads,
+                diff_file: value.diff_file,
+                production: value.production,
+                changed_since: value.changed_since,
+                workspace: value.workspace,
+                changed_workspaces: value.changed_workspaces,
+                explain: value.explain,
+                legacy_envelope: value.legacy_envelope,
+            })?,
             filters: programmatic::DeadCodeFilters {
                 unused_files: value.unused_files.unwrap_or(false),
                 unused_exports: value.unused_exports.unwrap_or(false),
@@ -300,19 +302,19 @@ impl TryFrom<DuplicationOptions> for programmatic::DuplicationOptions {
     fn try_from(value: DuplicationOptions) -> Result<Self, Self::Error> {
         let defaults = programmatic::DuplicationOptions::default();
         Ok(Self {
-            analysis: map_common_options(
-                value.root,
-                value.config_path,
-                value.no_cache,
-                value.threads,
-                value.diff_file,
-                value.production,
-                value.changed_since,
-                value.workspace,
-                value.changed_workspaces,
-                value.explain,
-                value.legacy_envelope,
-            )?,
+            analysis: map_common_options(CommonOptionsInput {
+                root: value.root,
+                config_path: value.config_path,
+                no_cache: value.no_cache,
+                threads: value.threads,
+                diff_file: value.diff_file,
+                production: value.production,
+                changed_since: value.changed_since,
+                workspace: value.workspace,
+                changed_workspaces: value.changed_workspaces,
+                explain: value.explain,
+                legacy_envelope: value.legacy_envelope,
+            })?,
             mode: parse_duplication_mode(value.mode)?,
             min_tokens: value.min_tokens.map_or(defaults.min_tokens, |n| n as usize),
             min_lines: value.min_lines.map_or(defaults.min_lines, |n| n as usize),
@@ -339,19 +341,19 @@ impl TryFrom<ComplexityOptions> for programmatic::ComplexityOptions {
 
     fn try_from(value: ComplexityOptions) -> Result<Self, Self::Error> {
         Ok(Self {
-            analysis: map_common_options(
-                value.root,
-                value.config_path,
-                value.no_cache,
-                value.threads,
-                value.diff_file,
-                value.production,
-                value.changed_since,
-                value.workspace,
-                value.changed_workspaces,
-                value.explain,
-                value.legacy_envelope,
-            )?,
+            analysis: map_common_options(CommonOptionsInput {
+                root: value.root,
+                config_path: value.config_path,
+                no_cache: value.no_cache,
+                threads: value.threads,
+                diff_file: value.diff_file,
+                production: value.production,
+                changed_since: value.changed_since,
+                workspace: value.workspace,
+                changed_workspaces: value.changed_workspaces,
+                explain: value.explain,
+                legacy_envelope: value.legacy_envelope,
+            })?,
             max_cyclomatic: value
                 .max_cyclomatic
                 .map(|n| narrow_to_u16("maxCyclomatic", n))
