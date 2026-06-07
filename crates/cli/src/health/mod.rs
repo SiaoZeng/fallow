@@ -411,21 +411,7 @@ fn execute_health_inner(
         .map_or((0.0, false), |cf| (cf.git_log_ms, cf.cache_hit));
     let (score_output, files_scored, average_maintainability) = file_score_result;
 
-    if let Some(ref cf) = churn_fetch
-        && !cf.cache_hit
-        && !opts.no_cache
-        && !opts.quiet
-        && cf.git_log_ms > 500.0
-    {
-        eprintln!(
-            "{}",
-            format!(
-                "  note: git churn analysis took {:.1}s (cached for next run at same HEAD)",
-                cf.git_log_ms / 1000.0
-            )
-            .dimmed()
-        );
-    }
+    print_slow_churn_note(opts, churn_fetch.as_ref());
 
     let file_scores_slice = score_output
         .as_ref()
@@ -923,6 +909,27 @@ fn compute_file_scores_and_churn(
         None
     };
     Ok((score_result, fs_ms, churn))
+}
+
+fn print_slow_churn_note(
+    opts: &HealthOptions<'_>,
+    churn_fetch: Option<&hotspots::ChurnFetchResult>,
+) {
+    if let Some(cf) = churn_fetch
+        && !cf.cache_hit
+        && !opts.no_cache
+        && !opts.quiet
+        && cf.git_log_ms > 500.0
+    {
+        eprintln!(
+            "{}",
+            format!(
+                "  note: git churn analysis took {:.1}s (cached for next run at same HEAD)",
+                cf.git_log_ms / 1000.0
+            )
+            .dimmed()
+        );
+    }
 }
 
 /// Drop complexity findings whose function body span does NOT overlap any
