@@ -464,7 +464,13 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: taiki-e/install-action@9b29ffac42f36c4efe76140737435c61cfb92383 # cargo-audit
-      - run: cargo audit
+      # RUSTSEC-2026-0097: `rand` 0.9.2 unsoundness with a custom logger via
+      # `rand::rng()`. Reaches the tree only through the `proptest` dev-dependency
+      # (test-only, never shipped in a fallow binary) and fallow does not use the
+      # affected pattern; no patched `rand` release exists. cargo-deny (the primary
+      # advisory gate, deny.toml) already treats this informational/unsound advisory
+      # as non-blocking. Remove once a fixed `rand` ships or proptest drops it.
+      - run: cargo audit --ignore RUSTSEC-2026-0097
 
   deny:
     name: Cargo Deny
