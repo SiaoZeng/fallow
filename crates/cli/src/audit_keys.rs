@@ -91,6 +91,134 @@ fn empty_catalog_group_key(item: &fallow_core::results::EmptyCatalogGroup, root:
     )
 }
 
+fn sorted_relative_path_keys<'a>(
+    paths: impl Iterator<Item = &'a Path>,
+    root: &Path,
+) -> Vec<String> {
+    let mut keys = paths
+        .map(|path| relative_key_path(path, root))
+        .collect::<Vec<_>>();
+    keys.sort();
+    keys
+}
+
+fn duplicate_export_key(
+    item: &fallow_core::results::DuplicateExportFinding,
+    root: &Path,
+) -> String {
+    let mut locations = sorted_relative_path_keys(
+        item.export.locations.iter().map(|loc| loc.path.as_path()),
+        root,
+    );
+    locations.dedup();
+    format!(
+        "duplicate-export:{}:{}",
+        item.export.export_name,
+        locations.join("|")
+    )
+}
+
+fn circular_dependency_key(
+    item: &fallow_core::results::CircularDependencyFinding,
+    root: &Path,
+) -> String {
+    let files = sorted_relative_path_keys(
+        item.cycle.files.iter().map(std::path::PathBuf::as_path),
+        root,
+    );
+    format!("circular-dependency:{}", files.join("|"))
+}
+
+fn re_export_cycle_key(item: &fallow_core::results::ReExportCycleFinding, root: &Path) -> String {
+    let kind = match item.cycle.kind {
+        fallow_core::results::ReExportCycleKind::MultiNode => "multi-node",
+        fallow_core::results::ReExportCycleKind::SelfLoop => "self-loop",
+    };
+    let files = sorted_relative_path_keys(
+        item.cycle.files.iter().map(std::path::PathBuf::as_path),
+        root,
+    );
+    format!("re-export-cycle:{kind}:{}", files.join("|"))
+}
+
+fn boundary_violation_key(
+    item: &fallow_core::results::BoundaryViolationFinding,
+    root: &Path,
+) -> String {
+    format!(
+        "boundary-violation:{}:{}:{}",
+        relative_key_path(&item.violation.from_path, root),
+        relative_key_path(&item.violation.to_path, root),
+        item.violation.import_specifier
+    )
+}
+
+fn boundary_coverage_key(
+    item: &fallow_core::results::BoundaryCoverageViolationFinding,
+    root: &Path,
+) -> String {
+    format!(
+        "boundary-coverage:{}",
+        relative_key_path(&item.violation.path, root)
+    )
+}
+
+fn boundary_call_key(
+    item: &fallow_core::results::BoundaryCallViolationFinding,
+    root: &Path,
+) -> String {
+    format!(
+        "boundary-call:{}:{}",
+        relative_key_path(&item.violation.path, root),
+        item.violation.callee
+    )
+}
+
+fn stale_suppression_key(item: &fallow_core::results::StaleSuppression, root: &Path) -> String {
+    format!(
+        "stale-suppression:{}:{}",
+        relative_key_path(&item.path, root),
+        item.description()
+    )
+}
+
+fn unresolved_catalog_reference_key(
+    item: &fallow_core::results::UnresolvedCatalogReferenceFinding,
+    root: &Path,
+) -> String {
+    format!(
+        "unresolved-catalog-reference:{}:{}:{}:{}",
+        relative_key_path(&item.reference.path, root),
+        item.reference.line,
+        item.reference.catalog_name,
+        item.reference.entry_name
+    )
+}
+
+fn unused_dependency_override_key(
+    item: &fallow_core::results::UnusedDependencyOverrideFinding,
+    root: &Path,
+) -> String {
+    format!(
+        "unused-dependency-override:{}:{}:{}",
+        relative_key_path(&item.entry.path, root),
+        item.entry.line,
+        item.entry.raw_key
+    )
+}
+
+fn misconfigured_dependency_override_key(
+    item: &fallow_core::results::MisconfiguredDependencyOverrideFinding,
+    root: &Path,
+) -> String {
+    format!(
+        "misconfigured-dependency-override:{}:{}:{}",
+        relative_key_path(&item.entry.path, root),
+        item.entry.line,
+        item.entry.raw_key
+    )
+}
+
 /// Build the set of audit attribution keys for all dead-code findings in
 /// `results`.
 ///
@@ -111,10 +239,6 @@ fn empty_catalog_group_key(item: &fallow_core::results::EmptyCatalogGroup, root:
 /// file) and the per-collection severity branches in
 /// `crates/cli/src/check/rules.rs` (`apply_rules`, `has_error_severity_issues`).
 /// TypeScript mirror: `editors/vscode/scripts/codegen-types.mjs` (`BARE_DEAD_CODE_ALIASES`).
-#[expect(
-    clippy::too_many_lines,
-    reason = "one key-builder block per issue type keeps the audit-attribution key shape local and easy to audit; the count grows linearly with new issue types"
-)]
 pub(super) fn dead_code_keys(
     results: &fallow_core::results::AnalysisResults,
     root: &Path,
@@ -216,19 +340,7 @@ pub(super) fn dead_code_keys(
         keys.insert(unlisted_dependency_key(item, root));
     }
     for item in duplicate_exports {
-        let mut locations: Vec<String> = item
-            .export
-            .locations
-            .iter()
-            .map(|loc| relative_key_path(&loc.path, root))
-            .collect();
-        locations.sort();
-        locations.dedup();
-        keys.insert(format!(
-            "duplicate-export:{}:{}",
-            item.export.export_name,
-            locations.join("|")
-        ));
+        keys.insert(duplicate_export_key(item, root));
     }
     for item in type_only_dependencies {
         keys.insert(format!(
@@ -245,49 +357,19 @@ pub(super) fn dead_code_keys(
         ));
     }
     for item in circular_dependencies {
-        let mut files: Vec<String> = item
-            .cycle
-            .files
-            .iter()
-            .map(|path| relative_key_path(path, root))
-            .collect();
-        files.sort();
-        keys.insert(format!("circular-dependency:{}", files.join("|")));
+        keys.insert(circular_dependency_key(item, root));
     }
     for item in re_export_cycles {
-        let kind = match item.cycle.kind {
-            fallow_core::results::ReExportCycleKind::MultiNode => "multi-node",
-            fallow_core::results::ReExportCycleKind::SelfLoop => "self-loop",
-        };
-        let mut files: Vec<String> = item
-            .cycle
-            .files
-            .iter()
-            .map(|path| relative_key_path(path, root))
-            .collect();
-        files.sort();
-        keys.insert(format!("re-export-cycle:{kind}:{}", files.join("|")));
+        keys.insert(re_export_cycle_key(item, root));
     }
     for item in boundary_violations {
-        keys.insert(format!(
-            "boundary-violation:{}:{}:{}",
-            relative_key_path(&item.violation.from_path, root),
-            relative_key_path(&item.violation.to_path, root),
-            item.violation.import_specifier
-        ));
+        keys.insert(boundary_violation_key(item, root));
     }
     for item in boundary_coverage_violations {
-        keys.insert(format!(
-            "boundary-coverage:{}",
-            relative_key_path(&item.violation.path, root)
-        ));
+        keys.insert(boundary_coverage_key(item, root));
     }
     for item in boundary_call_violations {
-        keys.insert(format!(
-            "boundary-call:{}:{}",
-            relative_key_path(&item.violation.path, root),
-            item.violation.callee
-        ));
+        keys.insert(boundary_call_key(item, root));
     }
     for item in policy_violations {
         keys.insert(format!(
@@ -299,20 +381,10 @@ pub(super) fn dead_code_keys(
         ));
     }
     for item in stale_suppressions {
-        keys.insert(format!(
-            "stale-suppression:{}:{}",
-            relative_key_path(&item.path, root),
-            item.description()
-        ));
+        keys.insert(stale_suppression_key(item, root));
     }
     for item in unresolved_catalog_references {
-        keys.insert(format!(
-            "unresolved-catalog-reference:{}:{}:{}:{}",
-            relative_key_path(&item.reference.path, root),
-            item.reference.line,
-            item.reference.catalog_name,
-            item.reference.entry_name
-        ));
+        keys.insert(unresolved_catalog_reference_key(item, root));
     }
     for item in unused_catalog_entries {
         keys.insert(unused_catalog_entry_key(&item.entry, root));
@@ -321,20 +393,10 @@ pub(super) fn dead_code_keys(
         keys.insert(empty_catalog_group_key(&item.group, root));
     }
     for item in unused_dependency_overrides {
-        keys.insert(format!(
-            "unused-dependency-override:{}:{}:{}",
-            relative_key_path(&item.entry.path, root),
-            item.entry.line,
-            item.entry.raw_key
-        ));
+        keys.insert(unused_dependency_override_key(item, root));
     }
     for item in misconfigured_dependency_overrides {
-        keys.insert(format!(
-            "misconfigured-dependency-override:{}:{}:{}",
-            relative_key_path(&item.entry.path, root),
-            item.entry.line,
-            item.entry.raw_key
-        ));
+        keys.insert(misconfigured_dependency_override_key(item, root));
     }
     keys
 }
@@ -357,10 +419,6 @@ pub(super) fn dead_code_keys(
 /// file) and the per-collection severity branches in
 /// `crates/cli/src/check/rules.rs` (`apply_rules`, `has_error_severity_issues`).
 /// TypeScript mirror: `editors/vscode/scripts/codegen-types.mjs` (`BARE_DEAD_CODE_ALIASES`).
-#[expect(
-    clippy::too_many_lines,
-    reason = "one retain block per issue type keeps the gate-filter local and grep-friendly; the count grows linearly with new issue types and parallels dead_code_keys"
-)]
 pub(super) fn retain_introduced_dead_code(
     results: &mut fallow_core::results::AnalysisResults,
     root: &Path,
@@ -475,21 +533,7 @@ pub(super) fn retain_introduced_dead_code(
         ))
     });
     unlisted_dependencies.retain(|item| keep(unlisted_dependency_key(&item.dep, root)));
-    duplicate_exports.retain(|item| {
-        let mut locations: Vec<String> = item
-            .export
-            .locations
-            .iter()
-            .map(|loc| relative_key_path(&loc.path, root))
-            .collect();
-        locations.sort();
-        locations.dedup();
-        keep(format!(
-            "duplicate-export:{}:{}",
-            item.export.export_name,
-            locations.join("|")
-        ))
-    });
+    duplicate_exports.retain(|item| keep(duplicate_export_key(item, root)));
     type_only_dependencies.retain(|item| {
         keep(format!(
             "type-only-dependency:{}:{}",
@@ -504,51 +548,11 @@ pub(super) fn retain_introduced_dead_code(
             item.dep.package_name
         ))
     });
-    circular_dependencies.retain(|item| {
-        let mut files: Vec<String> = item
-            .cycle
-            .files
-            .iter()
-            .map(|path| relative_key_path(path, root))
-            .collect();
-        files.sort();
-        keep(format!("circular-dependency:{}", files.join("|")))
-    });
-    re_export_cycles.retain(|item| {
-        let kind = match item.cycle.kind {
-            fallow_core::results::ReExportCycleKind::MultiNode => "multi-node",
-            fallow_core::results::ReExportCycleKind::SelfLoop => "self-loop",
-        };
-        let mut files: Vec<String> = item
-            .cycle
-            .files
-            .iter()
-            .map(|path| relative_key_path(path, root))
-            .collect();
-        files.sort();
-        keep(format!("re-export-cycle:{kind}:{}", files.join("|")))
-    });
-    boundary_violations.retain(|item| {
-        keep(format!(
-            "boundary-violation:{}:{}:{}",
-            relative_key_path(&item.violation.from_path, root),
-            relative_key_path(&item.violation.to_path, root),
-            item.violation.import_specifier
-        ))
-    });
-    boundary_coverage_violations.retain(|item| {
-        keep(format!(
-            "boundary-coverage:{}",
-            relative_key_path(&item.violation.path, root)
-        ))
-    });
-    boundary_call_violations.retain(|item| {
-        keep(format!(
-            "boundary-call:{}:{}",
-            relative_key_path(&item.violation.path, root),
-            item.violation.callee
-        ))
-    });
+    circular_dependencies.retain(|item| keep(circular_dependency_key(item, root)));
+    re_export_cycles.retain(|item| keep(re_export_cycle_key(item, root)));
+    boundary_violations.retain(|item| keep(boundary_violation_key(item, root)));
+    boundary_coverage_violations.retain(|item| keep(boundary_coverage_key(item, root)));
+    boundary_call_violations.retain(|item| keep(boundary_call_key(item, root)));
     policy_violations.retain(|item| {
         keep(format!(
             "policy-violation:{}:{}/{}:{}",
@@ -558,40 +562,13 @@ pub(super) fn retain_introduced_dead_code(
             item.violation.matched
         ))
     });
-    stale_suppressions.retain(|item| {
-        keep(format!(
-            "stale-suppression:{}:{}",
-            relative_key_path(&item.path, root),
-            item.description()
-        ))
-    });
-    unresolved_catalog_references.retain(|item| {
-        keep(format!(
-            "unresolved-catalog-reference:{}:{}:{}:{}",
-            relative_key_path(&item.reference.path, root),
-            item.reference.line,
-            item.reference.catalog_name,
-            item.reference.entry_name
-        ))
-    });
+    stale_suppressions.retain(|item| keep(stale_suppression_key(item, root)));
+    unresolved_catalog_references.retain(|item| keep(unresolved_catalog_reference_key(item, root)));
     unused_catalog_entries.retain(|item| keep(unused_catalog_entry_key(&item.entry, root)));
     empty_catalog_groups.retain(|item| keep(empty_catalog_group_key(&item.group, root)));
-    unused_dependency_overrides.retain(|item| {
-        keep(format!(
-            "unused-dependency-override:{}:{}:{}",
-            relative_key_path(&item.entry.path, root),
-            item.entry.line,
-            item.entry.raw_key
-        ))
-    });
-    misconfigured_dependency_overrides.retain(|item| {
-        keep(format!(
-            "misconfigured-dependency-override:{}:{}:{}",
-            relative_key_path(&item.entry.path, root),
-            item.entry.line,
-            item.entry.raw_key
-        ))
-    });
+    unused_dependency_overrides.retain(|item| keep(unused_dependency_override_key(item, root)));
+    misconfigured_dependency_overrides
+        .retain(|item| keep(misconfigured_dependency_override_key(item, root)));
 }
 
 fn issue_was_introduced(key: &str, base: &FxHashSet<String>) -> bool {
