@@ -417,6 +417,23 @@ fn finding_augmentation(_name: &str) -> FindingAugmentation {
 fn derived_definitions() -> Map<String, Value> {
     let mut generator = SchemaSettings::draft07().into_generator();
 
+    register_analysis_definitions(&mut generator);
+    register_duplication_definitions(&mut generator);
+    register_dead_code_action_definitions(&mut generator);
+    register_dead_code_finding_definitions(&mut generator);
+    register_health_definitions(&mut generator);
+    register_meta_definitions(&mut generator);
+    register_per_command_envelope_definitions(&mut generator);
+    register_impact_definitions(&mut generator);
+    register_security_definitions(&mut generator);
+    let _ = generator.subschema_for::<FallowOutput>();
+    register_list_boundaries_definitions(&mut generator);
+    register_health_action_definitions(&mut generator);
+
+    generator.take_definitions(true)
+}
+
+fn register_analysis_definitions(generator: &mut schemars::SchemaGenerator) {
     let _ = generator.subschema_for::<AnalysisResults>();
     let _ = generator.subschema_for::<DuplicationReport>();
 
@@ -457,7 +474,9 @@ fn derived_definitions() -> Map<String, Value> {
     let _ = generator.subschema_for::<RefactoringSuggestion>();
     let _ = generator.subschema_for::<CloneFamily>();
     let _ = generator.subschema_for::<MirroredDirectory>();
+}
 
+fn register_duplication_definitions(generator: &mut schemars::SchemaGenerator) {
     let _ = generator.subschema_for::<AttributedInstance>();
     let _ = generator.subschema_for::<AttributedCloneGroup>();
     let _ = generator.subschema_for::<DuplicationGroup>();
@@ -471,7 +490,9 @@ fn derived_definitions() -> Map<String, Value> {
     let _ = generator.subschema_for::<CloneFamilyAction>();
     let _ = generator.subschema_for::<CloneFamilyActionType>();
     let _ = generator.subschema_for::<DupesReportPayload>();
+}
 
+fn register_dead_code_action_definitions(generator: &mut schemars::SchemaGenerator) {
     let _ = generator.subschema_for::<IssueAction>();
     let _ = generator.subschema_for::<FixAction>();
     let _ = generator.subschema_for::<FixActionType>();
@@ -484,7 +505,9 @@ fn derived_definitions() -> Map<String, Value> {
     let _ = generator.subschema_for::<AddToConfigKind>();
     let _ = generator.subschema_for::<AddToConfigValue>();
     let _ = generator.subschema_for::<IgnoreExportsRule>();
+}
 
+fn register_dead_code_finding_definitions(generator: &mut schemars::SchemaGenerator) {
     let _ = generator.subschema_for::<UnusedFileFinding>();
     let _ = generator.subschema_for::<PrivateTypeLeakFinding>();
     let _ = generator.subschema_for::<UnresolvedImportFinding>();
@@ -500,7 +523,9 @@ fn derived_definitions() -> Map<String, Value> {
     let _ = generator.subschema_for::<UnlistedDependencyFinding>();
     let _ = generator.subschema_for::<TypeOnlyDependencyFinding>();
     let _ = generator.subschema_for::<TestOnlyDependencyFinding>();
+}
 
+fn register_health_definitions(generator: &mut schemars::SchemaGenerator) {
     let _ = generator.subschema_for::<HealthSummary>();
     let _ = generator.subschema_for::<ComplexityViolation>();
     let _ = generator.subschema_for::<ExceededThreshold>();
@@ -534,7 +559,9 @@ fn derived_definitions() -> Map<String, Value> {
     let _ = generator.subschema_for::<RiskProfile>();
     let _ = generator.subschema_for::<RuntimeCoverageReport>();
     let _ = generator.subschema_for::<HealthActionsMeta>();
+}
 
+fn register_meta_definitions(generator: &mut schemars::SchemaGenerator) {
     let _ = generator.subschema_for::<SchemaVersion>();
     let _ = generator.subschema_for::<ToolVersion>();
     let _ = generator.subschema_for::<ElapsedMs>();
@@ -551,9 +578,9 @@ fn derived_definitions() -> Map<String, Value> {
     let _ = generator.subschema_for::<MetaMetric>();
     let _ = generator.subschema_for::<MetaRule>();
     let _ = generator.subschema_for::<TelemetryMeta>();
+}
 
-    register_per_command_envelope_definitions(&mut generator);
-
+fn register_impact_definitions(generator: &mut schemars::SchemaGenerator) {
     let _ = generator.subschema_for::<ImpactCounts>();
     let _ = generator.subschema_for::<ImpactReportSchemaVersion>();
     let _ = generator.subschema_for::<ImpactTrendDirection>();
@@ -561,7 +588,9 @@ fn derived_definitions() -> Map<String, Value> {
     let _ = generator.subschema_for::<TrendSummary>();
     let _ = generator.subschema_for::<ContainmentEvent>();
     let _ = generator.subschema_for::<ImpactReport>();
+}
 
+fn register_security_definitions(generator: &mut schemars::SchemaGenerator) {
     let _ = generator.subschema_for::<SecurityFindingKind>();
     let _ = generator.subschema_for::<SecuritySeverity>();
     let _ = generator.subschema_for::<SecurityDeadCodeKind>();
@@ -600,11 +629,9 @@ fn derived_definitions() -> Map<String, Value> {
     let _ = generator.subschema_for::<SecuritySeverityCounts>();
     let _ = generator.subschema_for::<SecurityReachabilityCounts>();
     let _ = generator.subschema_for::<SecurityRuntimeStateCounts>();
+}
 
-    let _ = generator.subschema_for::<FallowOutput>();
-
-    register_list_boundaries_definitions(&mut generator);
-
+fn register_health_action_definitions(generator: &mut schemars::SchemaGenerator) {
     let _ = generator.subschema_for::<HealthFindingAction>();
     let _ = generator.subschema_for::<HealthFindingActionType>();
     let _ = generator.subschema_for::<HotspotAction>();
@@ -616,8 +643,6 @@ fn derived_definitions() -> Map<String, Value> {
     let _ = generator.subschema_for::<UntestedFileActionType>();
     let _ = generator.subschema_for::<UntestedExportAction>();
     let _ = generator.subschema_for::<UntestedExportActionType>();
-
-    generator.take_definitions(true)
 }
 
 /// Register per-command envelope structs.
