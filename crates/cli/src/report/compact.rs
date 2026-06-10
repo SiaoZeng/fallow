@@ -319,14 +319,25 @@ pub(super) fn print_grouped_compact(groups: &[ResultGroup], root: &Path) {
     }
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "health compact formatter stitches many optional sections into one stream"
-)]
 pub(super) fn print_health_compact(report: &crate::health_types::HealthReport, root: &Path) {
+    print_health_score_compact(report);
+    print_vital_signs_compact(report);
+    print_health_findings_compact(&report.findings, root);
+    print_file_scores_compact(&report.file_scores, root);
+    print_coverage_gaps_compact(report, root);
+    print_runtime_sections_compact(report, root);
+    print_hotspots_compact(&report.hotspots, root);
+    print_health_trend_compact(report);
+    print_refactoring_targets_compact(&report.targets, root);
+}
+
+fn print_health_score_compact(report: &crate::health_types::HealthReport) {
     if let Some(ref hs) = report.health_score {
         outln!("health-score:{:.1}:{}", hs.score, hs.grade);
     }
+}
+
+fn print_vital_signs_compact(report: &crate::health_types::HealthReport) {
     if let Some(ref vs) = report.vital_signs {
         let mut parts = Vec::new();
         if vs.total_loc > 0 {
@@ -354,8 +365,15 @@ pub(super) fn print_health_compact(report: &crate::health_types::HealthReport, r
         }
         outln!("vital-signs:{}", parts.join(","));
     }
-    for finding in &report.findings {
-        let relative = normalize_uri(&relative_path(&finding.path, root).display().to_string());
+}
+
+fn health_compact_path(path: &Path, root: &Path) -> String {
+    normalize_uri(&relative_path(path, root).display().to_string())
+}
+
+fn print_health_findings_compact(findings: &[crate::health_types::HealthFinding], root: &Path) {
+    for finding in findings {
+        let relative = health_compact_path(&finding.path, root);
         let severity = match finding.severity {
             crate::health_types::FindingSeverity::Critical => "critical",
             crate::health_types::FindingSeverity::High => "high",
@@ -382,8 +400,11 @@ pub(super) fn print_health_compact(report: &crate::health_types::HealthReport, r
             crap_suffix,
         );
     }
-    for score in &report.file_scores {
-        let relative = normalize_uri(&relative_path(&score.path, root).display().to_string());
+}
+
+fn print_file_scores_compact(scores: &[crate::health_types::FileHealthScore], root: &Path) {
+    for score in scores {
+        let relative = health_compact_path(&score.path, root);
         outln!(
             "file-score:{}:mi={:.1},fan_in={},fan_out={},dead={:.2},density={:.2},crap_max={:.1},crap_above={}",
             relative,
@@ -396,6 +417,9 @@ pub(super) fn print_health_compact(report: &crate::health_types::HealthReport, r
             score.crap_above_threshold,
         );
     }
+}
+
+fn print_coverage_gaps_compact(report: &crate::health_types::HealthReport, root: &Path) {
     if let Some(ref gaps) = report.coverage_gaps {
         outln!(
             "coverage-gap-summary:runtime_files={},covered_files={},file_coverage_pct={:.1},untested_files={},untested_exports={}",
@@ -406,8 +430,7 @@ pub(super) fn print_health_compact(report: &crate::health_types::HealthReport, r
             gaps.summary.untested_exports,
         );
         for item in &gaps.files {
-            let relative =
-                normalize_uri(&relative_path(&item.file.path, root).display().to_string());
+            let relative = health_compact_path(&item.file.path, root);
             outln!(
                 "untested-file:{}:value_exports={}",
                 relative,
@@ -415,8 +438,7 @@ pub(super) fn print_health_compact(report: &crate::health_types::HealthReport, r
             );
         }
         for item in &gaps.exports {
-            let relative =
-                normalize_uri(&relative_path(&item.export.path, root).display().to_string());
+            let relative = health_compact_path(&item.export.path, root);
             outln!(
                 "untested-export:{}:{}:{}",
                 relative,
@@ -425,6 +447,9 @@ pub(super) fn print_health_compact(report: &crate::health_types::HealthReport, r
             );
         }
     }
+}
+
+fn print_runtime_sections_compact(report: &crate::health_types::HealthReport, root: &Path) {
     if let Some(ref production) = report.runtime_coverage {
         for line in build_runtime_coverage_compact_lines(production, root) {
             outln!("{line}");
@@ -435,37 +460,40 @@ pub(super) fn print_health_compact(report: &crate::health_types::HealthReport, r
             outln!("{line}");
         }
     }
-    for entry in &report.hotspots {
-        let relative = normalize_uri(&relative_path(&entry.path, root).display().to_string());
-        let ownership_suffix = entry
-            .ownership
-            .as_ref()
-            .map(|o| {
-                let mut parts = vec![
-                    format!("bus={}", o.bus_factor),
-                    format!("contributors={}", o.contributor_count),
-                    format!("top={}", o.top_contributor.identifier),
-                    format!("top_share={:.3}", o.top_contributor.share),
-                ];
-                if let Some(owner) = &o.declared_owner {
-                    parts.push(format!("owner={owner}"));
-                }
-                if let Some(unowned) = o.unowned {
-                    parts.push(format!("unowned={unowned}"));
-                }
-                let state = match o.ownership_state {
-                    crate::health_types::OwnershipState::Active => "active",
-                    crate::health_types::OwnershipState::Unowned => "unowned",
-                    crate::health_types::OwnershipState::DeclaredInactive => "declared_inactive",
-                    crate::health_types::OwnershipState::Drifting => "drifting",
-                };
-                parts.push(format!("ownership_state={state}"));
-                if o.drift {
-                    parts.push("drift=true".to_string());
-                }
-                format!(",{}", parts.join(","))
-            })
-            .unwrap_or_default();
+}
+
+fn compact_ownership_suffix(ownership: Option<&crate::health_types::OwnershipMetrics>) -> String {
+    ownership.map_or_else(String::new, |o| {
+        let mut parts = vec![
+            format!("bus={}", o.bus_factor),
+            format!("contributors={}", o.contributor_count),
+            format!("top={}", o.top_contributor.identifier),
+            format!("top_share={:.3}", o.top_contributor.share),
+        ];
+        if let Some(owner) = &o.declared_owner {
+            parts.push(format!("owner={owner}"));
+        }
+        if let Some(unowned) = o.unowned {
+            parts.push(format!("unowned={unowned}"));
+        }
+        let state = match o.ownership_state {
+            crate::health_types::OwnershipState::Active => "active",
+            crate::health_types::OwnershipState::Unowned => "unowned",
+            crate::health_types::OwnershipState::DeclaredInactive => "declared_inactive",
+            crate::health_types::OwnershipState::Drifting => "drifting",
+        };
+        parts.push(format!("ownership_state={state}"));
+        if o.drift {
+            parts.push("drift=true".to_string());
+        }
+        format!(",{}", parts.join(","))
+    })
+}
+
+fn print_hotspots_compact(hotspots: &[crate::health_types::HotspotFinding], root: &Path) {
+    for entry in hotspots {
+        let relative = health_compact_path(&entry.path, root);
+        let ownership_suffix = compact_ownership_suffix(entry.ownership.as_ref());
         outln!(
             "hotspot:{}:score={:.1},commits={},churn={},density={:.2},fan_in={},trend={}{}",
             relative,
@@ -478,6 +506,9 @@ pub(super) fn print_health_compact(report: &crate::health_types::HealthReport, r
             ownership_suffix,
         );
     }
+}
+
+fn print_health_trend_compact(report: &crate::health_types::HealthReport) {
     if let Some(ref trend) = report.health_trend {
         outln!(
             "trend:overall:direction={}",
@@ -494,8 +525,14 @@ pub(super) fn print_health_compact(report: &crate::health_types::HealthReport, r
             );
         }
     }
-    for target in &report.targets {
-        let relative = normalize_uri(&relative_path(&target.path, root).display().to_string());
+}
+
+fn print_refactoring_targets_compact(
+    targets: &[crate::health_types::RefactoringTargetFinding],
+    root: &Path,
+) {
+    for target in targets {
+        let relative = health_compact_path(&target.path, root);
         let category = target.category.compact_label();
         let effort = target.effort.label();
         let confidence = target.confidence.label();
