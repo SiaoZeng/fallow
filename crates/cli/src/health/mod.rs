@@ -539,7 +539,7 @@ fn execute_health_inner(
         diff_index,
     );
 
-    let active_coverage_model = active_health_coverage_model(istanbul_coverage.is_some());
+    let active_coverage_model = Some(active_health_coverage_model(istanbul_coverage.is_some()));
 
     if let Some(ref snapshot_path) = opts.save_snapshot {
         save_snapshot(SnapshotInput {
@@ -562,7 +562,7 @@ fn execute_health_inner(
     let action_ctx =
         build_health_action_context(opts, &config, max_cyclomatic, max_cognitive, max_crap);
 
-    let grouping = build_optional_health_grouping(
+    let grouping = build_optional_health_grouping_opt(
         group_resolver.as_ref(),
         &config.root,
         &candidate_paths,
@@ -619,7 +619,7 @@ fn execute_health_inner(
     let timings = build_health_timings(
         opts,
         &start,
-        HealthTimingInput {
+        &HealthTimingInput {
             config_ms,
             discover_ms,
             parse_ms,
@@ -673,7 +673,7 @@ struct HealthTimingInput {
 fn build_health_timings(
     opts: &HealthOptions<'_>,
     start: &Instant,
-    input: HealthTimingInput,
+    input: &HealthTimingInput,
 ) -> Option<HealthTimings> {
     if !opts.performance {
         return None;
@@ -716,25 +716,27 @@ fn prepare_health_coverage_settings(
     })
 }
 
-fn build_optional_health_grouping(
+fn build_optional_health_grouping_opt(
     resolver: Option<&crate::report::OwnershipResolver>,
     project_root: &std::path::Path,
     candidate_paths: &rustc_hash::FxHashSet<std::path::PathBuf>,
     input: &grouping::HealthGroupingInput<'_>,
 ) -> Option<HealthGrouping> {
-    resolver.map(|resolver| {
-        grouping::build_health_grouping(resolver, project_root, candidate_paths, input)
-    })
+    let resolver = resolver?;
+    Some(grouping::build_health_grouping(
+        resolver,
+        project_root,
+        candidate_paths,
+        input,
+    ))
 }
 
-fn active_health_coverage_model(
-    has_istanbul_coverage: bool,
-) -> Option<crate::health_types::CoverageModel> {
-    Some(if has_istanbul_coverage {
+fn active_health_coverage_model(has_istanbul_coverage: bool) -> crate::health_types::CoverageModel {
+    if has_istanbul_coverage {
         crate::health_types::CoverageModel::Istanbul
     } else {
         crate::health_types::CoverageModel::StaticEstimated
-    })
+    }
 }
 
 fn record_health_telemetry(report: &HealthReport, coverage_gaps_has_findings: bool) {

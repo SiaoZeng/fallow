@@ -3033,7 +3033,6 @@ fn dispatch_subcommand(command: Command, dispatch: &DispatchContext<'_>) -> Exit
     let root = dispatch.root;
     let output = dispatch.output;
     let quiet = dispatch.quiet;
-    let threads = dispatch.threads;
     match command {
         Command::Check {
             unused_files,
@@ -3236,10 +3235,23 @@ fn dispatch_subcommand(command: Command, dispatch: &DispatchContext<'_>) -> Exit
             license::run(&map_license_subcommand(subcommand), output)
         }
         Command::Telemetry { .. } => unreachable!("handled before root validation"),
-        Command::Coverage { subcommand } => dispatch_coverage_command(dispatch, subcommand),
-        setup_hooks @ Command::SetupHooks { .. } => {
-            dispatch_setup_hooks_command(setup_hooks, dispatch)
-        }
+        Command::Coverage { subcommand } => dispatch_coverage_command(dispatch, &subcommand),
+        Command::SetupHooks {
+            agent,
+            dry_run,
+            force,
+            user,
+            gitignore_claude,
+            uninstall,
+        } => dispatch_setup_hooks_command(
+            dispatch,
+            agent,
+            dry_run,
+            force,
+            user,
+            gitignore_claude,
+            uninstall,
+        ),
     }
 }
 
@@ -3316,10 +3328,10 @@ fn dispatch_dupes_command(command: Command, dispatch: &DispatchContext<'_>) -> E
     )
 }
 
-fn dispatch_coverage_command(dispatch: &DispatchContext<'_>, subcommand: CoverageCli) -> ExitCode {
+fn dispatch_coverage_command(dispatch: &DispatchContext<'_>, subcommand: &CoverageCli) -> ExitCode {
     let cli = dispatch.cli;
     coverage::run(
-        map_coverage_subcommand(&subcommand, cli.explain),
+        map_coverage_subcommand(subcommand, cli.explain),
         &coverage::RunContext {
             root: dispatch.root,
             config_path: &cli.config,
@@ -3332,19 +3344,15 @@ fn dispatch_coverage_command(dispatch: &DispatchContext<'_>, subcommand: Coverag
     )
 }
 
-fn dispatch_setup_hooks_command(command: Command, dispatch: &DispatchContext<'_>) -> ExitCode {
-    let Command::SetupHooks {
-        agent,
-        dry_run,
-        force,
-        user,
-        gitignore_claude,
-        uninstall,
-    } = command
-    else {
-        unreachable!("setup hooks dispatcher only handles setup-hooks commands");
-    };
-
+fn dispatch_setup_hooks_command(
+    dispatch: &DispatchContext<'_>,
+    agent: Option<setup_hooks::HookAgentArg>,
+    dry_run: bool,
+    force: bool,
+    user: bool,
+    gitignore_claude: bool,
+    uninstall: bool,
+) -> ExitCode {
     setup_hooks::run_setup_hooks(&setup_hooks::SetupHooksOptions {
         root: dispatch.root,
         agent,
