@@ -1741,6 +1741,44 @@ mod tests {
     }
 
     #[test]
+    fn runtime_helper_tables_cover_actions_ranks_tracking_and_paths() {
+        let delete_actions = runtime_actions(RuntimeCoverageVerdict::SafeToDelete);
+        assert_eq!(delete_actions.len(), 1);
+        assert_eq!(delete_actions[0].kind, "delete-cold-code");
+        assert!(runtime_actions(RuntimeCoverageVerdict::Active).is_empty());
+        assert!(runtime_actions(RuntimeCoverageVerdict::Unknown).is_empty());
+
+        assert!(
+            runtime_verdict_rank(RuntimeCoverageVerdict::SafeToDelete)
+                < runtime_verdict_rank(RuntimeCoverageVerdict::ReviewRequired)
+        );
+        assert!(
+            runtime_verdict_rank(RuntimeCoverageVerdict::Unknown)
+                < runtime_verdict_rank(RuntimeCoverageVerdict::Active)
+        );
+
+        assert_eq!(
+            blast_radius_risk_band(25, 10),
+            RuntimeCoverageRiskBand::High
+        );
+        assert_eq!(
+            blast_radius_risk_band(5, 10),
+            RuntimeCoverageRiskBand::Medium
+        );
+        assert_eq!(blast_radius_risk_band(1, 10), RuntimeCoverageRiskBand::Low);
+
+        assert_eq!(cloud_v8_tracking(CloudTrackingState::Called), "tracked");
+        assert_eq!(
+            cloud_v8_tracking(CloudTrackingState::Untracked),
+            "untracked"
+        );
+        assert_eq!(
+            normalize_runtime_path(Path::new("/src\\feature\\handler.ts")),
+            "src/feature/handler.ts"
+        );
+    }
+
+    #[test]
     fn validate_output_format_rejects_other_formats() {
         for fmt in [
             OutputFormat::Compact,
