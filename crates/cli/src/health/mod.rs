@@ -335,13 +335,12 @@ fn execute_health_inner(
         istanbul_coverage,
     } = prepare_health_coverage_settings(opts, &config)?;
 
-    let needs_file_scores = opts.file_scores
-        || report_coverage_gaps
-        || enforce_coverage_gaps
-        || opts.hotspots
-        || opts.targets
-        || opts.force_full
-        || enforce_crap;
+    let needs_file_scores = needs_health_file_scores(
+        opts,
+        report_coverage_gaps,
+        enforce_coverage_gaps,
+        enforce_crap,
+    );
     let mut analysis_data = prepare_health_analysis_data(
         opts,
         &config,
@@ -355,10 +354,7 @@ fn execute_health_inner(
         needs_file_scores,
     )?;
 
-    let file_scores_slice = analysis_data
-        .score_output
-        .as_ref()
-        .map_or(&[] as &[_], |o| o.scores.as_slice());
+    let file_scores_slice = health_file_scores_slice(analysis_data.score_output.as_ref());
 
     let HealthFindingsData {
         findings,
@@ -386,16 +382,14 @@ fn execute_health_inner(
         analysis_data.score_output.as_ref(),
     )?;
 
-    let candidate_paths = collect_candidate_paths(
-        &files,
+    let (candidate_paths, dupes_report, duplication_ms) = prepare_health_duplication_data(
+        opts,
         &config,
+        &files,
         changed_files.as_ref(),
         ws_roots.as_deref(),
         &ignore_set,
     );
-
-    let (dupes_report, duplication_ms) =
-        compute_health_duplication_report(opts, &config, &files, &candidate_paths);
 
     let (hotspots, hotspot_summary, hotspots_ms) = compute_filtered_hotspots(
         opts,
@@ -418,21 +412,17 @@ fn execute_health_inner(
         dupes_report.as_ref(),
     );
 
-    filter_runtime_coverage_report(
+    finalize_health_runtime_outputs(
         opts,
-        &config,
-        analysis_data.runtime_coverage.as_mut(),
-        loaded_baseline.as_ref(),
-        changed_files.as_ref(),
-        diff_index,
-    );
-
-    save_health_baseline_if_requested(
-        opts,
-        &config,
-        &findings,
-        analysis_data.runtime_coverage.as_ref(),
-        &targets,
+        HealthRuntimeFinalizeInput {
+            config: &config,
+            runtime_coverage: &mut analysis_data.runtime_coverage,
+            findings: &findings,
+            targets: &targets,
+            loaded_baseline: loaded_baseline.as_ref(),
+            changed_files: changed_files.as_ref(),
+            diff_index,
+        },
     )?;
 
     let vital_data = prepare_health_vital_data(
@@ -455,10 +445,8 @@ fn execute_health_inner(
         needs_file_scores,
     )?;
 
-    let coverage_gaps_has_findings = analysis_data
-        .score_output
-        .as_ref()
-        .is_some_and(|output| !output.coverage.report.is_empty());
+    let coverage_gaps_has_findings =
+        health_coverage_gaps_has_findings(analysis_data.score_output.as_ref());
 
     let action_ctx =
         build_health_action_context(opts, &config, max_cyclomatic, max_cognitive, max_crap);
@@ -566,6 +554,29 @@ struct HealthFindingsData {
     sev_high: usize,
     sev_moderate: usize,
     loaded_baseline: Option<HealthBaselineData>,
+}
+
+fn needs_health_file_scores(
+    opts: &HealthOptions<'_>,
+    report_coverage_gaps: bool,
+    enforce_coverage_gaps: bool,
+    enforce_crap: bool,
+) -> bool {
+    opts.file_scores
+        || report_coverage_gaps
+        || enforce_coverage_gaps
+        || opts.hotspots
+        || opts.targets
+        || opts.force_full
+        || enforce_crap
+}
+
+fn health_coverage_gaps_has_findings(score_output: Option<&scoring::FileScoreOutput>) -> bool {
+    score_output.is_some_and(|output| !output.coverage.report.is_empty())
+}
+
+fn health_file_scores_slice(score_output: Option<&scoring::FileScoreOutput>) -> &[FileHealthScore] {
+    score_output.map_or(&[] as &[_], |output| output.scores.as_slice())
 }
 
 struct HealthTimingInput {
@@ -1303,6 +1314,60 @@ fn save_health_baseline_if_requested(
         )?;
     }
     Ok(())
+}
+
+struct HealthRuntimeFinalizeInput<'a> {
+    config: &'a ResolvedConfig,
+    runtime_coverage: &'a mut Option<crate::health_types::RuntimeCoverageReport>,
+    findings: &'a [ComplexityViolation],
+    targets: &'a [RefactoringTarget],
+    loaded_baseline: Option<&'a HealthBaselineData>,
+    changed_files: Option<&'a rustc_hash::FxHashSet<std::path::PathBuf>>,
+    diff_index: Option<&'a crate::report::ci::diff_filter::DiffIndex>,
+}
+
+fn finalize_health_runtime_outputs(
+    opts: &HealthOptions<'_>,
+    input: HealthRuntimeFinalizeInput<'_>,
+) -> Result<(), ExitCode> {
+    let HealthRuntimeFinalizeInput {
+        config,
+        runtime_coverage,
+        findings,
+        targets,
+        loaded_baseline,
+        changed_files,
+        diff_index,
+    } = input;
+
+    filter_runtime_coverage_report(
+        opts,
+        config,
+        runtime_coverage.as_mut(),
+        loaded_baseline,
+        changed_files,
+        diff_index,
+    );
+    save_health_baseline_if_requested(opts, config, findings, runtime_coverage.as_ref(), targets)
+}
+
+fn prepare_health_duplication_data(
+    opts: &HealthOptions<'_>,
+    config: &ResolvedConfig,
+    files: &[fallow_types::discover::DiscoveredFile],
+    changed_files: Option<&rustc_hash::FxHashSet<std::path::PathBuf>>,
+    ws_roots: Option<&[std::path::PathBuf]>,
+    ignore_set: &globset::GlobSet,
+) -> (
+    rustc_hash::FxHashSet<std::path::PathBuf>,
+    Option<fallow_core::duplicates::DuplicationReport>,
+    f64,
+) {
+    let candidate_paths =
+        collect_candidate_paths(files, config, changed_files, ws_roots, ignore_set);
+    let (dupes_report, duplication_ms) =
+        compute_health_duplication_report(opts, config, files, &candidate_paths);
+    (candidate_paths, dupes_report, duplication_ms)
 }
 
 fn compute_health_duplication_report(

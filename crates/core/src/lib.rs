@@ -513,37 +513,12 @@ pub fn analyze_with_parse_result(
 
     let t = Instant::now();
     progress.set_stage("resolving imports...");
-    let mut resolved = resolve::resolve_all_imports(
-        modules,
-        files,
-        workspaces,
-        &plugin_result.active_plugins,
-        &plugin_result.path_aliases,
-        &plugin_result.auto_imports,
-        &plugin_result.scss_include_paths,
-        &plugin_result.static_dir_mappings,
-        &config.root,
-        &config.resolve.conditions,
-    );
-    external_style_usage::augment_external_style_package_usage(
-        &mut resolved,
-        config,
-        workspaces,
-        &plugin_result,
-    );
+    let resolved = resolve_analysis_imports(modules, files, workspaces, &plugin_result, config);
     let resolve_ms = t.elapsed().as_secs_f64() * 1000.0;
 
     let t = Instant::now();
     progress.set_stage("building module graph...");
-    let mut graph = graph::ModuleGraph::build_with_reachability_roots(
-        &resolved,
-        &entry_points.all,
-        &entry_points.runtime,
-        &entry_points.test,
-        files,
-    );
-    credit_package_path_references(&mut graph, modules);
-    credit_workspace_package_usage(&mut graph, &resolved, workspaces);
+    let graph = build_analysis_graph(&resolved, &entry_points, files, modules, workspaces);
     let graph_ms = t.elapsed().as_secs_f64() * 1000.0;
 
     let t = Instant::now();
@@ -618,14 +593,7 @@ pub fn analyze_with_parse_result(
         total_ms,
     });
 
-    let file_hashes: rustc_hash::FxHashMap<std::path::PathBuf, u64> = modules
-        .iter()
-        .filter_map(|module| {
-            files
-                .get(module.file_id.0 as usize)
-                .map(|file| (file.path.clone(), module.content_hash))
-        })
-        .collect();
+    let file_hashes = collect_file_hashes(modules, files);
 
     Ok(AnalysisOutput {
         results: result,
@@ -737,19 +705,13 @@ fn analyze_full(
     let parse_cpu_ms = parse_result.parse_cpu_ms;
     let parse_ms = t.elapsed().as_secs_f64() * 1000.0;
 
-    let t = Instant::now();
-    if !config.no_cache {
-        let store = cache_store.get_or_insert_with(cache::CacheStore::new);
-        update_cache(store, &modules, files);
-        if let Err(e) = store.save(
-            &config.cache_dir,
-            config.cache_config_hash,
-            cache_max_size_bytes,
-        ) {
-            tracing::warn!("Failed to save cache: {e}");
-        }
-    }
-    let cache_ms = t.elapsed().as_secs_f64() * 1000.0;
+    let cache_ms = update_parse_cache_if_enabled(
+        config,
+        &mut cache_store,
+        &modules,
+        files,
+        cache_max_size_bytes,
+    );
 
     let t = Instant::now();
     let entry_points = discover_all_entry_points(
@@ -764,37 +726,12 @@ fn analyze_full(
 
     let t = Instant::now();
     progress.set_stage("resolving imports...");
-    let mut resolved = resolve::resolve_all_imports(
-        &modules,
-        files,
-        workspaces,
-        &plugin_result.active_plugins,
-        &plugin_result.path_aliases,
-        &plugin_result.auto_imports,
-        &plugin_result.scss_include_paths,
-        &plugin_result.static_dir_mappings,
-        &config.root,
-        &config.resolve.conditions,
-    );
-    external_style_usage::augment_external_style_package_usage(
-        &mut resolved,
-        config,
-        workspaces,
-        &plugin_result,
-    );
+    let resolved = resolve_analysis_imports(&modules, files, workspaces, &plugin_result, config);
     let resolve_ms = t.elapsed().as_secs_f64() * 1000.0;
 
     let t = Instant::now();
     progress.set_stage("building module graph...");
-    let mut graph = graph::ModuleGraph::build_with_reachability_roots(
-        &resolved,
-        &entry_points.all,
-        &entry_points.runtime,
-        &entry_points.test,
-        files,
-    );
-    credit_package_path_references(&mut graph, &modules);
-    credit_workspace_package_usage(&mut graph, &resolved, workspaces);
+    let graph = build_analysis_graph(&resolved, &entry_points, files, &modules, workspaces);
     for module in &mut modules {
         module.release_resolution_payload();
     }
@@ -869,14 +806,7 @@ fn analyze_full(
         None
     };
 
-    let file_hashes: rustc_hash::FxHashMap<std::path::PathBuf, u64> = modules
-        .iter()
-        .filter_map(|module| {
-            files
-                .get(module.file_id.0 as usize)
-                .map(|file| (file.path.clone(), module.content_hash))
-        })
-        .collect();
+    let file_hashes = collect_file_hashes(&modules, files);
 
     Ok(AnalysisOutput {
         results: result,
@@ -911,6 +841,89 @@ struct PipelineProfile {
     entry_point_count: usize,
     cache_hits: usize,
     cache_misses: usize,
+}
+
+fn update_parse_cache_if_enabled(
+    config: &ResolvedConfig,
+    cache_store: &mut Option<cache::CacheStore>,
+    modules: &[extract::ModuleInfo],
+    files: &[discover::DiscoveredFile],
+    cache_max_size_bytes: usize,
+) -> f64 {
+    let t = Instant::now();
+    if !config.no_cache {
+        let store = cache_store.get_or_insert_with(cache::CacheStore::new);
+        update_cache(store, modules, files);
+        if let Err(error) = store.save(
+            &config.cache_dir,
+            config.cache_config_hash,
+            cache_max_size_bytes,
+        ) {
+            tracing::warn!("Failed to save cache: {error}");
+        }
+    }
+    t.elapsed().as_secs_f64() * 1000.0
+}
+
+fn resolve_analysis_imports(
+    modules: &[extract::ModuleInfo],
+    files: &[discover::DiscoveredFile],
+    workspaces: &[fallow_config::WorkspaceInfo],
+    plugin_result: &plugins::AggregatedPluginResult,
+    config: &ResolvedConfig,
+) -> Vec<resolve::ResolvedModule> {
+    let mut resolved = resolve::resolve_all_imports(
+        modules,
+        files,
+        workspaces,
+        &plugin_result.active_plugins,
+        &plugin_result.path_aliases,
+        &plugin_result.auto_imports,
+        &plugin_result.scss_include_paths,
+        &plugin_result.static_dir_mappings,
+        &config.root,
+        &config.resolve.conditions,
+    );
+    external_style_usage::augment_external_style_package_usage(
+        &mut resolved,
+        config,
+        workspaces,
+        plugin_result,
+    );
+    resolved
+}
+
+fn build_analysis_graph(
+    resolved: &[resolve::ResolvedModule],
+    entry_points: &discover::CategorizedEntryPoints,
+    files: &[discover::DiscoveredFile],
+    modules: &[extract::ModuleInfo],
+    workspaces: &[fallow_config::WorkspaceInfo],
+) -> graph::ModuleGraph {
+    let mut graph = graph::ModuleGraph::build_with_reachability_roots(
+        resolved,
+        &entry_points.all,
+        &entry_points.runtime,
+        &entry_points.test,
+        files,
+    );
+    credit_package_path_references(&mut graph, modules);
+    credit_workspace_package_usage(&mut graph, resolved, workspaces);
+    graph
+}
+
+fn collect_file_hashes(
+    modules: &[extract::ModuleInfo],
+    files: &[discover::DiscoveredFile],
+) -> rustc_hash::FxHashMap<std::path::PathBuf, u64> {
+    modules
+        .iter()
+        .filter_map(|module| {
+            files
+                .get(module.file_id.0 as usize)
+                .map(|file| (file.path.clone(), module.content_hash))
+        })
+        .collect()
 }
 
 fn trace_pipeline_profile(profile: &PipelineProfile) {
