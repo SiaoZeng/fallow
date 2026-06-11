@@ -3,11 +3,15 @@
  * Generate the agent-facing doc tables in the fallow skill tree from the
  * `fallow schema` capability manifest (issue #1188).
  *
- * Targets (v1): `<target>/SKILL.md` only. Three marker-wrapped sections:
+ * Targets (v1): `<target>/SKILL.md` only. Four marker-wrapped sections:
  *
  *   <!-- generated:commands:start -->    ... <!-- generated:commands:end -->
  *   <!-- generated:issue-types:start --> ... <!-- generated:issue-types:end -->
  *   <!-- generated:mcp-tools:start -->   ... <!-- generated:mcp-tools:end -->
+ *   <!-- generated:task-matrix:start --> ... <!-- generated:task-matrix:end -->
+ *
+ * A target whose text contains NEITHER marker of a section has not adopted
+ * that section and is skipped; a half-present marker pair still fails loudly.
  *
  * Merge-splice contract:
  * - IDENTITY columns are always regenerated from the manifest (row set, ids,
@@ -51,7 +55,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-export const SECTION_IDS = ["commands", "issue-types", "mcp-tools"];
+export const SECTION_IDS = ["commands", "issue-types", "mcp-tools", "task-matrix"];
 
 /** Security family rows kept in the SKILL.md issue-types table; the ~47
  * per-CWE catalogue categories collapse under tainted-sink there. */
@@ -223,10 +227,45 @@ const renderMcpToolsSection = (schema, existing) => {
   return renderTable(headers, rows);
 };
 
+/** Agent task-to-command matrix (R2). Fully regenerated from the manifest;
+ * no curated columns. The Run cell backticks the command and appends the note
+ * after a semicolon when present. Same two-column table as the Rust
+ * `render_task_matrix_markdown`, which renders the note as a parenthesized
+ * suffix instead; only the note separator differs between the two surfaces. */
+const renderTaskMatrixSection = (schema) => {
+  const headers = ["When the agent is about to...", "Run"];
+  const rows = (schema.task_matrix ?? []).map((row) => {
+    const run = row.note ? `${code(row.command)}; ${row.note}` : code(row.command);
+    return [escapeCell(row.task), run];
+  });
+  return renderTable(headers, rows);
+};
+
 const RENDERERS = {
   commands: renderCommandsSection,
   "issue-types": renderIssueTypesSection,
   "mcp-tools": renderMcpToolsSection,
+  "task-matrix": renderTaskMatrixSection,
+};
+
+/** True only when BOTH the start and end markers for a section are present.
+ * A fully-absent pair means the target has not adopted this section, so the
+ * orchestrator skips it; a half-present pair is malformed and still throws via
+ * `spliceSection`. */
+export const hasSection = (text, sectionId) => {
+  const start = `<!-- generated:${sectionId}:start -->`;
+  const end = `<!-- generated:${sectionId}:end -->`;
+  return text.includes(start) && text.includes(end);
+};
+
+/** True when NEITHER marker is present: the target has not adopted the section
+ * at all, so the orchestrator skips it gracefully. A half-present pair (exactly
+ * one marker) returns false here and is left to `spliceSection`, which throws on
+ * the missing partner. */
+export const sectionIsAbsent = (text, sectionId) => {
+  const start = `<!-- generated:${sectionId}:start -->`;
+  const end = `<!-- generated:${sectionId}:end -->`;
+  return !text.includes(start) && !text.includes(end);
 };
 
 /** Splice one generated section between its markers. Throws on marker misuse. */
@@ -259,10 +298,16 @@ export const spliceSection = (text, sectionId, schema, fileLabel) => {
   return `${text.slice(0, startIdx + start.length)}\n${rendered}\n${text.slice(endIdx)}`;
 };
 
-/** Regenerate every section in a SKILL.md text; returns the new text. */
+/** Regenerate every adopted section in a SKILL.md text; returns the new text.
+ * A section whose markers are BOTH absent is skipped (target has not adopted
+ * it); a half-present / duplicated / inverted marker pair still throws via
+ * `spliceSection`. */
 export const regenerateSkillMd = (text, schema, fileLabel = "SKILL.md") => {
   let out = text;
   for (const sectionId of SECTION_IDS) {
+    if (sectionIsAbsent(out, sectionId)) {
+      continue;
+    }
     out = spliceSection(out, sectionId, schema, fileLabel);
   }
   return out;
@@ -339,7 +384,7 @@ export const main = (argv = process.argv.slice(2)) => {
     } else if (opts.check) {
       drifted += 1;
       const sections = SECTION_IDS.filter(
-        (id) => spliceSection(before, id, schema, file) !== before,
+        (id) => !sectionIsAbsent(before, id) && spliceSection(before, id, schema, file) !== before,
       );
       console.error(`DRIFT: ${file} (sections: ${sections.join(", ")})`);
     } else {
