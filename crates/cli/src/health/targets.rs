@@ -140,14 +140,6 @@ fn compute_target_priority(
 /// Files matching no rule are skipped.
 ///
 /// Targets are sorted by efficiency (priority / effort) descending to surface quick wins first.
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "f64 percentile and ratio values are bounded by collection sizes"
-)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "target computation applies 7 refactoring rules sequentially"
-)]
 pub(super) fn compute_refactoring_targets(
     file_scores: &[FileHealthScore],
     aux: &TargetAuxData,
@@ -174,95 +166,19 @@ pub(super) fn compute_refactoring_targets(
 
         let mut factors = Vec::new();
 
-        if score.complexity_density > 0.3 {
-            factors.push(ContributingFactor {
-                metric: "complexity_density",
-                value: score.complexity_density,
-                threshold: 0.3,
-                detail: format!("density {:.2} exceeds 0.3", score.complexity_density),
-            });
-        }
-        if score.fan_in as f64 >= thresholds.fan_in_p75 {
-            factors.push(ContributingFactor {
-                metric: "fan_in",
-                value: score.fan_in as f64,
-                threshold: thresholds.fan_in_p75,
-                detail: format!("{} files depend on this", score.fan_in),
-            });
-        }
-        if score.dead_code_ratio >= 0.5 && value_exports >= 3 {
-            let unused_count = (score.dead_code_ratio * value_exports as f64)
-                .round()
-                .min(value_exports as f64) as usize;
-            factors.push(ContributingFactor {
-                metric: "dead_code_ratio",
-                value: score.dead_code_ratio,
-                threshold: 0.5,
-                detail: format!(
-                    "{} unused of {} value exports ({:.0}%)",
-                    unused_count,
-                    value_exports,
-                    score.dead_code_ratio * 100.0
-                ),
-            });
-        }
-        if score.fan_out >= thresholds.fan_out_p90 {
-            factors.push(ContributingFactor {
-                metric: "fan_out",
-                value: score.fan_out as f64,
-                threshold: thresholds.fan_out_p90 as f64,
-                detail: format!("imports {} modules", score.fan_out),
-            });
-        }
-        if is_circular {
-            factors.push(ContributingFactor {
-                metric: "circular_dependency",
-                value: 1.0,
-                threshold: 1.0,
-                detail: "participates in an import cycle".into(),
-            });
-        }
-        if let Some(h) = hotspot
-            && h.score >= 30.0
-        {
-            factors.push(ContributingFactor {
-                metric: "hotspot_score",
-                value: h.score,
-                threshold: 30.0,
-                detail: format!(
-                    "hotspot score {:.0} ({} commits, {} trend)",
-                    h.score,
-                    h.commits,
-                    match h.trend {
-                        fallow_core::churn::ChurnTrend::Accelerating => "accelerating",
-                        fallow_core::churn::ChurnTrend::Cooling => "cooling",
-                        fallow_core::churn::ChurnTrend::Stable => "stable",
-                    }
-                ),
-            });
-        }
-        if let Some(fns) = top_fns
-            && let Some((name, _, cog)) = fns.first()
-            && *cog >= COGNITIVE_EXTRACTION_THRESHOLD
-        {
-            factors.push(ContributingFactor {
-                metric: "cognitive_complexity",
-                value: f64::from(*cog),
-                threshold: f64::from(COGNITIVE_EXTRACTION_THRESHOLD),
-                detail: format!("{name} has cognitive complexity {cog}"),
-            });
-        }
-        if score.crap_above_threshold >= 2 && score.crap_max >= super::scoring::CRAP_THRESHOLD {
-            factors.push(ContributingFactor {
-                metric: "crap_max",
-                value: score.crap_max,
-                threshold: super::scoring::CRAP_THRESHOLD,
-                detail: format!(
-                    "{} functions with untested complexity risk",
-                    score.crap_above_threshold,
-                ),
-            });
-        }
+        push_structural_target_factors(
+            &mut factors,
+            score,
+            value_exports,
+            is_circular,
+            &thresholds,
+        );
+        push_runtime_target_factors(
+            &mut factors,
+            score,
+            hotspot.copied(),
+            top_fns.map(Vec::as_slice),
+        );
 
         if factors.is_empty() {
             continue;
@@ -309,6 +225,123 @@ pub(super) fn compute_refactoring_targets(
         });
     }
 
+    sort_refactoring_targets(&mut targets);
+    let exported_thresholds = export_target_thresholds(&thresholds);
+
+    (targets, exported_thresholds)
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "unused export estimate is capped by the value export count"
+)]
+fn push_structural_target_factors(
+    factors: &mut Vec<ContributingFactor>,
+    score: &FileHealthScore,
+    value_exports: usize,
+    is_circular: bool,
+    thresholds: &DistributionThresholds,
+) {
+    if score.complexity_density > 0.3 {
+        factors.push(ContributingFactor {
+            metric: "complexity_density",
+            value: score.complexity_density,
+            threshold: 0.3,
+            detail: format!("density {:.2} exceeds 0.3", score.complexity_density),
+        });
+    }
+    if score.fan_in as f64 >= thresholds.fan_in_p75 {
+        factors.push(ContributingFactor {
+            metric: "fan_in",
+            value: score.fan_in as f64,
+            threshold: thresholds.fan_in_p75,
+            detail: format!("{} files depend on this", score.fan_in),
+        });
+    }
+    if score.dead_code_ratio >= 0.5 && value_exports >= 3 {
+        let unused_count = (score.dead_code_ratio * value_exports as f64)
+            .round()
+            .min(value_exports as f64) as usize;
+        factors.push(ContributingFactor {
+            metric: "dead_code_ratio",
+            value: score.dead_code_ratio,
+            threshold: 0.5,
+            detail: format!(
+                "{} unused of {} value exports ({:.0}%)",
+                unused_count,
+                value_exports,
+                score.dead_code_ratio * 100.0
+            ),
+        });
+    }
+    if score.fan_out >= thresholds.fan_out_p90 {
+        factors.push(ContributingFactor {
+            metric: "fan_out",
+            value: score.fan_out as f64,
+            threshold: thresholds.fan_out_p90 as f64,
+            detail: format!("imports {} modules", score.fan_out),
+        });
+    }
+    if is_circular {
+        factors.push(ContributingFactor {
+            metric: "circular_dependency",
+            value: 1.0,
+            threshold: 1.0,
+            detail: "participates in an import cycle".into(),
+        });
+    }
+}
+
+fn push_runtime_target_factors(
+    factors: &mut Vec<ContributingFactor>,
+    score: &FileHealthScore,
+    hotspot: Option<&HotspotEntry>,
+    top_fns: Option<&[(String, u32, u16)]>,
+) {
+    if let Some(h) = hotspot
+        && h.score >= 30.0
+    {
+        factors.push(ContributingFactor {
+            metric: "hotspot_score",
+            value: h.score,
+            threshold: 30.0,
+            detail: format!(
+                "hotspot score {:.0} ({} commits, {} trend)",
+                h.score,
+                h.commits,
+                match h.trend {
+                    fallow_core::churn::ChurnTrend::Accelerating => "accelerating",
+                    fallow_core::churn::ChurnTrend::Cooling => "cooling",
+                    fallow_core::churn::ChurnTrend::Stable => "stable",
+                }
+            ),
+        });
+    }
+    if let Some(fns) = top_fns
+        && let Some((name, _, cog)) = fns.first()
+        && *cog >= COGNITIVE_EXTRACTION_THRESHOLD
+    {
+        factors.push(ContributingFactor {
+            metric: "cognitive_complexity",
+            value: f64::from(*cog),
+            threshold: f64::from(COGNITIVE_EXTRACTION_THRESHOLD),
+            detail: format!("{name} has cognitive complexity {cog}"),
+        });
+    }
+    if score.crap_above_threshold >= 2 && score.crap_max >= super::scoring::CRAP_THRESHOLD {
+        factors.push(ContributingFactor {
+            metric: "crap_max",
+            value: score.crap_max,
+            threshold: super::scoring::CRAP_THRESHOLD,
+            detail: format!(
+                "{} functions with untested complexity risk",
+                score.crap_above_threshold,
+            ),
+        });
+    }
+}
+
+fn sort_refactoring_targets(targets: &mut [RefactoringTarget]) {
     targets.sort_by(|a, b| {
         b.efficiency
             .partial_cmp(&a.efficiency)
@@ -320,15 +353,15 @@ pub(super) fn compute_refactoring_targets(
             })
             .then_with(|| a.path.cmp(&b.path))
     });
+}
 
-    let exported_thresholds = TargetThresholds {
+fn export_target_thresholds(thresholds: &DistributionThresholds) -> TargetThresholds {
+    TargetThresholds {
         fan_in_p95: thresholds.fan_in_p95,
         fan_in_p75: thresholds.fan_in_p75,
         fan_out_p95: thresholds.fan_out_p95,
         fan_out_p90: thresholds.fan_out_p90,
-    };
-
-    (targets, exported_thresholds)
+    }
 }
 
 /// Try to match a file against refactoring rules in priority order.

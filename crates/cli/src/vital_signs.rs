@@ -62,67 +62,94 @@ pub struct AnalysisCounts {
     pub total_deps: usize,
 }
 
-/// Compute vital signs from available health data.
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::too_many_lines,
-    reason = "vital-sign aggregation keeps the metric definitions in one ordered block; percentile indices, dep counts, hotspot counts, and LOC per file are bounded by project size"
-)]
-pub fn compute_vital_signs(input: &VitalSignsInput<'_>) -> VitalSigns {
-    let mut all_cyclomatic: Vec<u16> = input
+fn collect_sorted_cyclomatic(input: &VitalSignsInput<'_>) -> Vec<u16> {
+    let mut values: Vec<u16> = input
         .selected_modules()
         .flat_map(|m| m.complexity.iter().map(|c| c.cyclomatic))
         .collect();
-    all_cyclomatic.sort_unstable();
+    values.sort_unstable();
+    values
+}
 
-    let avg_cyclomatic = if all_cyclomatic.is_empty() {
-        0.0
-    } else {
-        let sum: u64 = all_cyclomatic.iter().map(|&c| u64::from(c)).sum();
-        (sum as f64 / all_cyclomatic.len() as f64 * 10.0).round() / 10.0
-    };
-    let critical_complexity_pct = if all_cyclomatic.is_empty() {
-        None
-    } else {
-        let critical_count = all_cyclomatic
-            .iter()
-            .filter(|&&c| c >= DEFAULT_CYCLOMATIC_CRITICAL)
-            .count();
-        Some((critical_count as f64 / all_cyclomatic.len() as f64 * 1000.0).round() / 10.0)
+fn average_cyclomatic(all_cyclomatic: &[u16]) -> f64 {
+    if all_cyclomatic.is_empty() {
+        return 0.0;
+    }
+
+    let sum: u64 = all_cyclomatic.iter().map(|&c| u64::from(c)).sum();
+    (sum as f64 / all_cyclomatic.len() as f64 * 10.0).round() / 10.0
+}
+
+fn critical_complexity_pct(all_cyclomatic: &[u16]) -> Option<f64> {
+    if all_cyclomatic.is_empty() {
+        return None;
+    }
+
+    let critical_count = all_cyclomatic
+        .iter()
+        .filter(|&&c| c >= DEFAULT_CYCLOMATIC_CRITICAL)
+        .count();
+    Some((critical_count as f64 / all_cyclomatic.len() as f64 * 1000.0).round() / 10.0)
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "percentile index is bounded by the cyclomatic collection length"
+)]
+fn p90_cyclomatic(all_cyclomatic: &[u16]) -> u32 {
+    if all_cyclomatic.is_empty() {
+        return 0;
+    }
+
+    let idx = (all_cyclomatic.len() as f64 * 0.9).ceil() as usize;
+    let idx = idx.min(all_cyclomatic.len()) - 1;
+    u32::from(all_cyclomatic[idx])
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "analysis counts are bounded by project size and emitted as compact u32 metrics"
+)]
+fn analysis_count_vitals(
+    counts: Option<&AnalysisCounts>,
+    total_files: usize,
+) -> (Option<f64>, Option<f64>, Option<u32>, Option<u32>) {
+    let Some(counts) = counts else {
+        return (None, None, None, None);
     };
 
-    let p90_cyclomatic = if all_cyclomatic.is_empty() {
-        0
+    let dead_file_pct = if total_files > 0 {
+        Some((counts.dead_files as f64 / total_files as f64 * 1000.0).round() / 10.0)
     } else {
-        let idx = (all_cyclomatic.len() as f64 * 0.9).ceil() as usize;
-        let idx = idx.min(all_cyclomatic.len()) - 1;
-        u32::from(all_cyclomatic[idx])
+        Some(0.0)
     };
+    let dead_export_pct = if counts.total_exports > 0 {
+        Some((counts.dead_exports as f64 / counts.total_exports as f64 * 1000.0).round() / 10.0)
+    } else {
+        Some(0.0)
+    };
+
+    (
+        dead_file_pct,
+        dead_export_pct,
+        Some(counts.unused_deps as u32),
+        Some(counts.circular_deps as u32),
+    )
+}
+
+/// Compute vital signs from available health data.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "remaining count conversions are bounded by project size"
+)]
+pub fn compute_vital_signs(input: &VitalSignsInput<'_>) -> VitalSigns {
+    let all_cyclomatic = collect_sorted_cyclomatic(input);
+    let avg_cyclomatic = average_cyclomatic(&all_cyclomatic);
+    let critical_complexity_pct = critical_complexity_pct(&all_cyclomatic);
+    let p90_cyclomatic = p90_cyclomatic(&all_cyclomatic);
 
     let (dead_file_pct, dead_export_pct, unused_dep_count, circular_dep_count) =
-        if let Some(ref counts) = input.analysis_counts {
-            let dfp = if input.total_files > 0 {
-                Some((counts.dead_files as f64 / input.total_files as f64 * 1000.0).round() / 10.0)
-            } else {
-                Some(0.0)
-            };
-            let dep = if counts.total_exports > 0 {
-                Some(
-                    (counts.dead_exports as f64 / counts.total_exports as f64 * 1000.0).round()
-                        / 10.0,
-                )
-            } else {
-                Some(0.0)
-            };
-            (
-                dfp,
-                dep,
-                Some(counts.unused_deps as u32),
-                Some(counts.circular_deps as u32),
-            )
-        } else {
-            (None, None, None, None)
-        };
+        analysis_count_vitals(input.analysis_counts.as_ref(), input.total_files);
     let unused_deps_per_k_files = unused_dep_count.map(|count| {
         if input.total_files == 0 {
             0.0

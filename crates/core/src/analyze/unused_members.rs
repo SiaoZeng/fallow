@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::discover::FileId;
 use crate::extract::{
     ANGULAR_TPL_SENTINEL, ExportName, FACTORY_CALL_SENTINEL, FLUENT_CHAIN_NEW_SENTINEL,
-    FLUENT_CHAIN_SENTINEL, INSTANCE_EXPORT_SENTINEL, MemberKind, ModuleInfo,
+    FLUENT_CHAIN_SENTINEL, INSTANCE_EXPORT_SENTINEL, MemberInfo, MemberKind, ModuleInfo,
     PLAYWRIGHT_FIXTURE_DEF_SENTINEL, PLAYWRIGHT_FIXTURE_TYPE_SENTINEL,
     PLAYWRIGHT_FIXTURE_USE_SENTINEL,
 };
@@ -93,6 +93,18 @@ struct ScopedMemberPattern<'a> {
     matcher: GlobMatcher,
     rule: &'a ScopedUsedClassMemberRule,
     matched: AtomicBool,
+}
+
+struct MemberSkipContext<'a> {
+    export_key: &'a ExportKey,
+    accessed_members: &'a FxHashMap<ExportKey, FxHashSet<String>>,
+    file_self_accesses: Option<&'a FxHashSet<String>>,
+    ignore_decorators: &'a IgnoreDecoratorSet,
+    error_subclass_keys: &'a FxHashSet<ExportKey>,
+    allowlist: &'a ClassMemberAllowlist<'a>,
+    super_class: Option<&'a str>,
+    implemented_interfaces: &'a [String],
+    is_public_api_class_export: bool,
 }
 
 impl<'a> ClassMemberAllowlist<'a> {
@@ -1687,7 +1699,6 @@ pub fn find_unused_members(
 
 #[expect(
     clippy::too_many_arguments,
-    clippy::too_many_lines,
     reason = "member tracking requires many graph traversal steps; further splitting is possible but not yet a priority"
 )]
 pub(super) fn find_unused_members_with_public_api_entry_points(
@@ -1810,63 +1821,20 @@ pub(super) fn find_unused_members_with_public_api_entry_points(
                 let file_self_accesses = self_accessed_members.get(&module.file_id);
 
                 for member in &export.members {
-                    if matches!(member.kind, MemberKind::NamespaceMember) {
-                        continue;
-                    }
-
-                    if is_public_api_class_export
-                        && matches!(
-                            member.kind,
-                            MemberKind::ClassMethod | MemberKind::ClassProperty
-                        )
-                    {
-                        continue;
-                    }
-
-                    if accessed_members
-                        .get(&export_key)
-                        .is_some_and(|s| s.contains(&member.name))
-                    {
-                        continue;
-                    }
-
-                    if matches!(
-                        member.kind,
-                        MemberKind::ClassMethod | MemberKind::ClassProperty
-                    ) && file_self_accesses
-                        .is_some_and(|accesses| accesses.contains(&member.name))
-                    {
-                        continue;
-                    }
-
-                    if member.has_decorator
-                        && (member.decorator_names.is_empty()
-                            || ignore_decorators.is_empty()
-                            || member
-                                .decorator_names
-                                .iter()
-                                .any(|name| !ignore_decorators.matches(name)))
-                    {
-                        continue;
-                    }
-
-                    if matches!(
-                        member.kind,
-                        MemberKind::ClassMethod | MemberKind::ClassProperty
-                    ) && (is_react_lifecycle_method(&member.name)
-                        || is_angular_lifecycle_method(&member.name)
-                        || is_native_custom_element_lifecycle_method(&member.name, super_class)
-                        || is_error_subclass_runtime_member(
-                            &member.name,
-                            &export_key,
-                            &error_subclass_keys,
-                        )
-                        || allowlist.matches(
-                            member.name.as_str(),
+                    if should_skip_member_for_unused_report(
+                        member,
+                        &MemberSkipContext {
+                            export_key: &export_key,
+                            accessed_members: &accessed_members,
+                            file_self_accesses,
+                            ignore_decorators: &ignore_decorators,
+                            error_subclass_keys: &error_subclass_keys,
+                            allowlist: &allowlist,
                             super_class,
                             implemented_interfaces,
-                        ))
-                    {
+                            is_public_api_class_export,
+                        },
+                    ) {
                         continue;
                     }
 
@@ -1919,6 +1887,62 @@ pub(super) fn find_unused_members_with_public_api_entry_points(
     ignore_decorators.warn_unmatched();
 
     (unused_enum_members, unused_class_members)
+}
+
+fn should_skip_member_for_unused_report(member: &MemberInfo, ctx: &MemberSkipContext<'_>) -> bool {
+    if matches!(member.kind, MemberKind::NamespaceMember) {
+        return true;
+    }
+
+    if ctx.is_public_api_class_export && is_class_member_kind(member.kind) {
+        return true;
+    }
+
+    if ctx
+        .accessed_members
+        .get(ctx.export_key)
+        .is_some_and(|s| s.contains(&member.name))
+    {
+        return true;
+    }
+
+    if is_class_member_kind(member.kind)
+        && ctx
+            .file_self_accesses
+            .is_some_and(|accesses| accesses.contains(&member.name))
+    {
+        return true;
+    }
+
+    if member.has_decorator
+        && (member.decorator_names.is_empty()
+            || ctx.ignore_decorators.is_empty()
+            || member
+                .decorator_names
+                .iter()
+                .any(|name| !ctx.ignore_decorators.matches(name)))
+    {
+        return true;
+    }
+
+    is_class_member_kind(member.kind)
+        && (is_react_lifecycle_method(&member.name)
+            || is_angular_lifecycle_method(&member.name)
+            || is_native_custom_element_lifecycle_method(&member.name, ctx.super_class)
+            || is_error_subclass_runtime_member(
+                &member.name,
+                ctx.export_key,
+                ctx.error_subclass_keys,
+            )
+            || ctx.allowlist.matches(
+                member.name.as_str(),
+                ctx.super_class,
+                ctx.implemented_interfaces,
+            ))
+}
+
+fn is_class_member_kind(kind: MemberKind) -> bool {
+    matches!(kind, MemberKind::ClassMethod | MemberKind::ClassProperty)
 }
 
 fn record_seen_ignore_decorators(graph: &ModuleGraph, ignore_decorators: &IgnoreDecoratorSet) {

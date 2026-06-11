@@ -451,27 +451,22 @@ fn execute_health_inner(
     let action_ctx =
         build_health_action_context(opts, &config, max_cyclomatic, max_cognitive, max_crap);
 
-    let grouping = build_optional_health_grouping_opt(
+    let grouping = build_health_grouping_from_context(
+        opts,
+        &config,
         group_resolver.as_ref(),
-        &config.root,
         &candidate_paths,
-        &grouping::HealthGroupingInput {
-            files: &files,
-            modules: &modules,
-            file_paths: &file_paths,
-            score_output: analysis_data.score_output.as_ref(),
-            file_scores: file_scores_slice,
-            findings: &findings,
-            hotspots: &hotspots,
-            large_functions: &vital_data.large_functions,
-            targets: &targets,
-            score_requested: opts.score,
-            duplicates_config: opts.score.then_some(&config.duplicates),
-            needs_file_scores,
-            needs_hotspots: opts.hotspots || opts.targets,
-            show_vital_signs: !opts.score_only_output,
-            action_ctx: &action_ctx,
-        },
+        &files,
+        &modules,
+        &file_paths,
+        analysis_data.score_output.as_ref(),
+        file_scores_slice,
+        &findings,
+        &hotspots,
+        &vital_data,
+        &targets,
+        needs_file_scores,
+        &action_ctx,
     );
 
     let report = assemble_health_report(
@@ -526,16 +521,16 @@ fn execute_health_inner(
 
     record_health_telemetry(&report, coverage_gaps_has_findings);
 
-    Ok(HealthResult {
+    Ok(build_health_result(HealthResultInput {
+        config,
         report,
         grouping,
         group_resolver,
-        config,
         elapsed: start.elapsed(),
         timings,
         coverage_gaps_has_findings,
         should_fail_on_coverage_gaps: enforce_coverage_gaps,
-    })
+    }))
 }
 
 struct HealthCoverageSettings {
@@ -554,6 +549,51 @@ struct HealthFindingsData {
     sev_high: usize,
     sev_moderate: usize,
     loaded_baseline: Option<HealthBaselineData>,
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "grouping bridges the assembled health pipeline context into the grouping module"
+)]
+fn build_health_grouping_from_context(
+    opts: &HealthOptions<'_>,
+    config: &ResolvedConfig,
+    group_resolver: Option<&crate::report::OwnershipResolver>,
+    candidate_paths: &rustc_hash::FxHashSet<std::path::PathBuf>,
+    files: &[fallow_types::discover::DiscoveredFile],
+    modules: &[fallow_core::extract::ModuleInfo],
+    file_paths: &rustc_hash::FxHashMap<fallow_core::discover::FileId, &std::path::PathBuf>,
+    score_output: Option<&scoring::FileScoreOutput>,
+    file_scores: &[FileHealthScore],
+    findings: &[ComplexityViolation],
+    hotspots: &[HotspotEntry],
+    vital_data: &HealthVitalData,
+    targets: &[RefactoringTarget],
+    needs_file_scores: bool,
+    action_ctx: &crate::health_types::HealthActionContext,
+) -> Option<crate::health_types::HealthGrouping> {
+    build_optional_health_grouping_opt(
+        group_resolver,
+        &config.root,
+        candidate_paths,
+        &grouping::HealthGroupingInput {
+            files,
+            modules,
+            file_paths,
+            score_output,
+            file_scores,
+            findings,
+            hotspots,
+            large_functions: &vital_data.large_functions,
+            targets,
+            score_requested: opts.score,
+            duplicates_config: opts.score.then_some(&config.duplicates),
+            needs_file_scores,
+            needs_hotspots: opts.hotspots || opts.targets,
+            show_vital_signs: !opts.score_only_output,
+            action_ctx,
+        },
+    )
 }
 
 fn needs_health_file_scores(
@@ -592,6 +632,41 @@ struct HealthTimingInput {
     duplication_ms: f64,
     targets_ms: f64,
     shared_parse: bool,
+}
+
+struct HealthResultInput {
+    config: ResolvedConfig,
+    report: crate::health_types::HealthReport,
+    grouping: Option<crate::health_types::HealthGrouping>,
+    group_resolver: Option<crate::report::OwnershipResolver>,
+    elapsed: Duration,
+    timings: Option<crate::health_types::HealthTimings>,
+    coverage_gaps_has_findings: bool,
+    should_fail_on_coverage_gaps: bool,
+}
+
+fn build_health_result(input: HealthResultInput) -> HealthResult {
+    let HealthResultInput {
+        config,
+        report,
+        grouping,
+        group_resolver,
+        elapsed,
+        timings,
+        coverage_gaps_has_findings,
+        should_fail_on_coverage_gaps,
+    } = input;
+
+    HealthResult {
+        report,
+        grouping,
+        group_resolver,
+        config,
+        elapsed,
+        timings,
+        coverage_gaps_has_findings,
+        should_fail_on_coverage_gaps,
+    }
 }
 
 #[expect(

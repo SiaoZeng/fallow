@@ -407,6 +407,48 @@ pub fn analyze_retaining_modules(
     analyze_full(config, retain_graph, false, need_complexity, true)
 }
 
+fn new_analysis_progress(config: &ResolvedConfig) -> progress::AnalysisProgress {
+    let show_progress = !config.quiet
+        && std::io::IsTerminal::is_terminal(&std::io::stderr())
+        && matches!(
+            config.output,
+            fallow_config::OutputFormat::Human
+                | fallow_config::OutputFormat::Compact
+                | fallow_config::OutputFormat::Markdown
+        );
+    progress::AnalysisProgress::new(show_progress)
+}
+
+fn warn_missing_node_modules(config: &ResolvedConfig) {
+    if config.root.join("node_modules").is_dir() {
+        return;
+    }
+
+    tracing::warn!(
+        "node_modules directory not found. Run `npm install` / `pnpm install` first for accurate results."
+    );
+}
+
+fn discover_analysis_workspaces(
+    config: &ResolvedConfig,
+) -> (Vec<fallow_config::WorkspaceInfo>, f64) {
+    let t = Instant::now();
+    let workspaces = discover_workspaces(&config.root);
+    let workspaces_ms = t.elapsed().as_secs_f64() * 1000.0;
+    if !workspaces.is_empty() {
+        tracing::info!(count = workspaces.len(), "workspaces discovered");
+    }
+
+    warn_undeclared_workspaces(
+        &config.root,
+        &workspaces,
+        &config.ignore_patterns,
+        config.quiet,
+    );
+
+    (workspaces, workspaces_ms)
+}
+
 /// Run the analysis pipeline using pre-parsed modules, skipping the parsing stage.
 ///
 /// This avoids re-parsing files when the caller already has a `ParseResult` (e.g., from
@@ -433,35 +475,10 @@ pub fn analyze_with_parse_result(
     let _span = tracing::info_span!("fallow_analyze_with_parse_result").entered();
     let pipeline_start = Instant::now();
 
-    let show_progress = !config.quiet
-        && std::io::IsTerminal::is_terminal(&std::io::stderr())
-        && matches!(
-            config.output,
-            fallow_config::OutputFormat::Human
-                | fallow_config::OutputFormat::Compact
-                | fallow_config::OutputFormat::Markdown
-        );
-    let progress = progress::AnalysisProgress::new(show_progress);
+    let progress = new_analysis_progress(config);
+    warn_missing_node_modules(config);
 
-    if !config.root.join("node_modules").is_dir() {
-        tracing::warn!(
-            "node_modules directory not found. Run `npm install` / `pnpm install` first for accurate results."
-        );
-    }
-
-    let t = Instant::now();
-    let workspaces_vec = discover_workspaces(&config.root);
-    let workspaces_ms = t.elapsed().as_secs_f64() * 1000.0;
-    if !workspaces_vec.is_empty() {
-        tracing::info!(count = workspaces_vec.len(), "workspaces discovered");
-    }
-
-    warn_undeclared_workspaces(
-        &config.root,
-        &workspaces_vec,
-        &config.ignore_patterns,
-        config.quiet,
-    );
+    let (workspaces_vec, workspaces_ms) = discover_analysis_workspaces(config);
     let root_pkg = load_root_package_json(config);
     let discovery_hidden_dir_scopes =
         discover::collect_hidden_dir_scopes(config, root_pkg.as_ref(), &workspaces_vec);
@@ -620,35 +637,10 @@ fn analyze_full(
     let _span = tracing::info_span!("fallow_analyze").entered();
     let pipeline_start = Instant::now();
 
-    let show_progress = !config.quiet
-        && std::io::IsTerminal::is_terminal(&std::io::stderr())
-        && matches!(
-            config.output,
-            fallow_config::OutputFormat::Human
-                | fallow_config::OutputFormat::Compact
-                | fallow_config::OutputFormat::Markdown
-        );
-    let progress = progress::AnalysisProgress::new(show_progress);
+    let progress = new_analysis_progress(config);
+    warn_missing_node_modules(config);
 
-    if !config.root.join("node_modules").is_dir() {
-        tracing::warn!(
-            "node_modules directory not found. Run `npm install` / `pnpm install` first for accurate results."
-        );
-    }
-
-    let t = Instant::now();
-    let workspaces_vec = discover_workspaces(&config.root);
-    let workspaces_ms = t.elapsed().as_secs_f64() * 1000.0;
-    if !workspaces_vec.is_empty() {
-        tracing::info!(count = workspaces_vec.len(), "workspaces discovered");
-    }
-
-    warn_undeclared_workspaces(
-        &config.root,
-        &workspaces_vec,
-        &config.ignore_patterns,
-        config.quiet,
-    );
+    let (workspaces_vec, workspaces_ms) = discover_analysis_workspaces(config);
     let root_pkg = load_root_package_json(config);
     let discovery_hidden_dir_scopes =
         discover::collect_hidden_dir_scopes(config, root_pkg.as_ref(), &workspaces_vec);

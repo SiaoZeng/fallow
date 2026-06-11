@@ -2,10 +2,6 @@ use super::{HealthOptions, HealthReportAssembly, coverage_intelligence};
 use crate::health_types::{HealthReport, HealthSummary};
 
 /// Assemble the final `HealthReport` from all computed data.
-#[expect(
-    clippy::too_many_lines,
-    reason = "report assembly threads every optional health feature into the final envelope; splitting fragments the read-path"
-)]
 pub(super) fn assemble_health_report(
     opts: &HealthOptions<'_>,
     action_ctx: &crate::health_types::HealthActionContext,
@@ -47,17 +43,7 @@ pub(super) fn assemble_health_report(
         .as_ref()
         .map_or((0, 0), |o| (o.istanbul_matched, o.istanbul_total));
 
-    let file_scores = if opts.score_only_output {
-        Vec::new()
-    } else if opts.file_scores {
-        let mut scores = score_output.map(|o| o.scores).unwrap_or_default();
-        if let Some(top) = opts.top {
-            scores.truncate(top);
-        }
-        scores
-    } else {
-        Vec::new()
-    };
+    let file_scores = build_report_file_scores(opts, score_output);
 
     let (report_hotspots, report_hotspot_summary) = if opts.hotspots {
         (hotspots, hotspot_summary)
@@ -130,24 +116,14 @@ pub(super) fn assemble_health_report(
             Some(vital_signs)
         },
         health_score,
-        findings: if opts.complexity {
-            findings
-                .into_iter()
-                .map(|v| crate::health_types::HealthFinding::with_actions(v, action_ctx))
-                .collect()
-        } else {
-            Vec::new()
-        },
+        findings: build_report_findings(opts, action_ctx, findings),
         file_scores,
         coverage_gaps: if opts.score_only_output {
             None
         } else {
             coverage_gaps
         },
-        hotspots: report_hotspots
-            .into_iter()
-            .map(|h| crate::health_types::HotspotFinding::with_actions(h, opts.root))
-            .collect(),
+        hotspots: build_report_hotspots(opts, report_hotspots),
         hotspot_summary: if opts.score_only_output {
             None
         } else {
@@ -160,33 +136,14 @@ pub(super) fn assemble_health_report(
         } else {
             large_functions
         },
-        targets: if opts.score_only_output {
-            Vec::new()
-        } else {
-            targets
-                .into_iter()
-                .map(crate::health_types::RefactoringTargetFinding::with_actions)
-                .collect()
-        },
+        targets: build_report_targets(opts, targets),
         target_thresholds: if opts.score_only_output {
             None
         } else {
             target_thresholds
         },
         health_trend,
-        actions_meta: if action_ctx.opts.omit_suppress_line {
-            Some(crate::health_types::HealthActionsMeta {
-                suppression_hints_omitted: true,
-                reason: action_ctx
-                    .opts
-                    .omit_reason
-                    .unwrap_or("unspecified")
-                    .to_string(),
-                scope: "health-findings".to_string(),
-            })
-        } else {
-            None
-        },
+        actions_meta: build_health_actions_meta(action_ctx),
     };
     if !opts.score_only_output {
         report.coverage_intelligence = coverage_intelligence::build_coverage_intelligence(
@@ -200,4 +157,76 @@ pub(super) fn assemble_health_report(
         );
     }
     report
+}
+
+fn build_report_file_scores(
+    opts: &HealthOptions<'_>,
+    score_output: Option<super::scoring::FileScoreOutput>,
+) -> Vec<crate::health_types::FileHealthScore> {
+    if opts.score_only_output || !opts.file_scores {
+        return Vec::new();
+    }
+
+    let mut scores = score_output.map(|o| o.scores).unwrap_or_default();
+    if let Some(top) = opts.top {
+        scores.truncate(top);
+    }
+    scores
+}
+
+fn build_report_findings(
+    opts: &HealthOptions<'_>,
+    action_ctx: &crate::health_types::HealthActionContext,
+    findings: Vec<crate::health_types::ComplexityViolation>,
+) -> Vec<crate::health_types::HealthFinding> {
+    if !opts.complexity {
+        return Vec::new();
+    }
+
+    findings
+        .into_iter()
+        .map(|v| crate::health_types::HealthFinding::with_actions(v, action_ctx))
+        .collect()
+}
+
+fn build_report_hotspots(
+    opts: &HealthOptions<'_>,
+    hotspots: Vec<crate::health_types::HotspotEntry>,
+) -> Vec<crate::health_types::HotspotFinding> {
+    hotspots
+        .into_iter()
+        .map(|h| crate::health_types::HotspotFinding::with_actions(h, opts.root))
+        .collect()
+}
+
+fn build_report_targets(
+    opts: &HealthOptions<'_>,
+    targets: Vec<crate::health_types::RefactoringTarget>,
+) -> Vec<crate::health_types::RefactoringTargetFinding> {
+    if opts.score_only_output {
+        return Vec::new();
+    }
+
+    targets
+        .into_iter()
+        .map(crate::health_types::RefactoringTargetFinding::with_actions)
+        .collect()
+}
+
+fn build_health_actions_meta(
+    action_ctx: &crate::health_types::HealthActionContext,
+) -> Option<crate::health_types::HealthActionsMeta> {
+    if !action_ctx.opts.omit_suppress_line {
+        return None;
+    }
+
+    Some(crate::health_types::HealthActionsMeta {
+        suppression_hints_omitted: true,
+        reason: action_ctx
+            .opts
+            .omit_reason
+            .unwrap_or("unspecified")
+            .to_string(),
+        scope: "health-findings".to_string(),
+    })
 }
