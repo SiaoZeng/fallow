@@ -622,6 +622,13 @@
           },
           "description": "pnpm.overrides entries whose key or value does not parse as a valid\noverride spec (empty key, empty value, malformed selector, unbalanced\nparent matcher). pnpm install will reject these. Default severity is\nerror. Wrapped in [`MisconfiguredDependencyOverrideFinding`]."
         },
+        "invalid_client_exports": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/InvalidClientExportFinding"
+          },
+          "description": "`\"use client\"` files that export a Next.js server-only / route-segment\nconfig name (e.g. `metadata`, `revalidate`, `GET`). Next.js rejects this\nat build time. Wrapped in [`InvalidClientExportFinding`] so each entry\ncarries a typed `actions` array natively. Default severity is `warn`."
+        },
         "baseline_deltas": {
           "anyOf": [
             {
@@ -952,6 +959,13 @@
             "$ref": "#/definitions/MisconfiguredDependencyOverrideFinding"
           },
           "description": "pnpm.overrides entries whose key or value does not parse as a valid\noverride spec (empty key, empty value, malformed selector, unbalanced\nparent matcher). pnpm install will reject these. Default severity is\nerror. Wrapped in [`MisconfiguredDependencyOverrideFinding`]."
+        },
+        "invalid_client_exports": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/InvalidClientExportFinding"
+          },
+          "description": "`\"use client\"` files that export a Next.js server-only / route-segment\nconfig name (e.g. `metadata`, `revalidate`, `GET`). Next.js rejects this\nat build time. Wrapped in [`InvalidClientExportFinding`] so each entry\ncarries a typed `actions` array natively. Default severity is `warn`."
         }
       },
       "required": [
@@ -4717,6 +4731,10 @@
         "misconfigured_dependency_overrides": {
           "type": "integer",
           "description": "Pnpm `overrides:` entries whose key or value cannot be parsed."
+        },
+        "invalid_client_exports": {
+          "type": "integer",
+          "description": "`\"use client\"` files that export a Next.js server-only / route-config name."
         }
       },
       "required": [
@@ -5400,6 +5418,13 @@
             "$ref": "#/definitions/MisconfiguredDependencyOverrideFinding"
           },
           "description": "pnpm.overrides entries whose key or value does not parse as a valid\noverride spec (empty key, empty value, malformed selector, unbalanced\nparent matcher). pnpm install will reject these. Default severity is\nerror. Wrapped in [`MisconfiguredDependencyOverrideFinding`]."
+        },
+        "invalid_client_exports": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/InvalidClientExportFinding"
+          },
+          "description": "`\"use client\"` files that export a Next.js server-only / route-segment\nconfig name (e.g. `metadata`, `revalidate`, `GET`). Next.js rejects this\nat build time. Wrapped in [`InvalidClientExportFinding`] so each entry\ncarries a typed `actions` array natively. Default severity is `warn`."
         }
       },
       "required": [
@@ -12181,6 +12206,58 @@
         "cognitive"
       ],
       "description": "Current complexity metrics for a matched threshold override entry."
+    },
+    "InvalidClientExportFinding": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "File carrying the `\"use client\"` directive and the illegal export."
+        },
+        "export_name": {
+          "type": "string",
+          "description": "Name of the server-only / route-config export that is illegal in a\nclient file (e.g. `metadata`, `generateMetadata`, `revalidate`, `GET`)."
+        },
+        "directive": {
+          "type": "string",
+          "description": "The file-level directive that makes the export illegal. Always\n`\"use client\"` today; carried so the message can name it verbatim."
+        },
+        "line": {
+          "type": "integer",
+          "description": "1-based line number of the export."
+        },
+        "col": {
+          "type": "integer",
+          "description": "0-based byte column offset of the export."
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/IssueAction"
+          },
+          "description": "Suggested next steps. Always emitted (possibly empty for\nforward-compat)."
+        },
+        "introduced": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AuditIntroduced"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Set by the audit pass when this finding is introduced relative to\nthe merge-base."
+        }
+      },
+      "required": [
+        "path",
+        "export_name",
+        "directive",
+        "line",
+        "col",
+        "actions"
+      ],
+      "description": "Wire-shape envelope for an [`InvalidClientExport`] finding. There is no safe\nauto-fix: the export itself may be a legitimate client-component value\nexport that happens to collide with a Next.js server-only name, so removing\nit could break the component. The only action is a line-level suppress\n(mirroring how a non-auto-fixable finding builds actions); the real fix is\nfor the author to move the server-only export to a non-client module."
     },
     "EnabledSource": {
       "type": "string",
