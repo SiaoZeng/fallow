@@ -86,8 +86,16 @@ pub enum SecuritySchemaVersion {
     #[serde(rename = "5")]
     V5,
     /// Adds `candidate.sink.url_shape` for URL-shaped security candidates.
+    #[allow(
+        dead_code,
+        reason = "kept so the generated schema documents historical v6"
+    )]
     #[serde(rename = "6")]
     V6,
+    /// Adds the server-only-import category on client-server-leak findings when a
+    /// use-client cone reaches a server-only module.
+    #[serde(rename = "7")]
+    V7,
 }
 
 /// Gate mode for `fallow security --gate <mode>`.
@@ -517,7 +525,7 @@ fn security_rule_severities(config: &fallow_config::ResolvedConfig) -> SecurityR
 
 fn build_security_output(input: SecurityOutputInput<'_, '_>) -> SecurityOutput {
     SecurityOutput {
-        schema_version: SecuritySchemaVersion::V6,
+        schema_version: SecuritySchemaVersion::V7,
         version: ToolVersion(env!("CARGO_PKG_VERSION").to_string()),
         elapsed_ms: ElapsedMs(input.started.elapsed().as_millis() as u64),
         config: security_output_config(
@@ -1978,7 +1986,13 @@ fn push_human_import_trace(out: &mut String, finding: &SecurityFinding) {
 }
 
 fn push_human_next_step(out: &mut String, finding: &SecurityFinding) {
-    if matches!(finding.kind, SecurityFindingKind::ClientServerLeak) {
+    if is_server_only_leak(finding) {
+        out.push_str(
+            "    Next: check whether this server-only code is meant to run on the client. \
+             If it is pulled in only through next/dynamic(..., { ssr: false }), type-only, \
+             or removed at build time, mark it as a false positive.\n",
+        );
+    } else if matches!(finding.kind, SecurityFindingKind::ClientServerLeak) {
         out.push_str(
             "    Next: check whether this import can ship a secret to the browser. If \
              it is type-only, server-only, or removed at build time, mark it as a false \
@@ -2030,11 +2044,15 @@ fn push_human_blind_spots(out: &mut String, output: &SecurityOutput) {
     }
 }
 
-/// Render the human-facing label for a finding. `ClientServerLeak` keeps its
-/// bespoke kebab kind; `TaintedSink` uses the catalogue title plus the CWE
-/// number carried on the finding.
+/// Render the human-facing label for a finding. The secret-leak
+/// `ClientServerLeak` keeps its bespoke kebab kind; the server-only variant uses
+/// its own kebab label so a reader tells the two apart; `TaintedSink` uses the
+/// catalogue title plus the CWE number carried on the finding.
 fn security_finding_label(finding: &SecurityFinding) -> String {
     match finding.kind {
+        SecurityFindingKind::ClientServerLeak if is_server_only_leak(finding) => {
+            "server-only-import".to_string()
+        }
         SecurityFindingKind::ClientServerLeak => "client-server-leak".to_string(),
         SecurityFindingKind::TaintedSink => {
             let title = finding
@@ -2133,12 +2151,29 @@ const fn runtime_state_label(state: SecurityRuntimeState) -> &'static str {
     }
 }
 
-/// The SARIF ruleId for a finding. `client-server-leak` keeps its bespoke id;
-/// each `TaintedSink` category gets `security/<category>` so the GitHub Security
-/// tab groups and labels candidates per CWE class instead of collapsing every
-/// finding under the client-server-leak rule.
+/// The `category` string distinguishing the server-only-import sink from the
+/// secret-leak sink (both `ClientServerLeak` kind). Matches the constant in
+/// `crates/core/src/analyze/security/mod.rs`.
+const SERVER_ONLY_CATEGORY: &str = "server-only-import";
+
+/// Whether a `ClientServerLeak` finding is the server-only-import variant rather
+/// than the original secret-leak variant. Keys on `category` because both share
+/// the `ClientServerLeak` kind and the same rule.
+fn is_server_only_leak(finding: &SecurityFinding) -> bool {
+    matches!(finding.kind, SecurityFindingKind::ClientServerLeak)
+        && finding.category.as_deref() == Some(SERVER_ONLY_CATEGORY)
+}
+
+/// The SARIF ruleId for a finding. The secret-leak `client-server-leak` keeps its
+/// bespoke id; the server-only variant gets `security/server-only-import` so the
+/// GitHub Security tab tells "reaches server-only code" apart from "reads a
+/// secret"; each `TaintedSink` category gets `security/<category>` so candidates
+/// group and label per CWE class.
 fn sarif_rule_id(finding: &SecurityFinding) -> String {
     match finding.kind {
+        SecurityFindingKind::ClientServerLeak if is_server_only_leak(finding) => {
+            "security/server-only-import".to_owned()
+        }
         SecurityFindingKind::ClientServerLeak => "security/client-server-leak".to_owned(),
         SecurityFindingKind::TaintedSink => {
             format!(
@@ -2229,6 +2264,27 @@ fn sarif_rule_def(
     cwe_taxon_index: Option<usize>,
 ) -> serde_json::Value {
     match finding.kind {
+        SecurityFindingKind::ClientServerLeak if is_server_only_leak(finding) => {
+            let title = "Client imports server-only code";
+            serde_json::json!({
+                "id": rule_id,
+                "name": title,
+                "shortDescription": { "text": "Client imports server-only code candidate (unverified)" },
+                "fullDescription": { "text":
+                    "Unverified candidate, requires verification: a \"use client\" file \
+                     transitively imports a server-only module (one carrying a \"use server\" \
+                     directive or importing server-only code such as server-only, next/headers, \
+                     next/server, or node:fs / node:child_process). fallow does not prove this \
+                     code runs on the client; a module pulled in only through \
+                     next/dynamic(..., { ssr: false }) is a false positive." },
+                "help": {
+                    "text": security_help_text(title),
+                    "markdown": security_help_markdown(title)
+                },
+                "helpUri": "https://github.com/fallow-rs/fallow",
+                "defaultConfiguration": { "level": "note" }
+            })
+        }
         SecurityFindingKind::ClientServerLeak => {
             let title = "Client-server secret leak";
             serde_json::json!({
@@ -2559,7 +2615,7 @@ mod tests {
 
     fn output_with(findings: Vec<SecurityFinding>, unresolved_edge_files: usize) -> SecurityOutput {
         SecurityOutput {
-            schema_version: SecuritySchemaVersion::V6,
+            schema_version: SecuritySchemaVersion::V7,
             version: ToolVersion("test".to_string()),
             elapsed_ms: ElapsedMs(0),
             config: test_output_config(),
@@ -2575,7 +2631,7 @@ mod tests {
 
     fn output_with_gate(verdict: SecurityGateVerdict, new_count: usize) -> SecurityOutput {
         SecurityOutput {
-            schema_version: SecuritySchemaVersion::V6,
+            schema_version: SecuritySchemaVersion::V7,
             version: ToolVersion("test".to_string()),
             elapsed_ms: ElapsedMs(0),
             config: test_output_config(),
@@ -3137,7 +3193,7 @@ mod tests {
         let finding = relativize_finding(sample_finding(root), root);
         let rendered = render_json(&output_with(vec![finding], 1));
         let value: serde_json::Value = serde_json::from_str(&rendered).expect("valid JSON");
-        assert_eq!(value["schema_version"], "6");
+        assert_eq!(value["schema_version"], "7");
         assert_eq!(value["version"], "test");
         assert_eq!(value["elapsed_ms"], 0);
         assert_eq!(
@@ -3217,7 +3273,7 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&rendered).expect("valid JSON");
 
         assert_eq!(value["kind"], "security");
-        assert_eq!(value["schema_version"], "6");
+        assert_eq!(value["schema_version"], "7");
         assert_eq!(value["version"], "test");
         assert_eq!(value["elapsed_ms"], 17);
         assert!(value.get("config").is_some());
