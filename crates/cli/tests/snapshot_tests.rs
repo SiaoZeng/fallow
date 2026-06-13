@@ -274,6 +274,16 @@ fn sample_results(root: &Path) -> AnalysisResults {
             },
         ),
     );
+    r.unprovided_injects
+        .push(fallow_core::results::UnprovidedInjectFinding::with_actions(
+            fallow_core::results::UnprovidedInject {
+                path: root.join("src/useTheme.ts"),
+                key_name: "THEME_KEY".to_string(),
+                framework: "vue".to_string(),
+                line: 5,
+                col: 2,
+            },
+        ));
 
     r
 }
@@ -719,6 +729,7 @@ fn sarif_mixed_severity_snapshot() {
         unused_enum_members: fallow_config::Severity::Warn,
         unused_class_members: fallow_config::Severity::Warn,
         unused_store_members: fallow_config::Severity::Warn,
+        unprovided_injects: fallow_config::Severity::Warn,
         unresolved_imports: fallow_config::Severity::Error,
         unlisted_dependencies: fallow_config::Severity::Error,
         duplicate_exports: fallow_config::Severity::Warn,
@@ -1585,6 +1596,7 @@ fn codeclimate_mixed_severity_snapshot() {
         unused_enum_members: fallow_config::Severity::Warn,
         unused_class_members: fallow_config::Severity::Warn,
         unused_store_members: fallow_config::Severity::Warn,
+        unprovided_injects: fallow_config::Severity::Warn,
         unresolved_imports: fallow_config::Severity::Error,
         unlisted_dependencies: fallow_config::Severity::Error,
         duplicate_exports: fallow_config::Severity::Warn,
