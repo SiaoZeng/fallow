@@ -142,6 +142,8 @@ mod security_secret_to_network;
 mod security_taint_confidence;
 #[path = "integration_test/security_template_xss_sinks.rs"]
 mod security_template_xss_sinks;
+#[path = "integration_test/sfc_template_assets.rs"]
+mod sfc_template_assets;
 #[path = "integration_test/stale_suppressions.rs"]
 mod stale_suppressions;
 #[path = "integration_test/suppression_comments.rs"]
