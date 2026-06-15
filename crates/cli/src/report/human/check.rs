@@ -752,7 +752,7 @@ fn build_dependencies_section(
     push_category_header(lines, "Dependencies");
 
     push_package_dependency_sections(lines, results, root, rules, max_items, total_issues);
-    push_import_dependency_sections(
+    push_import_dependency_sections(ImportDependencySectionInput {
         lines,
         results,
         root,
@@ -760,7 +760,7 @@ fn build_dependencies_section(
         max_items,
         max_grouped_files,
         total_issues,
-    );
+    });
     push_catalog_dependency_sections(lines, results, root, rules, max_items, total_issues);
     push_dependency_override_sections(lines, results, root, rules, max_items, total_issues);
 }
@@ -817,15 +817,27 @@ fn push_package_dependency_sections(
     );
 }
 
-fn push_import_dependency_sections(
-    lines: &mut Vec<String>,
-    results: &AnalysisResults,
-    root: &Path,
-    rules: &RulesConfig,
+struct ImportDependencySectionInput<'a> {
+    lines: &'a mut Vec<String>,
+    results: &'a AnalysisResults,
+    root: &'a Path,
+    rules: &'a RulesConfig,
     max_items: usize,
     max_grouped_files: usize,
     total_issues: usize,
-) {
+}
+
+fn push_import_dependency_sections(input: ImportDependencySectionInput<'_>) {
+    let ImportDependencySectionInput {
+        lines,
+        results,
+        root,
+        rules,
+        max_items,
+        max_grouped_files,
+        total_issues,
+    } = input;
+
     build_human_grouped_section(GroupedSectionInput {
         lines,
         items: &results.unresolved_imports,
