@@ -7,9 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.99.0] - 2026-06-18
+
+### Added
+
+- **A new opt-in `require-suppression-reason` rule lets teams require a documented reason on every suppression.** Suppression comments and `@expected-unused` JSDoc tags can now carry a trailing `-- <reason>`, for example `// fallow-ignore-next-line unused-export -- public compatibility export` or `// fallow-ignore-file -- generated route map`. The reason text is parsed, cached, and carried through to stale-suppression reporting. With the rule enabled (set `rules.require-suppression-reason` to `warn` or `error`; the default is `off`, so existing suppressions are unaffected), a suppression that has no reason surfaces as a `missing-suppression-reason` finding so the team can backfill it. Reported across human, JSON, SARIF, CodeClimate, audit, and baseline output plus the LSP and editors. Thanks [@codingthat](https://github.com/codingthat) for the request. (Closes [#1302](https://github.com/fallow-rs/fallow/issues/1302).)
+
 ### Fixed
 
 - **Nested same-file schema values no longer report as unused when a reachable exported value depends on them.** Effect Schema projects commonly pair `export const Foo = Schema...` with `export type Foo = Schema.Schema.Type<typeof Foo>`, then compose that value into another exported schema through `Schema.Array(Foo)`. Fallow now walks reachable same-file exported value initializers so the child schema value is credited through the parent schema, while unrelated unused sibling schemas still report. Thanks [@danielo515](https://github.com/danielo515) for the report. (Closes [#1304](https://github.com/fallow-rs/fallow/issues/1304).)
+
+- **The VS Code / VS Codium extension no longer shows inflated totals on startup.** On a cold editor start the extension could consume the LSP's first workspace analysis before any document had opened, rendering a stale, too-high issue count until the next edit. Startup analysis now waits for the first opened document, and a save-triggered analysis queues behind an in-flight startup run instead of being dropped. Thanks [@codingthat](https://github.com/codingthat) for the report. (Closes [#1303](https://github.com/fallow-rs/fallow/issues/1303).)
 
 - **Catalog rules now read Bun catalogs from root `package.json`.** Bun workspaces that declare catalog entries under `workspaces.catalog` / `workspaces.catalogs` (or Bun's accepted top-level `catalog` / `catalogs` form) now get the same `unresolved-catalog-references`, `unused-catalog-entries`, and `empty-catalog-groups` coverage as pnpm workspaces with `pnpm-workspace.yaml`. Fallow still prefers `pnpm-workspace.yaml` when it exists, preserving existing pnpm behavior. Thanks [@codingthat](https://github.com/codingthat) for the report. (Closes [#1301](https://github.com/fallow-rs/fallow/issues/1301).)
 
@@ -3137,7 +3145,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--changed-since` and `--fail-on-issues` for CI
 - Cross-workspace resolution for npm/yarn/pnpm workspaces
 
-[Unreleased]: https://github.com/fallow-rs/fallow/compare/v2.98.0...HEAD
+[Unreleased]: https://github.com/fallow-rs/fallow/compare/v2.99.0...HEAD
+[2.99.0]: https://github.com/fallow-rs/fallow/compare/v2.98.0...v2.99.0
 [2.98.0]: https://github.com/fallow-rs/fallow/compare/v2.97.0...v2.98.0
 [2.97.0]: https://github.com/fallow-rs/fallow/compare/v2.96.0...v2.97.0
 [2.96.0]: https://github.com/fallow-rs/fallow/compare/v2.95.0...v2.96.0
