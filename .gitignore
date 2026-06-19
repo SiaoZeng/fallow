@@ -97,6 +97,9 @@ AGENTS.md
 # In-flight feature plans written by /fallow-implement and re-read by /panel-review,
 # the implementation phase, and /fallow-review. Transient; promoted concepts go to decisions/.
 .plans/
+# Stray undotted variant: research/plan scratch docs belong in the gitignored
+# .plans/, never committed. Ignored so `git add -A` cannot sweep one in again.
+plans/
 
 # Crash-handover markers from sdk-cli automation
 /HANDOVER-CRASH-*.md
