@@ -1252,43 +1252,46 @@ fn collect_unlisted_import_sites(
     file_ids: &[FileId],
     ctx: &UnlistedDependencyContext<'_>,
 ) -> Vec<ImportSite> {
-    let mut unlisted_sites = Vec::new();
-    for id in file_ids {
-        let Some(module) = ctx.graph.modules.get(id.0 as usize) else {
-            continue;
-        };
-        if package_name == "bun"
-            && package_imports_are_all_builtin(ctx.import_spans_by_file, *id, package_name)
-        {
-            continue;
-        }
-        if package_imports_are_all_npm_scheme(ctx.import_spans_by_file, *id, package_name) {
-            continue;
-        }
-        if is_package_listed_for_file(&module.path, package_name, ctx.all_deps, ctx.ws_dep_map) {
-            continue;
-        }
-        if has_types_package_for_file(&module.path, package_name, ctx.all_deps, ctx.ws_dep_map) {
-            continue;
-        }
-        let relative_path = relative_module_path(&module.path, &ctx.config.root);
-        let Some((line, col)) = find_unprovided_import_location(
-            ctx.import_spans_by_file,
-            ctx.line_offsets_by_file,
-            ctx.compiled_provided_dependency_rules,
-            &relative_path,
-            *id,
-            package_name,
-        ) else {
-            continue;
-        };
-        unlisted_sites.push(ImportSite {
-            path: module.path.clone(),
-            line,
-            col,
-        });
+    file_ids
+        .iter()
+        .filter_map(|id| collect_unlisted_import_site(package_name, *id, ctx))
+        .collect()
+}
+
+fn collect_unlisted_import_site(
+    package_name: &str,
+    id: FileId,
+    ctx: &UnlistedDependencyContext<'_>,
+) -> Option<ImportSite> {
+    let module = ctx.graph.modules.get(id.0 as usize)?;
+    if package_name == "bun"
+        && package_imports_are_all_builtin(ctx.import_spans_by_file, id, package_name)
+    {
+        return None;
     }
-    unlisted_sites
+    if package_imports_are_all_npm_scheme(ctx.import_spans_by_file, id, package_name) {
+        return None;
+    }
+    if is_package_listed_for_file(&module.path, package_name, ctx.all_deps, ctx.ws_dep_map) {
+        return None;
+    }
+    if has_types_package_for_file(&module.path, package_name, ctx.all_deps, ctx.ws_dep_map) {
+        return None;
+    }
+    let relative_path = relative_module_path(&module.path, &ctx.config.root);
+    let (line, col) = find_unprovided_import_location(
+        ctx.import_spans_by_file,
+        ctx.line_offsets_by_file,
+        ctx.compiled_provided_dependency_rules,
+        &relative_path,
+        id,
+        package_name,
+    )?;
+    Some(ImportSite {
+        path: module.path.clone(),
+        line,
+        col,
+    })
 }
 
 /// Plumbing for the per-spec skip checks in `find_unresolved_imports`.
