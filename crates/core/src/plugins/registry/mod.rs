@@ -583,46 +583,8 @@ impl PluginRegistry {
             return Ok(result);
         }
 
-        for plugin in &active {
-            process_static_patterns(*plugin, input.root, &mut result);
-        }
-        process_package_json_metadata(
-            &active,
-            input.pkg,
-            input.root,
-            &mut result,
-            &mut regex_errors,
-        );
-
-        let workspace_matchers = select_workspace_matchers(
-            input.precompiled_config_matchers,
-            &active,
-            input.skip_config_plugins,
-        );
-
-        let mut resolved_ws_plugins: FxHashSet<&str> = FxHashSet::default();
-        for (plugin, matchers) in &workspace_matchers {
-            resolve_plugin_matching_files(&mut PluginMatchingFilesInput {
-                plugin: *plugin,
-                matchers,
-                relative_files: input.relative_files,
-                root: input.root,
-                result: &mut result,
-                regex_errors: &mut regex_errors,
-                resolved_plugins: &mut resolved_ws_plugins,
-            });
-        }
-
-        load_workspace_filesystem_configs(&mut WorkspaceFsConfigInput {
-            workspace_matchers: &workspace_matchers,
-            resolved_ws_plugins: &resolved_ws_plugins,
-            root: input.root,
-            project_root: input.project_root,
-            production_mode: input.production_mode,
-            candidate_index: input.candidate_index,
-            result: &mut result,
-            regex_errors: &mut regex_errors,
-        });
+        process_workspace_active_plugins(&active, input, &mut result, &mut regex_errors);
+        resolve_workspace_plugin_configs(&active, input, &mut result, &mut regex_errors);
 
         if regex_errors.is_empty() {
             Ok(result)
@@ -653,6 +615,55 @@ impl PluginRegistry {
             })
             .collect()
     }
+}
+
+fn process_workspace_active_plugins(
+    active: &[&dyn Plugin],
+    input: &WorkspacePluginRunInput<'_>,
+    result: &mut AggregatedPluginResult,
+    regex_errors: &mut Vec<PluginRegexValidationError>,
+) {
+    for plugin in active {
+        process_static_patterns(*plugin, input.root, result);
+    }
+    process_package_json_metadata(active, input.pkg, input.root, result, regex_errors);
+}
+
+fn resolve_workspace_plugin_configs(
+    active: &[&dyn Plugin],
+    input: &WorkspacePluginRunInput<'_>,
+    result: &mut AggregatedPluginResult,
+    regex_errors: &mut Vec<PluginRegexValidationError>,
+) {
+    let workspace_matchers = select_workspace_matchers(
+        input.precompiled_config_matchers,
+        active,
+        input.skip_config_plugins,
+    );
+
+    let mut resolved_ws_plugins: FxHashSet<&str> = FxHashSet::default();
+    for (plugin, matchers) in &workspace_matchers {
+        resolve_plugin_matching_files(&mut PluginMatchingFilesInput {
+            plugin: *plugin,
+            matchers,
+            relative_files: input.relative_files,
+            root: input.root,
+            result,
+            regex_errors,
+            resolved_plugins: &mut resolved_ws_plugins,
+        });
+    }
+
+    load_workspace_filesystem_configs(&mut WorkspaceFsConfigInput {
+        workspace_matchers: &workspace_matchers,
+        resolved_ws_plugins: &resolved_ws_plugins,
+        root: input.root,
+        project_root: input.project_root,
+        production_mode: input.production_mode,
+        candidate_index: input.candidate_index,
+        result,
+        regex_errors,
+    });
 }
 
 impl Default for PluginRegistry {
