@@ -1,7 +1,7 @@
 use oxc_ast::ast::{
     Argument, ArrayExpressionElement, BinaryExpression, BindingPattern, CallExpression, Class,
-    ClassElement, Expression, MethodDefinitionKind, ObjectPropertyKind, Statement, TSAccessibility,
-    TSSignature, TSType, TSTypeAnnotation, TSTypeName,
+    ClassElement, Expression, MethodDefinitionKind, ObjectPropertyKind, PropertyDefinition,
+    Statement, TSAccessibility, TSSignature, TSType, TSTypeAnnotation, TSTypeName,
 };
 use oxc_span::{GetSpan, Span};
 use rustc_hash::FxHashMap;
@@ -641,16 +641,7 @@ pub fn extract_angular_inputs_outputs(
         };
         let span_start = prop.key.span().start;
 
-        // Decorator-based: `@Input()` -> input, `@Output()` -> output.
-        let mut decorator_role = None;
-        for decorator in &prop.decorators {
-            match decorator_path(&decorator.expression).as_str() {
-                "Input" => decorator_role = Some(AngularMemberRole::Input),
-                "Output" => decorator_role = Some(AngularMemberRole::Output),
-                _ => {}
-            }
-        }
-        if let Some(role) = decorator_role {
+        if let Some(role) = angular_decorator_member_role(prop) {
             match role {
                 AngularMemberRole::Input => inputs.push(AngularInputMember {
                     name: name.to_string(),
@@ -694,6 +685,16 @@ pub fn extract_angular_inputs_outputs(
         }
     }
     (inputs, outputs)
+}
+
+fn angular_decorator_member_role(prop: &PropertyDefinition<'_>) -> Option<AngularMemberRole> {
+    prop.decorators.iter().find_map(|decorator| {
+        match decorator_path(&decorator.expression).as_str() {
+            "Input" => Some(AngularMemberRole::Input),
+            "Output" => Some(AngularMemberRole::Output),
+            _ => None,
+        }
+    })
 }
 
 enum AngularMemberRole {
