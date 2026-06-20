@@ -1311,6 +1311,14 @@ fn populate_prop_drilling_findings(input: &mut FrameworkSpecificFindingsInput<'_
     if input.config.rules.prop_drilling == Severity::Off {
         return;
     }
+    input.results.prop_drilling_chains = collect_prop_drilling_findings(input);
+
+    retain_unsuppressed_prop_drilling_findings(input);
+}
+
+fn collect_prop_drilling_findings(
+    input: &FrameworkSpecificFindingsInput<'_>,
+) -> Vec<PropDrillingChainFinding> {
     let scan = find_prop_drilling_chains(
         input.graph,
         input.modules,
@@ -1327,12 +1335,13 @@ fn populate_prop_drilling_findings(input: &mut FrameworkSpecificFindingsInput<'_
             scan.components_scanned
         );
     }
-    input.results.prop_drilling_chains = scan
-        .chains
+    scan.chains
         .into_iter()
         .map(PropDrillingChainFinding::with_actions)
-        .collect();
+        .collect()
+}
 
+fn retain_unsuppressed_prop_drilling_findings(input: &mut FrameworkSpecificFindingsInput<'_>) {
     // Inline-suppression filter: a `// fallow-ignore-next-line prop-drilling`
     // above the source prop declaration (or a file-level
     // `// fallow-ignore-file prop-drilling` on the source file) drops the chain.
