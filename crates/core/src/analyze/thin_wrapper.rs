@@ -195,10 +195,34 @@ fn classify_thin_wrapper(
     resolver: &ChildResolver<'_>,
     line_offsets_by_file: &LineOffsetsMap<'_>,
 ) -> Option<ThinWrapper> {
+    if !passes_static_thin_wrapper_checks(func) {
+        return None;
+    }
+
+    let name = func.name.as_str();
+    if !passes_complexity_belts(func, ctx, name) {
+        return None;
+    }
+
+    let child_name = single_rendered_child(name, ctx)?;
+    if !resolves_distinct_child(ctx.file, name, child_name, resolver) {
+        return None;
+    }
+
+    let (line, _col) = byte_offset_to_line_col(line_offsets_by_file, ctx.file, func.span_start);
+    Some(ThinWrapper {
+        file: ctx.path.to_path_buf(),
+        line,
+        component: name.to_string(),
+        child_component: child_name.to_string(),
+    })
+}
+
+fn passes_static_thin_wrapper_checks(func: &ComponentFunction) -> bool {
     // The extraction flag is the necessary precondition: the body is exactly a
     // bare spread-forwarded single child element (proven per-file).
     if !func.is_pure_passthrough {
-        return None;
+        return false;
     }
 
     // forwardRef / memo wrappers are sanctioned indirection: ALWAYS abstain.
@@ -206,23 +230,25 @@ fn classify_thin_wrapper(
         func.kind,
         ComponentFunctionKind::ForwardRefWrapper | ComponentFunctionKind::MemoWrapper
     ) {
-        return None;
+        return false;
     }
     // Exported components are public-API indirection (re-brand / encapsulation).
     if func.is_exported {
-        return None;
+        return false;
     }
     // Context provider wrappers add value even when they spread props through.
     if func.renders_provider {
-        return None;
+        return false;
     }
     // cloneElement reflection / render-prop forwards are not pure.
     if func.uses_clone_element || func.has_children_as_function {
-        return None;
+        return false;
     }
 
-    let name = func.name.as_str();
+    true
+}
 
+fn passes_complexity_belts(func: &ComponentFunction, ctx: &FileContext<'_>, name: &str) -> bool {
     // Belt-and-suspenders hook-density check: a pure passthrough has ZERO hooks.
     // `hook_uses` is always populated by the React structural walk (independent
     // of `need_complexity`), so this belt runs in every pipeline. A MISMATCH
@@ -234,7 +260,7 @@ fn classify_thin_wrapper(
             component = name,
             "thin-wrapper: is_pure_passthrough set but the component owns a hook; abstaining"
         );
-        return None;
+        return false;
     }
     // Belt-and-suspenders cyclomatic check, enforced ONLY when a complexity
     // entry exists (the dead-code pipeline runs without it; the extraction proof
@@ -249,9 +275,13 @@ fn classify_thin_wrapper(
             react_hook_count = complexity.react_hook_count,
             "thin-wrapper: is_pure_passthrough disagrees with complexity join; abstaining"
         );
-        return None;
+        return false;
     }
 
+    true
+}
+
+fn single_rendered_child<'a>(name: &str, ctx: &FileContext<'a>) -> Option<&'a str> {
     // The component must have exactly one render edge (the single forwarded
     // child). The extraction flag already proved the return shape is a single
     // element, so a different edge count means the body had additional renders
@@ -272,28 +302,32 @@ fn classify_thin_wrapper(
     if child_name == name {
         return None;
     }
+
+    Some(child_name)
+}
+
+fn resolves_distinct_child(
+    file: FileId,
+    name: &str,
+    child_name: &str,
+    resolver: &ChildResolver<'_>,
+) -> bool {
     // The child must resolve to a real component (same-file or via the import
     // map) OR be a known imported binding; an unresolvable child abstains.
-    let resolved = resolver.resolve(ctx.file, child_name);
-    if resolved.is_none() && !resolver.is_imported_binding(ctx.file, child_name) {
-        return None;
+    let resolved = resolver.resolve(file, child_name);
+    if resolved.is_none() && !resolver.is_imported_binding(file, child_name) {
+        return false;
     }
     // A resolved child that is the wrapper itself (cross-file self-shadow) also
     // abstains.
     if let Some(target) = resolved
-        && target.file == ctx.file
+        && target.file == file
         && target.name == name
     {
-        return None;
+        return false;
     }
 
-    let (line, _col) = byte_offset_to_line_col(line_offsets_by_file, ctx.file, func.span_start);
-    Some(ThinWrapper {
-        file: ctx.path.to_path_buf(),
-        line,
-        component: name.to_string(),
-        child_component: child_name.to_string(),
-    })
+    true
 }
 
 /// Whether the path is a React/Preact JSX module (`.jsx` / `.tsx`).
