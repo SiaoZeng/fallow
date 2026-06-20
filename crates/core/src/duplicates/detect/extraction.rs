@@ -29,25 +29,14 @@ pub(super) struct CloneGroupExtractionInput<'a> {
 pub(super) fn extract_clone_groups(input: &CloneGroupExtractionInput<'_>) -> Vec<RawGroup> {
     let sa = input.sa;
     let lcp = input.lcp;
-    let file_of = input.file_of;
-    let file_offsets = input.file_offsets;
-    let files = input.files;
     let n = sa.len();
     if n < 2 {
         return vec![];
     }
 
+    let context = CloneGroupScanContext::new(input);
     let mut stack: Vec<(usize, usize)> = Vec::new();
     let mut groups: Vec<RawGroup> = Vec::new();
-    let focus_prefix = input
-        .focus_file_ids
-        .map(|ids| build_focus_prefix(sa, file_of, ids));
-    let boundary_prefixes = if input.may_have_boundaries {
-        build_boundary_prefixes(files)
-    } else {
-        Vec::new()
-    };
-    let has_boundaries = input.may_have_boundaries && boundary_prefixes.iter().any(Option::is_some);
 
     #[expect(
         clippy::needless_range_loop,
@@ -67,21 +56,9 @@ pub(super) fn extract_clone_groups(input: &CloneGroupExtractionInput<'_>) -> Vec
             if top_lcp >= input.min_tokens {
                 let interval_begin = start - 1;
                 let interval_end = i;
-                if let Some(prefix) = focus_prefix.as_deref()
-                    && !interval_has_focus(prefix, interval_begin, interval_end)
-                {
-                    continue;
-                }
-
-                if let Some(group) = build_raw_group(&RawGroupInput {
-                    sa,
-                    file_of,
-                    file_offsets,
-                    files,
-                    boundary_prefixes: &boundary_prefixes,
-                    has_boundaries,
-                    interval_begin,
-                    interval_end,
+                if let Some(group) = context.build_group(CloneInterval {
+                    begin: interval_begin,
+                    end: interval_end,
                     length: top_lcp,
                 }) {
                     groups.push(group);
@@ -98,6 +75,67 @@ pub(super) fn extract_clone_groups(input: &CloneGroupExtractionInput<'_>) -> Vec
     }
 
     groups
+}
+
+struct CloneGroupScanContext<'a> {
+    sa: &'a [usize],
+    file_of: &'a [usize],
+    file_offsets: &'a [usize],
+    files: &'a [FileData],
+    focus_prefix: Option<Vec<usize>>,
+    boundary_prefixes: Vec<Option<Vec<u32>>>,
+    has_boundaries: bool,
+}
+
+impl<'a> CloneGroupScanContext<'a> {
+    fn new(input: &CloneGroupExtractionInput<'a>) -> Self {
+        let boundary_prefixes = if input.may_have_boundaries {
+            build_boundary_prefixes(input.files)
+        } else {
+            Vec::new()
+        };
+        let has_boundaries =
+            input.may_have_boundaries && boundary_prefixes.iter().any(Option::is_some);
+
+        Self {
+            sa: input.sa,
+            file_of: input.file_of,
+            file_offsets: input.file_offsets,
+            files: input.files,
+            focus_prefix: input
+                .focus_file_ids
+                .map(|ids| build_focus_prefix(input.sa, input.file_of, ids)),
+            boundary_prefixes,
+            has_boundaries,
+        }
+    }
+
+    fn build_group(&self, interval: CloneInterval) -> Option<RawGroup> {
+        if let Some(prefix) = self.focus_prefix.as_deref()
+            && !interval_has_focus(prefix, interval.begin, interval.end)
+        {
+            return None;
+        }
+
+        build_raw_group(&RawGroupInput {
+            sa: self.sa,
+            file_of: self.file_of,
+            file_offsets: self.file_offsets,
+            files: self.files,
+            boundary_prefixes: &self.boundary_prefixes,
+            has_boundaries: self.has_boundaries,
+            interval_begin: interval.begin,
+            interval_end: interval.end,
+            length: interval.length,
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CloneInterval {
+    begin: usize,
+    end: usize,
+    length: usize,
 }
 
 fn build_focus_prefix(sa: &[usize], file_of: &[usize], focus_file_ids: &[bool]) -> Vec<usize> {
