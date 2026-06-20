@@ -1762,19 +1762,20 @@ fn run_workspace_plugins(
         .par_iter()
         .zip(workspace_relative_files.par_iter())
         .filter_map(|((ws, ws_pkg), relative_files)| {
-            let ws_result = match registry.try_run_workspace_fast(
-                ws_pkg,
-                &ws.root,
-                &config.root,
-                &precompiled_matchers,
-                relative_files,
-                &root_active_plugins,
-                config.production,
-                candidate_index,
-            ) {
-                Ok(result) => result,
-                Err(errors) => return Some(Err(errors)),
-            };
+            let ws_result =
+                match registry.try_run_workspace_fast(&plugins::registry::WorkspacePluginRunInput {
+                    pkg: ws_pkg,
+                    root: &ws.root,
+                    project_root: &config.root,
+                    precompiled_config_matchers: &precompiled_matchers,
+                    relative_files,
+                    skip_config_plugins: &root_active_plugins,
+                    production_mode: config.production,
+                    candidate_index,
+                }) {
+                    Ok(result) => result,
+                    Err(errors) => return Some(Err(errors)),
+                };
             if ws_result.active_plugins.is_empty() {
                 return None;
             }

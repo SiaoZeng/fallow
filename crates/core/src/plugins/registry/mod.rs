@@ -109,6 +109,18 @@ pub struct PluginRegistry {
     external_plugins: Vec<ExternalPluginDef>,
 }
 
+/// Inputs for the workspace-fast plugin path.
+pub struct WorkspacePluginRunInput<'a> {
+    pub pkg: &'a PackageJson,
+    pub root: &'a Path,
+    pub project_root: &'a Path,
+    pub precompiled_config_matchers: &'a [(&'a dyn Plugin, Vec<globset::GlobMatcher>)],
+    pub relative_files: &'a [(PathBuf, String)],
+    pub skip_config_plugins: &'a FxHashSet<&'a str>,
+    pub production_mode: bool,
+    pub candidate_index: Option<&'a ConfigCandidateIndex>,
+}
+
 /// Invalid user-authored regex extracted from a plugin config file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginRegexValidationError {
@@ -518,33 +530,10 @@ impl PluginRegistry {
     /// Reuses pre-compiled config matchers and pre-computed relative files from the root
     /// project run, avoiding repeated glob compilation and path computation per workspace.
     /// Skips package.json inline config (workspace packages rarely have inline configs).
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "Each parameter is a distinct, small value with no natural grouping; \
-                  bundling them into a struct hurts call-site readability."
-    )]
     #[cfg(test)]
-    fn run_workspace_fast(
-        &self,
-        pkg: &PackageJson,
-        root: &Path,
-        project_root: &Path,
-        precompiled_config_matchers: &[(&dyn Plugin, Vec<globset::GlobMatcher>)],
-        relative_files: &[(PathBuf, String)],
-        skip_config_plugins: &FxHashSet<&str>,
-        production_mode: bool,
-    ) -> AggregatedPluginResult {
-        self.try_run_workspace_fast(
-            pkg,
-            root,
-            project_root,
-            precompiled_config_matchers,
-            relative_files,
-            skip_config_plugins,
-            production_mode,
-            None,
-        )
-        .unwrap_or_else(|errors| panic!("{}", format_plugin_regex_errors(&errors)))
+    fn run_workspace_fast(&self, input: &WorkspacePluginRunInput<'_>) -> AggregatedPluginResult {
+        self.try_run_workspace_fast(input)
+            .unwrap_or_else(|errors| panic!("{}", format_plugin_regex_errors(&errors)))
     }
 
     /// Fast variant of `try_run()` for workspace packages.
@@ -552,50 +541,40 @@ impl PluginRegistry {
     /// Reuses pre-compiled config matchers and pre-computed relative files from the root
     /// project run, avoiding repeated glob compilation and path computation per workspace.
     /// Skips package.json inline config (workspace packages rarely have inline configs).
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "Each parameter is a distinct, small value with no natural grouping; \
-                  bundling them into a struct hurts call-site readability."
-    )]
     pub fn try_run_workspace_fast(
         &self,
-        pkg: &PackageJson,
-        root: &Path,
-        project_root: &Path,
-        precompiled_config_matchers: &[(&dyn Plugin, Vec<globset::GlobMatcher>)],
-        relative_files: &[(PathBuf, String)],
-        skip_config_plugins: &FxHashSet<&str>,
-        production_mode: bool,
-        candidate_index: Option<&ConfigCandidateIndex>,
+        input: &WorkspacePluginRunInput<'_>,
     ) -> Result<AggregatedPluginResult, Vec<PluginRegexValidationError>> {
         let _span = tracing::info_span!("run_plugins").entered();
         let mut result = AggregatedPluginResult::default();
         let mut regex_errors = Vec::new();
 
-        let all_deps = pkg.all_dependency_names();
-        let script_packages = script_activation_packages(pkg, root, &all_deps, production_mode);
-        let workspace_files: Vec<PathBuf> = relative_files
+        let all_deps = input.pkg.all_dependency_names();
+        let script_packages =
+            script_activation_packages(input.pkg, input.root, &all_deps, input.production_mode);
+        let workspace_files: Vec<PathBuf> = input
+            .relative_files
             .iter()
             .map(|(abs_path, _)| abs_path.clone())
             .collect();
 
         let active = self.collect_active_plugins(
-            pkg,
-            root,
+            input.pkg,
+            input.root,
             &workspace_files,
             &all_deps,
             &script_packages,
-            candidate_index,
+            input.candidate_index,
         );
 
         log_active_plugins(&active);
 
-        self.emit_silent_fail_diagnostics(&active, &all_deps, root, &workspace_files);
+        self.emit_silent_fail_diagnostics(&active, &all_deps, input.root, &workspace_files);
 
         process_external_plugins(
             &self.external_plugins,
             &all_deps,
-            root,
+            input.root,
             &workspace_files,
             &mut result,
         );
@@ -605,20 +584,29 @@ impl PluginRegistry {
         }
 
         for plugin in &active {
-            process_static_patterns(*plugin, root, &mut result);
+            process_static_patterns(*plugin, input.root, &mut result);
         }
-        process_package_json_metadata(&active, pkg, root, &mut result, &mut regex_errors);
+        process_package_json_metadata(
+            &active,
+            input.pkg,
+            input.root,
+            &mut result,
+            &mut regex_errors,
+        );
 
-        let workspace_matchers =
-            select_workspace_matchers(precompiled_config_matchers, &active, skip_config_plugins);
+        let workspace_matchers = select_workspace_matchers(
+            input.precompiled_config_matchers,
+            &active,
+            input.skip_config_plugins,
+        );
 
         let mut resolved_ws_plugins: FxHashSet<&str> = FxHashSet::default();
         for (plugin, matchers) in &workspace_matchers {
             resolve_plugin_matching_files(&mut PluginMatchingFilesInput {
                 plugin: *plugin,
                 matchers,
-                relative_files,
-                root,
+                relative_files: input.relative_files,
+                root: input.root,
                 result: &mut result,
                 regex_errors: &mut regex_errors,
                 resolved_plugins: &mut resolved_ws_plugins,
@@ -628,10 +616,10 @@ impl PluginRegistry {
         load_workspace_filesystem_configs(&mut WorkspaceFsConfigInput {
             workspace_matchers: &workspace_matchers,
             resolved_ws_plugins: &resolved_ws_plugins,
-            root,
-            project_root,
-            production_mode,
-            candidate_index,
+            root: input.root,
+            project_root: input.project_root,
+            production_mode: input.production_mode,
+            candidate_index: input.candidate_index,
             result: &mut result,
             regex_errors: &mut regex_errors,
         });

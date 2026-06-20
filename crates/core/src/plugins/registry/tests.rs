@@ -1704,15 +1704,16 @@ fn run_workspace_fast_returns_empty_for_no_active_plugins() {
     let matchers = registry.precompile_config_matchers();
     let pkg = PackageJson::default();
     let relative_files = vec![];
-    let result = registry.run_workspace_fast(
-        &pkg,
-        Path::new("/workspace/pkg"),
-        Path::new("/workspace"),
-        &matchers,
-        &relative_files,
-        &FxHashSet::default(),
-        false,
-    );
+    let result = registry.run_workspace_fast(&WorkspacePluginRunInput {
+        pkg: &pkg,
+        root: Path::new("/workspace/pkg"),
+        project_root: Path::new("/workspace"),
+        precompiled_config_matchers: &matchers,
+        relative_files: &relative_files,
+        skip_config_plugins: &FxHashSet::default(),
+        production_mode: false,
+        candidate_index: None,
+    });
     assert!(result.active_plugins.is_empty());
     assert!(result.entry_patterns.is_empty());
     assert!(result.config_patterns.is_empty());
@@ -1782,15 +1783,16 @@ fn run_workspace_fast_eslint_config_parsed_when_eslint_active_at_root() {
     skip_config_plugins.insert("eslint");
 
     let workspace_relative = vec![(config_path, "eslint.config.mjs".to_string())];
-    let result = registry.run_workspace_fast(
-        &pkg,
-        &app_dir,
-        monorepo_root,
-        &matchers,
-        &workspace_relative,
-        &skip_config_plugins,
-        false,
-    );
+    let result = registry.run_workspace_fast(&WorkspacePluginRunInput {
+        pkg: &pkg,
+        root: &app_dir,
+        project_root: monorepo_root,
+        precompiled_config_matchers: &matchers,
+        relative_files: &workspace_relative,
+        skip_config_plugins: &skip_config_plugins,
+        production_mode: false,
+        candidate_index: None,
+    });
 
     assert!(
         result
@@ -1808,15 +1810,16 @@ fn run_workspace_fast_detects_active_plugins() {
     let matchers = registry.precompile_config_matchers();
     let pkg = make_pkg(&["next"]);
     let relative_files = vec![];
-    let result = registry.run_workspace_fast(
-        &pkg,
-        Path::new("/workspace/pkg"),
-        Path::new("/workspace"),
-        &matchers,
-        &relative_files,
-        &FxHashSet::default(),
-        false,
-    );
+    let result = registry.run_workspace_fast(&WorkspacePluginRunInput {
+        pkg: &pkg,
+        root: Path::new("/workspace/pkg"),
+        project_root: Path::new("/workspace"),
+        precompiled_config_matchers: &matchers,
+        relative_files: &relative_files,
+        skip_config_plugins: &FxHashSet::default(),
+        production_mode: false,
+        candidate_index: None,
+    });
     assert!(result.active_plugins.contains(&"nextjs".to_string()));
     assert!(!result.entry_patterns.is_empty());
 }
@@ -1827,15 +1830,16 @@ fn run_workspace_fast_detects_script_activated_plugins() {
     let matchers = registry.precompile_config_matchers();
     let pkg = make_pkg_with_script("opennextjs-cloudflare build");
     let relative_files = vec![];
-    let result = registry.run_workspace_fast(
-        &pkg,
-        Path::new("/workspace/pkg"),
-        Path::new("/workspace"),
-        &matchers,
-        &relative_files,
-        &FxHashSet::default(),
-        false,
-    );
+    let result = registry.run_workspace_fast(&WorkspacePluginRunInput {
+        pkg: &pkg,
+        root: Path::new("/workspace/pkg"),
+        project_root: Path::new("/workspace"),
+        precompiled_config_matchers: &matchers,
+        relative_files: &relative_files,
+        skip_config_plugins: &FxHashSet::default(),
+        production_mode: false,
+        candidate_index: None,
+    });
 
     assert!(
         result
@@ -1852,15 +1856,16 @@ fn run_workspace_fast_filters_matchers_to_active_plugins() {
 
     let pkg = make_pkg(&["next"]);
     let relative_files = vec![];
-    let result = registry.run_workspace_fast(
-        &pkg,
-        Path::new("/workspace/pkg"),
-        Path::new("/workspace"),
-        &matchers,
-        &relative_files,
-        &FxHashSet::default(),
-        false,
-    );
+    let result = registry.run_workspace_fast(&WorkspacePluginRunInput {
+        pkg: &pkg,
+        root: Path::new("/workspace/pkg"),
+        project_root: Path::new("/workspace"),
+        precompiled_config_matchers: &matchers,
+        relative_files: &relative_files,
+        skip_config_plugins: &FxHashSet::default(),
+        production_mode: false,
+        candidate_index: None,
+    });
     assert!(result.active_plugins.contains(&"nextjs".to_string()));
     assert!(
         !result.active_plugins.contains(&"jest".to_string()),
@@ -1888,15 +1893,16 @@ fn run_workspace_fast_resolves_config_from_workspace_relative_paths() {
     .unwrap();
 
     let workspace_relative = vec![(config_path, "vite.config.ts".to_string())];
-    let result = registry.run_workspace_fast(
-        &pkg,
-        &workspace_root,
+    let result = registry.run_workspace_fast(&WorkspacePluginRunInput {
+        pkg: &pkg,
+        root: &workspace_root,
         project_root,
-        &matchers,
-        &workspace_relative,
-        &FxHashSet::default(),
-        false,
-    );
+        precompiled_config_matchers: &matchers,
+        relative_files: &workspace_relative,
+        skip_config_plugins: &FxHashSet::default(),
+        production_mode: false,
+        candidate_index: None,
+    });
 
     let entry_patterns: Vec<String> = result
         .entry_patterns
