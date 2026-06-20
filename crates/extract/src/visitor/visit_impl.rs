@@ -7895,15 +7895,7 @@ impl ModuleInfoExtractor {
 
     fn capture_call_sink(&mut self, expr: &CallExpression<'_>) {
         let Some(callee_path) = flatten_callee_path(&expr.callee) else {
-            if self.redos_regex_application(expr).is_some() {
-                return;
-            }
-            let reason = if contains_computed_member(&expr.callee) {
-                SkippedSecurityCalleeReason::ComputedMember
-            } else {
-                SkippedSecurityCalleeReason::DynamicDispatch
-            };
-            self.record_skipped_security_callee(&expr.callee, reason);
+            self.record_unresolved_call_sink(expr);
             return;
         };
         self.capture_security_control_call(&callee_path, expr.span);
@@ -7912,25 +7904,7 @@ impl ModuleInfoExtractor {
         } else {
             SinkShape::Call
         };
-        // The arg-0 URL literal, captured once per call so the secret-to-network
-        // category (#890) can carry a destination-host signal on the arg-1 sink.
-        let url_arg_literal = call_url_arg_literal(expr);
-        for (index, arg) in expr.arguments.iter().enumerate() {
-            let Some(arg_expr) = arg.as_expression() else {
-                continue;
-            };
-            let Ok(arg_index) = u32::try_from(index) else {
-                continue;
-            };
-            self.push_security_sink_arg(
-                &callee_path,
-                sink_shape,
-                arg_index,
-                arg_expr,
-                url_arg_literal.clone(),
-                expr.span,
-            );
-        }
+        self.capture_call_sink_args(expr, &callee_path, sink_shape);
         if should_capture_missing_jwt_verify_options(&callee_path, sink_shape, expr.arguments.len())
         {
             self.security_sinks.push(SinkSite {
@@ -7951,6 +7925,45 @@ impl ModuleInfoExtractor {
                 url_arg_literal: None,
                 url_shape: None,
             });
+        }
+    }
+
+    fn record_unresolved_call_sink(&mut self, expr: &CallExpression<'_>) {
+        if self.redos_regex_application(expr).is_some() {
+            return;
+        }
+        let reason = if contains_computed_member(&expr.callee) {
+            SkippedSecurityCalleeReason::ComputedMember
+        } else {
+            SkippedSecurityCalleeReason::DynamicDispatch
+        };
+        self.record_skipped_security_callee(&expr.callee, reason);
+    }
+
+    fn capture_call_sink_args(
+        &mut self,
+        expr: &CallExpression<'_>,
+        callee_path: &str,
+        sink_shape: SinkShape,
+    ) {
+        // The arg-0 URL literal is captured once per call so secret-to-network
+        // findings can carry a destination-host signal on the arg-1 sink.
+        let url_arg_literal = call_url_arg_literal(expr);
+        for (index, arg) in expr.arguments.iter().enumerate() {
+            let Some(arg_expr) = arg.as_expression() else {
+                continue;
+            };
+            let Ok(arg_index) = u32::try_from(index) else {
+                continue;
+            };
+            self.push_security_sink_arg(
+                callee_path,
+                sink_shape,
+                arg_index,
+                arg_expr,
+                url_arg_literal.clone(),
+                expr.span,
+            );
         }
     }
 
