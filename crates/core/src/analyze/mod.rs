@@ -363,42 +363,70 @@ fn public_api_package_entry_points(
     let canonical_project_root =
         dunce::canonicalize(&config.root).unwrap_or_else(|_| config.root.clone());
 
+    add_root_public_api_entry_points(
+        &mut public_api_entry_points,
+        graph,
+        &path_to_file_id,
+        config,
+        root_pkg,
+        &canonical_project_root,
+    );
+    add_workspace_public_api_entry_points(
+        &mut public_api_entry_points,
+        graph,
+        &path_to_file_id,
+        workspaces,
+        &canonical_project_root,
+    );
+
+    public_api_entry_points
+}
+
+fn add_root_public_api_entry_points(
+    public_api_entry_points: &mut FxHashSet<FileId>,
+    graph: &ModuleGraph,
+    path_to_file_id: &FxHashMap<std::path::PathBuf, FileId>,
+    config: &ResolvedConfig,
+    root_pkg: Option<&PackageJson>,
+    canonical_project_root: &std::path::Path,
+) {
     if let Some(pkg) = root_pkg {
         add_package_public_api_entry_points(
-            &mut public_api_entry_points,
-            &path_to_file_id,
+            public_api_entry_points,
+            path_to_file_id,
             &config.root,
             pkg,
-            &canonical_project_root,
+            canonical_project_root,
         );
-        add_exportless_package_source_indexes(
-            &mut public_api_entry_points,
-            graph,
-            &config.root,
-            pkg,
-        );
+        add_exportless_package_source_indexes(public_api_entry_points, graph, &config.root, pkg);
     }
+}
 
+fn add_workspace_public_api_entry_points(
+    public_api_entry_points: &mut FxHashSet<FileId>,
+    graph: &ModuleGraph,
+    path_to_file_id: &FxHashMap<std::path::PathBuf, FileId>,
+    workspaces: &[fallow_config::WorkspaceInfo],
+    canonical_project_root: &std::path::Path,
+) {
     for workspace in workspaces {
         let Ok(pkg) = PackageJson::load(&workspace.root.join("package.json")) else {
             continue;
         };
         add_package_public_api_entry_points(
-            &mut public_api_entry_points,
-            &path_to_file_id,
+            public_api_entry_points,
+            path_to_file_id,
             &workspace.root,
             &pkg,
-            &canonical_project_root,
+            canonical_project_root,
         );
         add_exportless_package_source_indexes(
-            &mut public_api_entry_points,
+            public_api_entry_points,
             graph,
             &workspace.root,
             &pkg,
         );
     }
-
-    public_api_entry_points
 }
 
 fn find_circular_dependencies(
