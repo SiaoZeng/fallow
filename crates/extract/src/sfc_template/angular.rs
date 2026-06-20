@@ -546,63 +546,96 @@ fn process_tag(
     let locals = current_locals(scopes);
 
     for caps in ATTR_RE.captures_iter(tag) {
-        let attr_name = caps.get(1).map_or("", |m| m.as_str());
-        let attr_value = caps.get(2).map_or("", |m| m.as_str()).trim();
-
-        if attr_value.is_empty() {
-            continue;
+        if let Some(attr) = parse_template_attr(&caps, tag_start) {
+            process_tag_attr(&attr, &locals, scopes, refs);
         }
+    }
+}
 
-        if attr_name == "[innerHTML]"
-            && let Some(attr) = caps.get(0)
-            && let Some(sink) = crate::template_usage::template_html_sink(
-                attr_value,
-                tag_start + attr.start(),
-                tag_start + attr.end(),
-            )
-        {
-            refs.security_sinks.push(sink);
-        }
+struct AngularTemplateAttr<'a> {
+    name: &'a str,
+    value: &'a str,
+    span: Option<(usize, usize)>,
+}
 
-        if attr_name.starts_with('[') && !attr_name.starts_with("[(") {
-            collect_expression_refs(attr_value, &locals, refs);
-            continue;
-        }
+fn parse_template_attr<'a>(
+    caps: &'a regex::Captures<'_>,
+    tag_start: usize,
+) -> Option<AngularTemplateAttr<'a>> {
+    let value = caps.get(2)?.as_str().trim();
+    if value.is_empty() {
+        return None;
+    }
 
-        if attr_name.starts_with('(') {
-            collect_statement_refs(attr_value, &locals, refs);
-            continue;
-        }
+    let span = caps
+        .get(0)
+        .map(|attr| (tag_start + attr.start(), tag_start + attr.end()));
 
-        if attr_name.starts_with("[(") {
-            collect_expression_refs(attr_value, &locals, refs);
-            continue;
-        }
+    Some(AngularTemplateAttr {
+        name: caps.get(1).map_or("", |m| m.as_str()),
+        value,
+        span,
+    })
+}
 
-        if attr_name == "*ngIf" || attr_name == "*ngShow" || attr_name == "*ngSwitch" {
-            let expr = attr_value.split(';').next().unwrap_or(attr_value).trim();
-            collect_expression_refs(expr, &locals, refs);
-            continue;
-        }
+fn process_tag_attr(
+    attr: &AngularTemplateAttr<'_>,
+    locals: &[String],
+    scopes: &mut [Vec<String>],
+    refs: &mut AngularTemplateRefs,
+) {
+    collect_inner_html_sink(attr, refs);
 
-        if attr_name == "*ngFor" {
-            handle_ng_for(attr_value, &locals, scopes, refs);
-            continue;
-        }
+    if attr.name.starts_with('[') && !attr.name.starts_with("[(") {
+        collect_expression_refs(attr.value, locals, refs);
+        return;
+    }
 
-        if attr_name.starts_with('*') {
-            collect_expression_refs(attr_value, &locals, refs);
-            continue;
-        }
+    if attr.name.starts_with('(') {
+        collect_statement_refs(attr.value, locals, refs);
+        return;
+    }
 
-        if attr_name.starts_with("bind-") {
-            collect_expression_refs(attr_value, &locals, refs);
-            continue;
-        }
+    if attr.name.starts_with("[(") {
+        collect_expression_refs(attr.value, locals, refs);
+        return;
+    }
 
-        if attr_name.starts_with("on-") {
-            collect_statement_refs(attr_value, &locals, refs);
-        }
+    if matches!(attr.name, "*ngIf" | "*ngShow" | "*ngSwitch") {
+        let expr = attr.value.split(';').next().unwrap_or(attr.value).trim();
+        collect_expression_refs(expr, locals, refs);
+        return;
+    }
+
+    if attr.name == "*ngFor" {
+        handle_ng_for(attr.value, locals, scopes, refs);
+        return;
+    }
+
+    if attr.name.starts_with('*') {
+        collect_expression_refs(attr.value, locals, refs);
+        return;
+    }
+
+    if attr.name.starts_with("bind-") {
+        collect_expression_refs(attr.value, locals, refs);
+        return;
+    }
+
+    if attr.name.starts_with("on-") {
+        collect_statement_refs(attr.value, locals, refs);
+    }
+}
+
+fn collect_inner_html_sink(attr: &AngularTemplateAttr<'_>, refs: &mut AngularTemplateRefs) {
+    if attr.name != "[innerHTML]" {
+        return;
+    }
+
+    if let Some((start, end)) = attr.span
+        && let Some(sink) = crate::template_usage::template_html_sink(attr.value, start, end)
+    {
+        refs.security_sinks.push(sink);
     }
 }
 
@@ -769,6 +802,16 @@ mod tests {
         let refs =
             collect_angular_template_refs(r#"<button (click)="onButtonClick()">Click</button>"#);
         assert!(refs.contains("onButtonClick"));
+    }
+
+    #[test]
+    fn legacy_bind_and_on_attrs_extract_refs() {
+        let refs = collect_angular_template_refs(
+            r#"<button bind-title="title" on-click="submit(value)">"#,
+        );
+        assert!(refs.contains("title"));
+        assert!(refs.contains("submit"));
+        assert!(refs.contains("value"));
     }
 
     #[test]
