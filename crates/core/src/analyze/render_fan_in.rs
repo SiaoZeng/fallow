@@ -26,6 +26,8 @@
 //! (`<Lib.Button/>`) resolves to `None` and increments no component's fan-in. A
 //! true high-fan-in component can only be undersold, never falsely flagged.
 
+use std::path::Path;
+
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use fallow_types::extract::ModuleInfo;
@@ -51,34 +53,45 @@ pub fn compute_render_fan_in(
     modules: &[ModuleInfo],
     resolved_modules: &[ResolvedModule],
     declared_deps: &FxHashSet<String>,
-    root: &std::path::Path,
+    root: &Path,
 ) -> Option<RenderFanInMetric> {
-    let gated = declared_deps.contains("react")
-        || declared_deps.contains("react-dom")
-        || declared_deps.contains("next")
-        || declared_deps.contains("preact");
-    if !gated {
+    if !project_declares_react(declared_deps) {
         return None;
     }
 
-    // The test-file predicate must run on the PROJECT-RELATIVE path, not the
-    // absolute node path: the project root itself can contain a `tests/`
-    // segment (fallow's own fixtures live under `tests/fixtures/...`), and the
-    // `**/test/**` / `**/tests/**` globs anchor at any segment, so an absolute
-    // path would match every file. Strip the root first; fall back to the full
-    // path when the file is not under it (defensive, never expected).
-    let is_test_anchor = |path: &std::path::Path| -> bool {
-        let rel = path.strip_prefix(root).unwrap_or(path);
-        super::predicates::is_test_or_spec_file(rel)
-    };
-
-    let modules_by_id: FxHashMap<FileId, &ModuleInfo> =
-        modules.iter().map(|m| (m.file_id, m)).collect();
-    let resolved_by_id: FxHashMap<FileId, &ResolvedModule> =
-        resolved_modules.iter().map(|m| (m.file_id, m)).collect();
-
+    let (modules_by_id, resolved_by_id) = build_lookup_maps(modules, resolved_modules);
     let resolver = ChildResolver::new(graph, &modules_by_id, &resolved_by_id);
+    let mut counts = seed_component_population(graph, &modules_by_id, root);
+    credit_render_edges(graph, &modules_by_id, &resolver, root, &mut counts);
 
+    build_render_fan_in_metric(graph, counts)
+}
+
+fn project_declares_react(declared_deps: &FxHashSet<String>) -> bool {
+    declared_deps.contains("react")
+        || declared_deps.contains("react-dom")
+        || declared_deps.contains("next")
+        || declared_deps.contains("preact")
+}
+
+fn build_lookup_maps<'a>(
+    modules: &'a [ModuleInfo],
+    resolved_modules: &'a [ResolvedModule],
+) -> (
+    FxHashMap<FileId, &'a ModuleInfo>,
+    FxHashMap<FileId, &'a ResolvedModule>,
+) {
+    (
+        modules.iter().map(|m| (m.file_id, m)).collect(),
+        resolved_modules.iter().map(|m| (m.file_id, m)).collect(),
+    )
+}
+
+fn seed_component_population(
+    graph: &ModuleGraph,
+    modules_by_id: &FxHashMap<FileId, &ModuleInfo>,
+    root: &Path,
+) -> FxHashMap<CompKey, FanInAccum> {
     // Seed every declared component with a zero entry so a component rendered
     // nowhere is a REAL 0 in the distribution (not absent), and so the
     // per-component path-annotation map has an entry for every component the
@@ -92,7 +105,7 @@ pub fn compute_render_fan_in(
         // (its headline is test-local noise, dominated by render loops in the
         // test body). Excluded from the seeded population so the percentile
         // distribution and the top-N are over non-test components only.
-        if is_test_anchor(&node.path) {
+        if is_project_test_path(&node.path, root) {
             continue;
         }
         let Some(module) = modules_by_id.get(&node.file_id) else {
@@ -107,7 +120,16 @@ pub fn compute_render_fan_in(
                 .or_default();
         }
     }
+    counts
+}
 
+fn credit_render_edges(
+    graph: &ModuleGraph,
+    modules_by_id: &FxHashMap<FileId, &ModuleInfo>,
+    resolver: &ChildResolver<'_>,
+    root: &Path,
+    counts: &mut FxHashMap<CompKey, FanInAccum>,
+) {
     // Walk every render edge, resolve its child to a concrete component, and
     // credit one render SITE plus the distinct parent key. The parent key is
     // `(parent_file, parent_component)`; an edge with an empty parent (a
@@ -121,7 +143,7 @@ pub fn compute_render_fan_in(
         // test that renders `<Page>` 146 times is not real blast radius. Skip
         // the whole module's render edges so test-local render loops never
         // inflate any component's fan-in.
-        if is_test_anchor(&node.path) {
+        if is_project_test_path(&node.path, root) {
             continue;
         }
         let Some(module) = modules_by_id.get(&node.file_id) else {
@@ -140,10 +162,15 @@ pub fn compute_render_fan_in(
                 .insert((node.file_id, edge.parent_component.clone()));
         }
     }
+}
 
+fn build_render_fan_in_metric(
+    graph: &ModuleGraph,
+    counts: FxHashMap<CompKey, FanInAccum>,
+) -> Option<RenderFanInMetric> {
     // Build the per-component detail (keyed back to file paths for the hotspot
     // surface) and the distinct-parents distribution for the percentile.
-    let path_by_id: FxHashMap<FileId, &std::path::Path> = graph
+    let path_by_id: FxHashMap<FileId, &Path> = graph
         .modules
         .iter()
         .map(|node| (node.file_id, node.path.as_path()))
@@ -152,7 +179,7 @@ pub fn compute_render_fan_in(
     let mut per_component: Vec<RenderFanInComponent> = Vec::with_capacity(counts.len());
     let mut distinct_parents_dist: Vec<u32> = Vec::with_capacity(counts.len());
     let mut max_distinct_parents: u32 = 0;
-    for (key, accum) in &counts {
+    for (key, accum) in counts {
         let Some(path) = path_by_id.get(&key.file) else {
             continue;
         };
@@ -191,6 +218,14 @@ pub fn compute_render_fan_in(
         high_pct,
         max_distinct_parents: Some(max_distinct_parents),
     })
+}
+
+// The test-file predicate must run on the project-relative path, not the
+// absolute node path: the project root itself can contain a `tests/` segment,
+// and the `**/test/**` / `**/tests/**` globs anchor at any segment.
+fn is_project_test_path(path: &Path, root: &Path) -> bool {
+    let rel = path.strip_prefix(root).unwrap_or(path);
+    super::predicates::is_test_or_spec_file(rel)
 }
 
 /// Running accumulator per component during the edge walk.
