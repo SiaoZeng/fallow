@@ -460,33 +460,50 @@ fn load_plugin_file(
         return;
     };
 
+    let Some(content) = read_plugin_file(path) else {
+        return;
+    };
+
+    if let Some(plugin) = parse_plugin(&content, &format, path) {
+        push_plugin_if_unique(plugin, path, plugins, seen);
+    }
+}
+
+fn read_plugin_file(path: &Path) -> Option<String> {
     match std::fs::read_to_string(path) {
-        Ok(content) => {
-            if let Some(plugin) = parse_plugin(&content, &format, path) {
-                if plugin.name.is_empty() {
-                    tracing::warn!(
-                        "external plugin in {} has an empty name, skipping",
-                        path.display()
-                    );
-                    return;
-                }
-                if seen.insert(plugin.name.clone()) {
-                    plugins.push(plugin);
-                } else {
-                    tracing::warn!(
-                        "duplicate external plugin '{}' in {}, skipping",
-                        plugin.name,
-                        path.display()
-                    );
-                }
-            }
-        }
+        Ok(content) => Some(content),
         Err(e) => {
             tracing::warn!(
                 "failed to read external plugin file {}: {e}",
                 path.display()
             );
+            None
         }
+    }
+}
+
+fn push_plugin_if_unique(
+    plugin: ExternalPluginDef,
+    path: &Path,
+    plugins: &mut Vec<ExternalPluginDef>,
+    seen: &mut rustc_hash::FxHashSet<String>,
+) {
+    if plugin.name.is_empty() {
+        tracing::warn!(
+            "external plugin in {} has an empty name, skipping",
+            path.display()
+        );
+        return;
+    }
+
+    if seen.insert(plugin.name.clone()) {
+        plugins.push(plugin);
+    } else {
+        tracing::warn!(
+            "duplicate external plugin '{}' in {}, skipping",
+            plugin.name,
+            path.display()
+        );
     }
 }
 
