@@ -33,6 +33,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use fallow_types::extract::ModuleInfo;
 
+use crate::discover::FileId;
 use crate::graph::ModuleGraph;
 use crate::results::UnusedLoadDataKey;
 use crate::suppress::{IssueKind, SuppressionContext};
@@ -73,28 +74,9 @@ pub fn find_unused_load_data_keys(
     line_offsets_by_file: &LineOffsetsMap<'_>,
     root: &Path,
 ) -> LoadDataKeyResult {
-    let empty = LoadDataKeyResult {
-        findings: Vec::new(),
-        global_abstain: false,
-    };
     if !declared_deps.contains("@sveltejs/kit") {
-        return empty;
+        return empty_result();
     }
-
-    // Path -> ModuleInfo for sibling lookups, keyed by absolute path.
-    let module_by_path: FxHashMap<&Path, &ModuleInfo> = graph
-        .modules
-        .iter()
-        .filter_map(|node| {
-            let module = modules.get(node.file_id.0 as usize)?;
-            Some((node.path.as_path(), module))
-        })
-        .collect();
-    let path_by_id: FxHashMap<_, &Path> = graph
-        .modules
-        .iter()
-        .map(|node| (node.file_id, node.path.as_path()))
-        .collect();
 
     // Ladder (ii): any module's whole-object use of `page.data` / `$page.data`
     // means a reflective read could consume any key, so abstain ALL routes. Read
@@ -109,18 +91,8 @@ pub fn find_unused_load_data_keys(
         };
     }
 
-    // Channel 2/3 (project-wide): collect every `page.data.<key>` /
-    // `$page.data.<key>` member access ONCE across all modules. The captured
-    // object is already `page.data` (Svelte 5) or `$page.data` (Svelte 4); both
-    // unify on the bare member name.
-    let mut global_used: FxHashSet<&str> = FxHashSet::default();
-    for module in modules {
-        for access in &module.member_accesses {
-            if access.object == "page.data" || access.object == "$page.data" {
-                global_used.insert(access.member.as_str());
-            }
-        }
-    }
+    let module_indexes = build_module_indexes(graph, modules);
+    let global_used = collect_global_page_data_member_accesses(modules);
 
     let mut findings = Vec::new();
     for node in &graph.modules {
@@ -137,78 +109,171 @@ pub fn find_unused_load_data_keys(
             continue;
         };
 
-        // Route-pinned consumer channel (1): the sibling `+page.svelte`.
-        let svelte_sibling = module_by_path
-            .get(route_dir.join("+page.svelte").as_path())
-            .copied();
-
-        // FP-1 / ladder (i): the sibling passes the whole `data` opaquely.
-        if let Some(sibling) = svelte_sibling
-            && sibling_passes_whole_data(sibling)
-        {
+        let Some(route_used) = collect_route_used_keys(
+            route_dir,
+            &node.path,
+            &module_indexes.module_by_path,
+            &global_used,
+        ) else {
             continue;
-        }
+        };
 
-        // Collect the per-route used set: channel 1 (sibling `data.<key>`)
-        // unioned with the project-wide channel 2/3.
-        let mut route_used: FxHashSet<&str> = global_used.clone();
-        if let Some(sibling) = svelte_sibling {
-            collect_data_member_accesses(sibling, &mut route_used);
-        }
-
-        // FP-2: a server producer's keys can be consumed by a sibling universal
-        // load that reads / forwards its `data` param. Credit the universal
-        // sibling's `data.<key>` accesses, and abstain wholesale if the universal
-        // load forwards `data` opaquely.
-        let mut server_chain_abstain = false;
-        if is_server_load_producer(&node.path) {
-            for universal_name in UNIVERSAL_LOAD_NAMES {
-                let Some(universal) = module_by_path
-                    .get(route_dir.join(universal_name).as_path())
-                    .copied()
-                else {
-                    continue;
-                };
-                if sibling_passes_whole_data(universal) {
-                    server_chain_abstain = true;
-                    break;
-                }
-                collect_data_member_accesses(universal, &mut route_used);
-            }
-        }
-        if server_chain_abstain {
-            continue;
-        }
-
-        let Some(&producer_path) = path_by_id.get(&node.file_id) else {
+        let Some(&producer_path) = module_indexes.path_by_id.get(&node.file_id) else {
             continue;
         };
         let route_dir_rel = relativize_route_dir(route_dir, root);
 
-        for key in &producer.load_return_keys {
-            if route_used.contains(key.name.as_str()) {
-                continue;
-            }
-            let (line, col) =
-                byte_offset_to_line_col(line_offsets_by_file, node.file_id, key.span_start);
-            if suppressions.is_suppressed(node.file_id, line, IssueKind::UnusedLoadDataKey)
-                || suppressions.is_file_suppressed(node.file_id, IssueKind::UnusedLoadDataKey)
-            {
-                continue;
-            }
-            findings.push(UnusedLoadDataKey {
-                path: producer_path.to_path_buf(),
-                key_name: key.name.clone(),
-                line,
-                col,
-                route_dir: route_dir_rel.clone(),
-            });
-        }
+        let finding_input = ProducerFindingInput {
+            producer,
+            file_id: node.file_id,
+            producer_path,
+            route_dir: route_dir_rel,
+            route_used: &route_used,
+            suppressions,
+            line_offsets_by_file,
+        };
+        append_unused_keys_for_producer(&mut findings, &finding_input);
     }
 
     LoadDataKeyResult {
         findings,
         global_abstain: false,
+    }
+}
+
+fn empty_result() -> LoadDataKeyResult {
+    LoadDataKeyResult {
+        findings: Vec::new(),
+        global_abstain: false,
+    }
+}
+
+struct ModuleIndexes<'a> {
+    /// Path -> ModuleInfo for sibling lookups, keyed by absolute path.
+    module_by_path: FxHashMap<&'a Path, &'a ModuleInfo>,
+    path_by_id: FxHashMap<FileId, &'a Path>,
+}
+
+fn build_module_indexes<'a>(
+    graph: &'a ModuleGraph,
+    modules: &'a [ModuleInfo],
+) -> ModuleIndexes<'a> {
+    ModuleIndexes {
+        module_by_path: graph
+            .modules
+            .iter()
+            .filter_map(|node| {
+                let module = modules.get(node.file_id.0 as usize)?;
+                Some((node.path.as_path(), module))
+            })
+            .collect(),
+        path_by_id: graph
+            .modules
+            .iter()
+            .map(|node| (node.file_id, node.path.as_path()))
+            .collect(),
+    }
+}
+
+fn collect_global_page_data_member_accesses(modules: &[ModuleInfo]) -> FxHashSet<&str> {
+    // Channel 2/3 (project-wide): collect every `page.data.<key>` /
+    // `$page.data.<key>` member access ONCE across all modules. The captured
+    // object is already `page.data` (Svelte 5) or `$page.data` (Svelte 4); both
+    // unify on the bare member name.
+    let mut global_used: FxHashSet<&str> = FxHashSet::default();
+    for module in modules {
+        for access in &module.member_accesses {
+            if access.object == "page.data" || access.object == "$page.data" {
+                global_used.insert(access.member.as_str());
+            }
+        }
+    }
+    global_used
+}
+
+fn collect_route_used_keys<'a>(
+    route_dir: &Path,
+    producer_path: &Path,
+    module_by_path: &FxHashMap<&Path, &'a ModuleInfo>,
+    global_used: &FxHashSet<&'a str>,
+) -> Option<FxHashSet<&'a str>> {
+    // Route-pinned consumer channel (1): the sibling `+page.svelte`.
+    let svelte_sibling = module_by_path
+        .get(route_dir.join("+page.svelte").as_path())
+        .copied();
+
+    // FP-1 / ladder (i): the sibling passes the whole `data` opaquely.
+    if let Some(sibling) = svelte_sibling
+        && sibling_passes_whole_data(sibling)
+    {
+        return None;
+    }
+
+    // Collect the per-route used set: channel 1 (sibling `data.<key>`)
+    // unioned with the project-wide channel 2/3.
+    let mut route_used = global_used.clone();
+    if let Some(sibling) = svelte_sibling {
+        collect_data_member_accesses(sibling, &mut route_used);
+    }
+
+    // FP-2: a server producer's keys can be consumed by a sibling universal
+    // load that reads / forwards its `data` param. Credit the universal
+    // sibling's `data.<key>` accesses, and abstain wholesale if the universal
+    // load forwards `data` opaquely.
+    if is_server_load_producer(producer_path) {
+        for universal_name in UNIVERSAL_LOAD_NAMES {
+            let Some(universal) = module_by_path
+                .get(route_dir.join(universal_name).as_path())
+                .copied()
+            else {
+                continue;
+            };
+            if sibling_passes_whole_data(universal) {
+                return None;
+            }
+            collect_data_member_accesses(universal, &mut route_used);
+        }
+    }
+
+    Some(route_used)
+}
+
+struct ProducerFindingInput<'a> {
+    producer: &'a ModuleInfo,
+    file_id: FileId,
+    producer_path: &'a Path,
+    route_dir: Option<String>,
+    route_used: &'a FxHashSet<&'a str>,
+    suppressions: &'a SuppressionContext<'a>,
+    line_offsets_by_file: &'a LineOffsetsMap<'a>,
+}
+
+fn append_unused_keys_for_producer(
+    findings: &mut Vec<UnusedLoadDataKey>,
+    input: &ProducerFindingInput<'_>,
+) {
+    for key in &input.producer.load_return_keys {
+        if input.route_used.contains(key.name.as_str()) {
+            continue;
+        }
+        let (line, col) =
+            byte_offset_to_line_col(input.line_offsets_by_file, input.file_id, key.span_start);
+        if input
+            .suppressions
+            .is_suppressed(input.file_id, line, IssueKind::UnusedLoadDataKey)
+            || input
+                .suppressions
+                .is_file_suppressed(input.file_id, IssueKind::UnusedLoadDataKey)
+        {
+            continue;
+        }
+        findings.push(UnusedLoadDataKey {
+            path: input.producer_path.to_path_buf(),
+            key_name: key.name.clone(),
+            line,
+            col,
+            route_dir: input.route_dir.clone(),
+        });
     }
 }
 
