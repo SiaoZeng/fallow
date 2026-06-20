@@ -2391,7 +2391,17 @@ fn run_dependency_detectors(input: DependencyDetectorInput<'_>) -> AnalysisResul
     };
 
     populate_unused_dependency_findings(input, pkg, &mut results);
+    populate_unlisted_dependency_findings(input, pkg, &mut results);
+    populate_type_only_dependency_findings(input, pkg, &mut results);
+    populate_test_only_dependency_findings(input, pkg, &mut results);
+    results
+}
 
+fn populate_unlisted_dependency_findings(
+    input: DependencyDetectorInput<'_>,
+    pkg: &PackageJson,
+    results: &mut AnalysisResults,
+) {
     if input.config.rules.unlisted_dependencies != Severity::Off {
         results.unlisted_dependencies = find_unlisted_dependencies(UnlistedDependencyInput {
             graph: input.graph,
@@ -2406,7 +2416,13 @@ fn run_dependency_detectors(input: DependencyDetectorInput<'_>) -> AnalysisResul
         .map(UnlistedDependencyFinding::with_actions)
         .collect();
     }
+}
 
+fn populate_type_only_dependency_findings(
+    input: DependencyDetectorInput<'_>,
+    pkg: &PackageJson,
+    results: &mut AnalysisResults,
+) {
     if input.config.production {
         results.type_only_dependencies =
             find_type_only_dependencies(input.graph, pkg, input.config, input.workspaces)
@@ -2414,7 +2430,13 @@ fn run_dependency_detectors(input: DependencyDetectorInput<'_>) -> AnalysisResul
                 .map(TypeOnlyDependencyFinding::with_actions)
                 .collect();
     }
+}
 
+fn populate_test_only_dependency_findings(
+    input: DependencyDetectorInput<'_>,
+    pkg: &PackageJson,
+    results: &mut AnalysisResults,
+) {
     if !input.config.production && input.config.rules.test_only_dependencies != Severity::Off {
         results.test_only_dependencies =
             find_test_only_dependencies(input.graph, pkg, input.config, input.workspaces)
@@ -2422,7 +2444,6 @@ fn run_dependency_detectors(input: DependencyDetectorInput<'_>) -> AnalysisResul
                 .map(TestOnlyDependencyFinding::with_actions)
                 .collect();
     }
-    results
 }
 
 /// Populate the unused-dependency family (prod / dev / optional) on `results`,
