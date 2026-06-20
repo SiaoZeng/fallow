@@ -2834,6 +2834,61 @@ mod tests {
     }
 
     #[test]
+    fn parse_source_map_cache_rejects_missing_or_malformed_cache() {
+        let missing = fallow_v8_coverage::V8CoverageDump {
+            result: Vec::new(),
+            source_map_cache: None,
+        };
+        assert!(super::parse_source_map_cache(&missing).is_none());
+
+        let malformed = fallow_v8_coverage::V8CoverageDump {
+            result: Vec::new(),
+            source_map_cache: Some(serde_json::json!("not a cache object")),
+        };
+        assert!(super::parse_source_map_cache(&malformed).is_none());
+    }
+
+    #[test]
+    fn ensure_temp_dir_reuses_existing_directory() {
+        let mut temp_dir = None;
+        let first = super::ensure_temp_dir(&mut temp_dir)
+            .unwrap_or_else(|err| panic!("failed to create tempdir: {err}"))
+            .to_path_buf();
+        let second = super::ensure_temp_dir(&mut temp_dir)
+            .unwrap_or_else(|err| panic!("failed to reuse tempdir: {err}"))
+            .to_path_buf();
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn generated_source_for_script_reads_file_urls_only() {
+        let root = make_temp_dir("coverage-generated-source");
+        std::fs::create_dir_all(&root)
+            .unwrap_or_else(|err| panic!("failed to create {}: {err}", root.display()));
+        let source = root.join("bundle.js");
+        std::fs::write(&source, "function alpha() {}\n")
+            .unwrap_or_else(|err| panic!("failed to write {}: {err}", source.display()));
+        let source_url = file_url(&source);
+        let script = script_coverage_with_url(&source_url);
+
+        assert_eq!(
+            super::generated_source_for_script(&script),
+            Some("function alpha() {}\n".to_owned())
+        );
+
+        let remote = script_coverage_with_url("https://cdn.example.com/bundle.js");
+        assert_eq!(super::generated_source_for_script(&remote), None);
+
+        let missing_url = file_url(&root.join("missing.js"));
+        let missing = script_coverage_with_url(&missing_url);
+        assert_eq!(super::generated_source_for_script(&missing), None);
+
+        std::fs::remove_dir_all(&root)
+            .unwrap_or_else(|err| panic!("failed to clean temp dir {}: {err}", root.display()));
+    }
+
+    #[test]
     fn static_function_round_trips() {
         let sf = static_function(StaticFunctionInput {
             relative_posix: "src/render.tsx",
@@ -3791,6 +3846,15 @@ mod tests {
         }
     }
 
+    fn script_coverage_with_url(url: &str) -> fallow_v8_coverage::ScriptCoverage {
+        serde_json::from_value(serde_json::json!({
+            "scriptId": "1",
+            "url": url,
+            "functions": []
+        }))
+        .expect("valid script coverage")
+    }
+
     fn write_fake_yarn_bin_command(path: &Path, sidecar: &Path) {
         if cfg!(windows) {
             std::fs::write(
@@ -4089,6 +4153,33 @@ mod tests {
         assert_eq!(super::utf16_source_offset_to_byte_offset(s, 2), None);
         // Past the end is unmappable.
         assert_eq!(super::utf16_source_offset_to_byte_offset(s, 5), None);
+
+        let ascii = "alpha\nbeta";
+        for (utf16_offset, byte_offset) in [(0, 0), (5, 5), (6, 6), (10, 10)] {
+            assert_eq!(
+                super::utf16_source_offset_to_byte_offset(ascii, utf16_offset),
+                Some(byte_offset)
+            );
+        }
+        assert_eq!(super::utf16_source_offset_to_byte_offset(ascii, 11), None);
+
+        assert_eq!(super::utf16_source_offset_to_byte_offset("", 0), Some(0));
+        assert_eq!(super::utf16_source_offset_to_byte_offset("", 1), None);
+        assert_eq!(super::utf16_source_offset_to_byte_offset("å", 0), Some(0));
+        assert_eq!(super::utf16_source_offset_to_byte_offset("å", 1), Some(2));
+        assert_eq!(super::utf16_source_offset_to_byte_offset("å", 2), None);
+        assert_eq!(
+            super::utf16_source_offset_to_byte_offset("a😀b\nc", 4),
+            Some(6)
+        );
+        assert_eq!(
+            super::utf16_source_offset_to_byte_offset("a😀b\nc", 5),
+            Some(7)
+        );
+        assert_eq!(
+            super::utf16_source_offset_to_byte_offset("a😀b\nc", 6),
+            Some(8)
+        );
     }
 
     #[test]
