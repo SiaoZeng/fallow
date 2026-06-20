@@ -784,6 +784,20 @@ export type RiskClass = ("low" | "medium" | "high")
  */
 export type ReviewEffort = ("glance" | "review" | "deep_dive")
 /**
+ * The focus label for a review unit. EXACTLY two variants: `Skip` is NOT
+ * representable, so the type system is the guarantee that free mode never emits
+ * a `skip` label (safe explicit-skip is E9/paid, runtime-backed only). Mirrors
+ * E4's "cut category not representable" structural posture.
+ */
+export type FocusLabel = ("review-here" | "not-prioritized")
+/**
+ * A per-unit confidence flag. The EXACT panel-decided strings: a dynamically-
+ * wired or re-export-heavy unit carries one so its static-reachability signal is
+ * not trusted as complete (the anti-silent-de-prioritization guard). The flag
+ * NEVER lowers the score; it is advisory provenance.
+ */
+export type ConfidenceFlag = ("dynamic-dispatch" | "re-export-indirection")
+/**
  * The category of a single weakening signal.
  */
 export type WeakeningKind = ("test-weakened" | "threshold-lowered" | "suppression-added" | "security-check-removed")
@@ -8490,6 +8504,7 @@ triage: DiffTriage
 graph_facts: GraphFacts
 partition: PartitionFacts
 impact_closure: ImpactClosureFacts
+focus: FocusMap
 deltas: ReviewDeltas
 /**
  * E3 (6.F, headline): reviewer-private weakening signals (tests
@@ -8635,6 +8650,76 @@ consumed_symbols: string[]
  * Honest scope note: this is a syntactic attention pointer, not a proof.
  */
 note: string
+}
+/**
+ * The weighted focus map: the ranked `review-here` units plus the FULL
+ * `deprioritized` escape-hatch list, so nothing is hidden.
+ *
+ * Completeness invariant (the escape-hatch done-condition): the two lists
+ * partition the unit set, so `review_here.len() + deprioritized.len()` equals
+ * the total unit count by construction.
+ */
+export interface FocusMap {
+/**
+ * Units labeled `review-here`, ranked by composite score (descending), ties
+ * broken by path for determinism.
+ */
+review_here: FocusUnit[]
+/**
+ * EVERY `not-prioritized` unit (the escape hatch). Always present and fully
+ * enumerated so a reviewer can always "show me what you de-prioritized"; the
+ * human brief collapses it by default and re-expands under
+ * `--show-deprioritized`.
+ */
+deprioritized: FocusUnit[]
+}
+/**
+ * One review unit on the focus map: its file, composite score, label, human
+ * reason, and any confidence flags.
+ */
+export interface FocusUnit {
+/**
+ * Root-relative path of the changed file this unit covers.
+ */
+file: string
+score: FocusScore
+label: FocusLabel
+/**
+ * A human-readable reason for the label, built from the present signals.
+ */
+reason: string
+/**
+ * Confidence flags (advisory; never lower the score). Sorted, deduped.
+ */
+confidence?: ConfidenceFlag[]
+}
+/**
+ * The composite attention score, with the four deterministic component
+ * sub-scores kept on the wire so the E9 runtime seam can re-weight `total`
+ * without recomputing the signals.
+ */
+export interface FocusScore {
+/**
+ * Fan-in/out blast-radius component.
+ */
+fan_io: number
+/**
+ * Security source -> sink taint-touch component (0 until a security pass is
+ * threaded onto the brief path; the seam is built and tested).
+ */
+security_taint: number
+/**
+ * Risk-zone component (boundary / public-API / security-sensitive).
+ */
+risk_zone: number
+/**
+ * Change-shape component (new/widened export, signature change proxy).
+ */
+change_shape: number
+/**
+ * The summed total. E9 (paid) multiplies a runtime hot/cold weight in here.
+ */
+total: number
 }
 /**
  * E3 diff-aware deterministic deltas (6.A), framed new-vs-pre-existing against

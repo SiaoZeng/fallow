@@ -162,6 +162,11 @@ pub struct AuditOptions<'a> {
     /// (E5) Path to an agent's judgment JSON to POST-VALIDATE against the live
     /// graph. Implies `brief`. Always exit 0. `None` off the walkthrough path.
     pub walkthrough_file: Option<&'a std::path::Path>,
+    /// (E7) Expand the de-prioritized units in the human focus map ("show me what
+    /// you de-prioritized"). The `deprioritized` list is ALWAYS in the JSON
+    /// regardless; this only re-expands the human render (collapse-by-default).
+    /// Only consulted on the brief path.
+    pub show_deprioritized: bool,
 }
 
 /// A base ref resolved by auto-detection: the git ref to diff against plus a
@@ -953,6 +958,7 @@ fn build_base_audit_options<'a>(
         max_decisions: 4,
         walkthrough_guide: false,
         walkthrough_file: None,
+        show_deprioritized: false,
     }
 }
 
@@ -1243,7 +1249,7 @@ use crate::base_worktree::{
 };
 
 #[path = "audit_keys.rs"]
-mod keys;
+pub mod keys;
 
 #[path = "audit_review_deltas.rs"]
 pub mod review_deltas;
@@ -1358,6 +1364,7 @@ fn run_audit_head_analyses(
         check.impact_closure = compute_brief_impact_closure(opts.root, check, changed_files);
         check.public_api_keys = Some(public_api_keys_from_check(Some(check), opts.root));
         check.partition_order = compute_brief_partition_order(opts.root, check, changed_files);
+        check.focus_facts = compute_brief_focus_facts(opts.root, check, changed_files);
     }
     let shared_parse = if share_dead_code_parse_with_health {
         check.as_mut().and_then(|r| r.shared_parse.take())
@@ -1454,6 +1461,48 @@ fn compute_brief_partition_order(
 
     let partition = graph.partition_order(&changed_ids);
     Some(graph.partition_order_with_paths(&partition, root))
+}
+
+/// Compute the E7 per-file focus graph facts (fan-in/out + the dynamic-dispatch /
+/// re-export-indirection confidence-flag signals) for the review brief's stage 4
+/// weighted focus map, from the check result's retained graph against the
+/// changed-file set.
+///
+/// Maps each changed absolute path to its graph `FileId`, computes the per-file
+/// blast + confidence signals, and path-resolves them. Returns `None` when the
+/// graph was not retained (off the brief path) or no changed file maps to a known
+/// module.
+fn compute_brief_focus_facts(
+    root: &std::path::Path,
+    check: &CheckResult,
+    changed_files: &FxHashSet<PathBuf>,
+) -> Option<Vec<fallow_core::graph::FocusFileFactsPaths>> {
+    let graph = check
+        .shared_parse
+        .as_ref()
+        .and_then(|sp| sp.analysis_output.as_ref())
+        .and_then(|out| out.graph.as_ref())?;
+
+    let path_to_id: FxHashMap<String, fallow_types::discover::FileId> = graph
+        .modules
+        .iter()
+        .map(|m| (m.path.to_string_lossy().replace('\\', "/"), m.file_id))
+        .collect();
+
+    let changed_ids: Vec<fallow_types::discover::FileId> = changed_files
+        .iter()
+        .filter_map(|p| {
+            let key = p.to_string_lossy().replace('\\', "/");
+            path_to_id.get(&key).copied()
+        })
+        .collect();
+
+    if changed_ids.is_empty() {
+        return None;
+    }
+
+    let facts = graph.focus_file_facts(&changed_ids);
+    Some(graph.focus_facts_with_paths(&facts, root))
 }
 
 /// Run the audit pipeline: resolve base ref, run analyses, compute verdict.
@@ -2423,7 +2472,12 @@ pub fn run_audit(opts: &AuditOptions<'_>, gate_marker: Option<&str>) -> ExitCode
                 // Exit-0 seam: the brief renders the same analysis but never
                 // gates on the verdict. `print_brief_result` always returns
                 // SUCCESS.
-                crate::audit_brief::print_brief_result(&result, opts.quiet, opts.explain)
+                crate::audit_brief::print_brief_result(
+                    &result,
+                    opts.quiet,
+                    opts.explain,
+                    opts.show_deprioritized,
+                )
             } else {
                 print_audit_result(&result, opts.quiet, opts.explain)
             }
@@ -3646,6 +3700,7 @@ mod tests {
             max_decisions: 4,
             walkthrough_guide: false,
             walkthrough_file: None,
+            show_deprioritized: false,
         };
         let key = AuditBaseSnapshotCacheKey {
             hash: 0xfeed,
@@ -3710,6 +3765,7 @@ mod tests {
             max_decisions: 4,
             walkthrough_guide: false,
             walkthrough_file: None,
+            show_deprioritized: false,
         };
         let key = AuditBaseSnapshotCacheKey {
             hash: 0xbeef,
@@ -3788,6 +3844,7 @@ mod tests {
             max_decisions: 4,
             walkthrough_guide: false,
             walkthrough_file: None,
+            show_deprioritized: false,
         };
 
         let first = config_file_fingerprint(&opts).expect("fingerprint should be computed");
@@ -3864,6 +3921,7 @@ mod tests {
             max_decisions: 4,
             walkthrough_guide: false,
             walkthrough_file: None,
+            show_deprioritized: false,
         };
 
         let result = execute_audit(&opts).expect("audit should execute");
@@ -3945,6 +4003,7 @@ mod tests {
             max_decisions: 4,
             walkthrough_guide: false,
             walkthrough_file: None,
+            show_deprioritized: false,
         };
 
         let result = execute_audit(&opts).expect("audit should execute");
@@ -4042,6 +4101,7 @@ mod tests {
             max_decisions: 4,
             walkthrough_guide: false,
             walkthrough_file: None,
+            show_deprioritized: false,
         };
 
         let result = execute_audit(&opts).expect("audit should execute");
@@ -4123,6 +4183,7 @@ mod tests {
             max_decisions: 4,
             walkthrough_guide: false,
             walkthrough_file: None,
+            show_deprioritized: false,
         };
 
         let result = execute_audit(&opts).expect("audit should execute");
@@ -4283,6 +4344,7 @@ mod tests {
             max_decisions: 4,
             walkthrough_guide: false,
             walkthrough_file: None,
+            show_deprioritized: false,
         };
 
         let result = execute_audit(&opts).expect("audit should execute");
@@ -4417,6 +4479,7 @@ export function App() {
             max_decisions: 4,
             walkthrough_guide: false,
             walkthrough_file: None,
+            show_deprioritized: false,
         };
 
         let result = execute_audit(&opts).expect("audit should execute");
@@ -4558,6 +4621,7 @@ export function App() {
             max_decisions: 4,
             walkthrough_guide: false,
             walkthrough_file: None,
+            show_deprioritized: false,
         };
 
         let result = execute_audit(&opts).expect("audit should execute");
@@ -4644,6 +4708,7 @@ export function App() {
             max_decisions: 4,
             walkthrough_guide: false,
             walkthrough_file: None,
+            show_deprioritized: false,
         };
 
         let result = execute_audit(&opts).expect("audit should execute with a new explicit config");
@@ -4724,6 +4789,7 @@ export function App() {
             max_decisions: 4,
             walkthrough_guide: false,
             walkthrough_file: None,
+            show_deprioritized: false,
         };
 
         let result = execute_audit(&opts).expect("audit should execute");
@@ -4810,6 +4876,7 @@ export function App() {
             max_decisions: 4,
             walkthrough_guide: false,
             walkthrough_file: None,
+            show_deprioritized: false,
         };
 
         let first = execute_audit(&opts).expect("first audit should execute");
@@ -4919,6 +4986,7 @@ export function App() {
             max_decisions: 4,
             walkthrough_guide: false,
             walkthrough_file: None,
+            show_deprioritized: false,
         };
 
         let result = execute_audit(&opts).expect("audit should execute");

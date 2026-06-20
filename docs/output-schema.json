@@ -15839,6 +15839,10 @@
           "description": "Stage 3: the impact closure (affected-not-shown + coordination gap).",
           "$ref": "#/definitions/ImpactClosureFacts"
         },
+        "focus": {
+          "description": "Stage 4 (E7): the weighted focus map. A composite attention score per\nchanged-file unit (fan-in/out + security taint + risk zone + change shape),\nwith `review-here` / `not-prioritized` labels (NEVER `skip` in free mode),\na per-unit confidence flag, and the FULL `deprioritized` escape-hatch list\nso every de-prioritized piece is reachable. Stage 4 sits UNDER the decision\nsurface as drill-down.",
+          "$ref": "#/definitions/FocusMap"
+        },
         "deltas": {
           "description": "E3 (6.A): diff-aware deterministic deltas (boundary/cycle introduced +\nexports-aware public-API surface delta), new-vs-pre-existing.",
           "$ref": "#/definitions/ReviewDeltas"
@@ -15867,6 +15871,7 @@
         "graph_facts",
         "partition",
         "impact_closure",
+        "focus",
         "deltas",
         "weakening",
         "routing",
@@ -16751,6 +16756,128 @@
         "files"
       ],
       "description": "One review unit: a coherent by-module cluster of the changed set."
+    },
+    "FocusLabel": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "review-here",
+          "description": "Review this unit: its composite attention score is at or above the line."
+        },
+        {
+          "type": "string",
+          "const": "not-prioritized",
+          "description": "Not prioritized: below the line. NEVER \"skip\" (the reviewer is free to\nreview it anyway; the escape hatch enumerates every such unit)."
+        }
+      ],
+      "description": "The focus label for a review unit. EXACTLY two variants: `Skip` is NOT\nrepresentable, so the type system is the guarantee that free mode never emits\na `skip` label (safe explicit-skip is E9/paid, runtime-backed only). Mirrors\nE4's \"cut category not representable\" structural posture."
+    },
+    "ConfidenceFlag": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "dynamic-dispatch",
+          "description": "The unit is dynamically wired (DI / decorators / plugin-loader / lazy\npatterns the static graph cannot fully resolve)."
+        },
+        {
+          "type": "string",
+          "const": "re-export-indirection",
+          "description": "The unit's reachability runs through re-export barrels."
+        }
+      ],
+      "description": "A per-unit confidence flag. The EXACT panel-decided strings: a dynamically-\nwired or re-export-heavy unit carries one so its static-reachability signal is\nnot trusted as complete (the anti-silent-de-prioritization guard). The flag\nNEVER lowers the score; it is advisory provenance."
+    },
+    "FocusScore": {
+      "type": "object",
+      "properties": {
+        "fan_io": {
+          "type": "integer",
+          "description": "Fan-in/out blast-radius component."
+        },
+        "security_taint": {
+          "type": "integer",
+          "description": "Security source -> sink taint-touch component (0 until a security pass is\nthreaded onto the brief path; the seam is built and tested)."
+        },
+        "risk_zone": {
+          "type": "integer",
+          "description": "Risk-zone component (boundary / public-API / security-sensitive)."
+        },
+        "change_shape": {
+          "type": "integer",
+          "description": "Change-shape component (new/widened export, signature change proxy)."
+        },
+        "total": {
+          "type": "integer",
+          "description": "The summed total. E9 (paid) multiplies a runtime hot/cold weight in here."
+        }
+      },
+      "required": [
+        "fan_io",
+        "security_taint",
+        "risk_zone",
+        "change_shape",
+        "total"
+      ],
+      "description": "The composite attention score, with the four deterministic component\nsub-scores kept on the wire so the E9 runtime seam can re-weight `total`\nwithout recomputing the signals."
+    },
+    "FocusUnit": {
+      "type": "object",
+      "properties": {
+        "file": {
+          "type": "string",
+          "description": "Root-relative path of the changed file this unit covers."
+        },
+        "score": {
+          "description": "The composite attention score and its component breakdown.",
+          "$ref": "#/definitions/FocusScore"
+        },
+        "label": {
+          "description": "The focus label (`review-here` / `not-prioritized`; NEVER `skip`).",
+          "$ref": "#/definitions/FocusLabel"
+        },
+        "reason": {
+          "type": "string",
+          "description": "A human-readable reason for the label, built from the present signals."
+        },
+        "confidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ConfidenceFlag"
+          },
+          "description": "Confidence flags (advisory; never lower the score). Sorted, deduped."
+        }
+      },
+      "required": [
+        "file",
+        "score",
+        "label",
+        "reason"
+      ],
+      "description": "One review unit on the focus map: its file, composite score, label, human\nreason, and any confidence flags."
+    },
+    "FocusMap": {
+      "type": "object",
+      "properties": {
+        "review_here": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/FocusUnit"
+          },
+          "description": "Units labeled `review-here`, ranked by composite score (descending), ties\nbroken by path for determinism."
+        },
+        "deprioritized": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/FocusUnit"
+          },
+          "description": "EVERY `not-prioritized` unit (the escape hatch). Always present and fully\nenumerated so a reviewer can always \"show me what you de-prioritized\"; the\nhuman brief collapses it by default and re-expands under\n`--show-deprioritized`."
+        }
+      },
+      "required": [
+        "review_here",
+        "deprioritized"
+      ],
+      "description": "The weighted focus map: the ranked `review-here` units plus the FULL\n`deprioritized` escape-hatch list, so nothing is hidden.\n\nCompleteness invariant (the escape-hatch done-condition): the two lists\npartition the unit set, so `review_here.len() + deprioritized.len()` equals\nthe total unit count by construction."
     }
   }
 }

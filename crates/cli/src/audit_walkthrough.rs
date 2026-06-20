@@ -571,6 +571,7 @@ mod tests {
             },
             partition: crate::audit_brief::PartitionFacts::default(),
             impact_closure: crate::audit_brief::ImpactClosureFacts::default(),
+            focus: crate::audit_focus::FocusMap::default(),
             deltas: ReviewDeltas::default(),
             weakening: Vec::new(),
             routing: RoutingFacts::default(),

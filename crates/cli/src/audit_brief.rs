@@ -23,9 +23,11 @@ use crate::audit::AuditResult;
 
 /// Wire version for the `fallow audit --brief --format json` envelope. Bumped
 /// independently of the main `--format json` contract: the brief shape can grow
-/// (populating `hunks`, `net_lines`, `exports_added`, `reachable_from`) without
-/// touching `report::SCHEMA_VERSION`.
-pub const REVIEW_BRIEF_SCHEMA_VERSION: u32 = 1;
+/// without touching `report::SCHEMA_VERSION`.
+///
+/// v2 (E7): adds the stage-4 weighted `focus` map (composite attention score per
+/// unit + no-skip labels + confidence flags + the `deprioritized` escape hatch).
+pub const REVIEW_BRIEF_SCHEMA_VERSION: u32 = 2;
 
 /// A file count at or above which a changeset is classified [`RiskClass::High`].
 const RISK_HIGH_FILES: usize = 20;
@@ -266,6 +268,13 @@ pub struct ReviewBriefOutput {
     pub partition: PartitionFacts,
     /// Stage 3: the impact closure (affected-not-shown + coordination gap).
     pub impact_closure: ImpactClosureFacts,
+    /// Stage 4 (E7): the weighted focus map. A composite attention score per
+    /// changed-file unit (fan-in/out + security taint + risk zone + change shape),
+    /// with `review-here` / `not-prioritized` labels (NEVER `skip` in free mode),
+    /// a per-unit confidence flag, and the FULL `deprioritized` escape-hatch list
+    /// so every de-prioritized piece is reachable. Stage 4 sits UNDER the decision
+    /// surface as drill-down.
+    pub focus: crate::audit_focus::FocusMap,
     /// E3 (6.A): diff-aware deterministic deltas (boundary/cycle introduced +
     /// exports-aware public-API surface delta), new-vs-pre-existing.
     pub deltas: ReviewDeltas,
@@ -410,6 +419,101 @@ fn build_partition_facts(result: &AuditResult) -> PartitionFacts {
     }
 }
 
+/// Build the Stage 4 (E7) weighted focus map from the audit result's retained
+/// per-file graph facts plus the E3 deltas / E2 coordination signals. Returns an
+/// empty focus map when no graph facts were retained (off the brief path or no
+/// changed file mapped to a module).
+///
+/// The boundary risk-zone signal reuses the `from_path` of boundary violations
+/// whose introduced edge is in `deltas.boundary_introduced` (the same E3 surface
+/// the decision surface reads). The security taint signal is wired as an EMPTY
+/// slice today: the brief path runs the bare dead-code analysis, not the opt-in
+/// `fallow security` taint engine, so `results.security_findings` is empty. The
+/// seam lights up the moment a security pass is threaded onto the brief, with no
+/// focus-map code change.
+#[must_use]
+fn build_focus_map(result: &AuditResult, deltas: &ReviewDeltas) -> crate::audit_focus::FocusMap {
+    use crate::audit_focus::{BoundaryZoneFile, FocusInputs, build_focus_map};
+
+    let Some(check) = result.check.as_ref() else {
+        return crate::audit_focus::FocusMap::default();
+    };
+    let Some(graph_facts) = check.focus_facts.as_ref() else {
+        return crate::audit_focus::FocusMap::default();
+    };
+    let root = &check.config.root;
+
+    // Boundary risk-zone files: the importing `from_path` of each boundary
+    // violation whose introduced zone-pair edge is in the E3 delta set, deduped.
+    let mut seen_pairs: FxHashSet<String> = FxHashSet::default();
+    let mut boundary_files: Vec<BoundaryZoneFile> = Vec::new();
+    for finding in &check.results.boundary_violations {
+        let key = crate::audit::review_deltas::boundary_edge_key(finding);
+        if !deltas.boundary_introduced.contains(&key) || !seen_pairs.insert(key) {
+            continue;
+        }
+        boundary_files.push(BoundaryZoneFile {
+            from_file: crate::audit::keys::relative_key_path(&finding.violation.from_path, root),
+        });
+    }
+
+    // Coordination-gap changed files (the signature-change change-shape proxy):
+    // the changed files whose contract is consumed outside the diff.
+    let coordination_changed_files: Vec<String> = check
+        .impact_closure
+        .as_ref()
+        .map(|c| {
+            let mut files: Vec<String> = c
+                .coordination_gap
+                .iter()
+                .map(|gap| gap.changed_file.clone())
+                .collect();
+            files.sort_unstable();
+            files.dedup();
+            files
+        })
+        .unwrap_or_default();
+
+    // Security taint touch: the brief path carries no security findings (the taint
+    // engine is the opt-in `fallow security` command), so this is empty today. The
+    // seam is a pure function of this slice; it lights up when a security pass is
+    // threaded onto the brief.
+    let taint_touched_files = taint_touched_files(result.check.as_ref());
+
+    build_focus_map(&FocusInputs {
+        graph_facts,
+        boundary_files: &boundary_files,
+        public_api_added: &deltas.public_api_added,
+        coordination_changed_files: &coordination_changed_files,
+        taint_touched_files: &taint_touched_files,
+    })
+}
+
+/// Collect the root-relative file paths a security source -> sink taint trace
+/// touches, from any retained `security_findings` (anchor + every trace hop).
+///
+/// Today the brief path runs the bare dead-code analysis, so `security_findings`
+/// is empty and this returns an empty Vec (the E7 security-taint seam contributes
+/// 0). The function is a pure projection over the findings slice, so the moment a
+/// future epic threads a security pass onto the brief, the focus map's taint
+/// signal lights up with no focus-map code change.
+fn taint_touched_files(check: Option<&crate::check::CheckResult>) -> Vec<String> {
+    let Some(check) = check else {
+        return Vec::new();
+    };
+    let root = &check.config.root;
+    let mut touched: FxHashSet<String> = FxHashSet::default();
+    for finding in &check.results.security_findings {
+        touched.insert(crate::audit::keys::relative_key_path(&finding.path, root));
+        for hop in &finding.trace {
+            touched.insert(crate::audit::keys::relative_key_path(&hop.path, root));
+        }
+    }
+    let mut files: Vec<String> = touched.into_iter().collect();
+    files.sort();
+    files
+}
+
 /// Assemble the structured [`ReviewBriefOutput`] for an audit result. Pure: no
 /// timestamps, no randomness, so two runs over the same tree serialize
 /// byte-identically.
@@ -438,6 +542,7 @@ pub fn build_brief_output(result: &AuditResult) -> ReviewBriefOutput {
     graph_facts.api_width_delta = i64::try_from(added).unwrap_or(i64::MAX);
     let partition = build_partition_facts(result);
     let impact_closure = build_impact_closure_facts(result);
+    let focus = build_focus_map(result, &deltas);
     ReviewBriefOutput {
         schema_version: ReviewBriefSchemaVersion::default(),
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -446,6 +551,7 @@ pub fn build_brief_output(result: &AuditResult) -> ReviewBriefOutput {
         graph_facts,
         partition,
         impact_closure,
+        focus,
         deltas,
         weakening: result.weakening_signals.clone(),
         routing: result.routing.clone().unwrap_or_default(),
@@ -490,6 +596,19 @@ fn insert_brief_impact_closure_json(
 ) {
     if let Ok(value) = serde_json::to_value(&brief.impact_closure) {
         obj.insert("impact_closure".into(), value);
+    }
+}
+
+/// Insert the Stage 4 (E7) weighted focus map into the brief JSON map. The
+/// `deprioritized` escape-hatch list is ALWAYS present (every de-prioritized
+/// unit), so nothing is hidden regardless of `--show-deprioritized` (a
+/// human-rendering-only flag).
+fn insert_brief_focus_json(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+    brief: &ReviewBriefOutput,
+) {
+    if let Ok(value) = serde_json::to_value(&brief.focus) {
+        obj.insert("focus".into(), value);
     }
 }
 
@@ -580,6 +699,7 @@ fn build_brief_json(result: &AuditResult) -> Result<serde_json::Value, ExitCode>
     insert_brief_graph_facts_json(&mut obj, &brief);
     insert_brief_partition_json(&mut obj, &brief);
     insert_brief_impact_closure_json(&mut obj, &brief);
+    insert_brief_focus_json(&mut obj, &brief);
     insert_brief_e3_json(&mut obj, &brief);
     insert_brief_subtract_json(&mut obj, result)?;
 
@@ -603,7 +723,7 @@ fn print_brief_json(result: &AuditResult) -> ExitCode {
 /// Render the brief in human / compact / markdown form: a short orientation
 /// header (scope, risk, effort, boundaries) followed by the same findings
 /// sections `fallow audit` prints.
-fn print_brief_human(result: &AuditResult, quiet: bool, explain: bool) {
+fn print_brief_human(result: &AuditResult, quiet: bool, explain: bool, show_deprioritized: bool) {
     let brief = build_brief_output(result);
 
     if !quiet {
@@ -627,6 +747,7 @@ fn print_brief_human(result: &AuditResult, quiet: bool, explain: bool) {
         }
         print_partition_human(&brief.partition);
         print_impact_closure_human(&brief.impact_closure);
+        print_focus_human(&brief.focus, show_deprioritized);
         print_deltas_human(&brief.deltas);
         print_weakening_human(&brief.weakening);
         print_routing_human(&brief.routing);
@@ -684,6 +805,59 @@ fn print_impact_closure_human(closure: &ImpactClosureFacts) {
             gap.consumer_file,
             gap.consumed_symbols.join(", "),
             gap.changed_file,
+        );
+    }
+}
+
+/// Print the Stage 4 (E7) weighted focus map on the human brief: the ranked
+/// `review-here` units (with reason + any low-confidence flag), then the
+/// de-prioritized count as a collapsed escape hatch. `--show-deprioritized`
+/// re-expands the full de-prioritized list ("show me what you de-prioritized").
+/// Caller has already gated on `!quiet`. Renders nothing when no unit was scored.
+fn print_focus_human(focus: &crate::audit_focus::FocusMap, show_deprioritized: bool) {
+    if focus.total_units() == 0 {
+        return;
+    }
+    if !focus.review_here.is_empty() {
+        eprintln!(
+            "  focus: {} unit{} to review here (of {} changed)",
+            focus.review_here.len(),
+            crate::report::plural(focus.review_here.len()),
+            focus.total_units(),
+        );
+        for unit in &focus.review_here {
+            eprintln!(
+                "    [{}] {}: {}",
+                unit.label.token(),
+                unit.file,
+                unit.reason
+            );
+            for flag in &unit.confidence {
+                eprintln!("      confidence {}", flag.message());
+            }
+        }
+    }
+    if focus.deprioritized.is_empty() {
+        return;
+    }
+    if show_deprioritized {
+        eprintln!("  de-prioritized ({}):", focus.deprioritized.len());
+        for unit in &focus.deprioritized {
+            eprintln!(
+                "    [{}] {}: {}",
+                unit.label.token(),
+                unit.file,
+                unit.reason
+            );
+            for flag in &unit.confidence {
+                eprintln!("      confidence {}", flag.message());
+            }
+        }
+    } else {
+        eprintln!(
+            "  de-prioritized: {} unit{} (run with --show-deprioritized to list)",
+            focus.deprioritized.len(),
+            crate::report::plural(focus.deprioritized.len()),
         );
     }
 }
@@ -814,13 +988,18 @@ fn effort_label(effort: ReviewEffort) -> &'static str {
 /// standard audit path and then forced to success so the format stays usable
 /// without re-implementing it for the brief.
 #[must_use]
-pub fn print_brief_result(result: &AuditResult, quiet: bool, explain: bool) -> ExitCode {
+pub fn print_brief_result(
+    result: &AuditResult,
+    quiet: bool,
+    explain: bool,
+    show_deprioritized: bool,
+) -> ExitCode {
     use fallow_config::OutputFormat;
 
     match result.output {
         OutputFormat::Json => print_brief_json(result),
         OutputFormat::Human | OutputFormat::Compact | OutputFormat::Markdown => {
-            print_brief_human(result, quiet, explain);
+            print_brief_human(result, quiet, explain, show_deprioritized);
             ExitCode::SUCCESS
         }
         _ => {
@@ -961,11 +1140,17 @@ mod tests {
     fn brief_mode_always_returns_success_even_when_verdict_is_fail() {
         // Human path.
         let human = audit_result(AuditVerdict::Fail, OutputFormat::Human);
-        assert_eq!(print_brief_result(&human, true, false), ExitCode::SUCCESS);
+        assert_eq!(
+            print_brief_result(&human, true, false, false),
+            ExitCode::SUCCESS
+        );
 
         // JSON path.
         let json = audit_result(AuditVerdict::Fail, OutputFormat::Json);
-        assert_eq!(print_brief_result(&json, true, false), ExitCode::SUCCESS);
+        assert_eq!(
+            print_brief_result(&json, true, false, false),
+            ExitCode::SUCCESS
+        );
     }
 
     #[test]

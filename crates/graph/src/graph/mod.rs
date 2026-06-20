@@ -5,6 +5,7 @@
 
 mod build;
 mod cycles;
+mod fan_io;
 mod impact_closure;
 mod namespace_aliases;
 mod namespace_re_exports;
@@ -25,6 +26,7 @@ use crate::resolve::ResolvedModule;
 use fallow_types::discover::{DiscoveredFile, EntryPoint, FileId};
 use fallow_types::extract::ImportedName;
 
+pub use fan_io::{FocusFileFacts, FocusFileFactsPaths};
 pub use impact_closure::{
     CoordinationGap, CoordinationGapPaths, ImpactClosure, ImpactClosurePaths,
 };

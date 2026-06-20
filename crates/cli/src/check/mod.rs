@@ -341,6 +341,13 @@ pub struct CheckResult {
     /// path. Holds root-relative paths so it survives the graph drop and
     /// serializes directly.
     pub partition_order: Option<fallow_core::graph::PartitionOrderPaths>,
+    /// Per-changed-file graph facts (E7) for the review brief's stage 4 weighted
+    /// focus map: fan-in/out (blast radius) plus the dynamic-dispatch and
+    /// re-export-indirection confidence-flag signals. Computed from the retained
+    /// graph on the brief path against the changed-file set, before the graph is
+    /// dropped; `None` outside the brief path. Holds root-relative paths so it
+    /// survives the graph drop.
+    pub focus_facts: Option<Vec<fallow_core::graph::FocusFileFactsPaths>>,
 }
 
 struct CheckAnalysisData {
@@ -701,6 +708,7 @@ pub fn execute_check(opts: &CheckOptions<'_>) -> Result<CheckResult, ExitCode> {
         impact_closure: None,
         public_api_keys: None,
         partition_order: None,
+        focus_facts: None,
     })
 }
 

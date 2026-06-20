@@ -22,6 +22,7 @@ mod api;
 mod audit;
 mod audit_brief;
 mod audit_decision_surface;
+mod audit_focus;
 mod audit_walkthrough;
 mod base_worktree;
 mod baseline;
@@ -1177,6 +1178,14 @@ enum Command {
         /// and never gates or auto-posts.
         #[arg(long, value_name = "PATH")]
         walkthrough_file: Option<PathBuf>,
+
+        /// (E7) Expand the de-prioritized units in the review brief's weighted
+        /// focus map ("show me what you de-prioritized"). The `deprioritized`
+        /// escape-hatch list is ALWAYS present in `--format json` regardless; this
+        /// flag only re-expands the collapse-by-default human focus render. Only
+        /// consulted on the brief path.
+        #[arg(long)]
+        show_deprioritized: bool,
     },
 
     /// Surface the consequential structural DECISIONS a change embeds (the apex
@@ -4224,6 +4233,7 @@ fn dispatch_audit_command(command: Command, dispatch: &DispatchContext<'_>) -> E
         max_decisions,
         walkthrough_guide,
         walkthrough_file,
+        show_deprioritized,
     } = command
     else {
         unreachable!("audit dispatcher only handles audit commands");
@@ -4253,6 +4263,7 @@ fn dispatch_audit_command(command: Command, dispatch: &DispatchContext<'_>) -> E
             max_decisions,
             walkthrough_guide,
             walkthrough_file,
+            show_deprioritized,
         },
     )
 }
@@ -5089,6 +5100,8 @@ struct AuditDispatchArgs {
     /// (E5) Post-validate an agent's judgment JSON from this path against the
     /// live graph.
     walkthrough_file: Option<PathBuf>,
+    /// (E7) Expand the de-prioritized units in the human focus map.
+    show_deprioritized: bool,
 }
 
 struct ResolvedAuditInputs {
@@ -5218,6 +5231,7 @@ fn run_resolved_audit(
             max_decisions: args.max_decisions,
             walkthrough_guide: args.walkthrough_guide,
             walkthrough_file: args.walkthrough_file.as_deref(),
+            show_deprioritized: args.show_deprioritized,
         },
         args.gate_marker.as_deref(),
     )
@@ -5248,6 +5262,7 @@ fn dispatch_decision_surface(dispatch: &DispatchContext<'_>, max_decisions: usiz
         max_decisions,
         walkthrough_guide: false,
         walkthrough_file: None,
+        show_deprioritized: false,
     };
     let inputs = match resolve_audit_inputs(dispatch, &args) {
         Ok(inputs) => inputs,
@@ -5286,6 +5301,7 @@ fn dispatch_decision_surface(dispatch: &DispatchContext<'_>, max_decisions: usiz
         max_decisions,
         walkthrough_guide: false,
         walkthrough_file: None,
+        show_deprioritized: false,
     })
 }
 

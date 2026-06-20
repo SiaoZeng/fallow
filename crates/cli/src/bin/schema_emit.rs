@@ -32,6 +32,7 @@ use fallow_cli::audit_decision_surface::{
     Decision, DecisionAction, DecisionActionType, DecisionCategory, DecisionSurface,
     DecisionSurfaceOutput, DecisionSurfaceSchemaVersion, DecisionWithActions, TruncationNote,
 };
+use fallow_cli::audit_focus::{ConfidenceFlag, FocusLabel, FocusMap, FocusScore, FocusUnit};
 use fallow_cli::audit_walkthrough::{
     AcceptedJudgment, AgentSchema, DirectionUnit, RejectedJudgment, ReviewDirection,
     WalkthroughGuide, WalkthroughValidation,
@@ -316,6 +317,11 @@ const DERIVED_DEFINITION_NAMES: &[&str] = &[
     "ReviewEffort",
     "DiffTriage",
     "GraphFacts",
+    "FocusLabel",
+    "ConfidenceFlag",
+    "FocusScore",
+    "FocusUnit",
+    "FocusMap",
     "Decision",
     "DecisionAction",
     "DecisionActionType",
@@ -653,6 +659,11 @@ fn register_audit_brief_definitions(generator: &mut schemars::SchemaGenerator) {
     let _ = generator.subschema_for::<ReviewEffort>();
     let _ = generator.subschema_for::<DiffTriage>();
     let _ = generator.subschema_for::<GraphFacts>();
+    let _ = generator.subschema_for::<FocusLabel>();
+    let _ = generator.subschema_for::<ConfidenceFlag>();
+    let _ = generator.subschema_for::<FocusScore>();
+    let _ = generator.subschema_for::<FocusUnit>();
+    let _ = generator.subschema_for::<FocusMap>();
     let _ = generator.subschema_for::<ReviewBriefOutput>();
     let _ = generator.subschema_for::<DecisionCategory>();
     let _ = generator.subschema_for::<Decision>();
