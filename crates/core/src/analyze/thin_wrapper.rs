@@ -43,7 +43,7 @@ use fallow_types::extract::{
 };
 
 use crate::discover::FileId;
-use crate::graph::ModuleGraph;
+use crate::graph::{ModuleGraph, ModuleNode};
 use crate::resolve::ResolvedModule;
 use crate::results::ThinWrapper;
 
@@ -71,11 +71,7 @@ pub fn find_thin_wrappers(
     declared_deps: &FxHashSet<String>,
     line_offsets_by_file: &LineOffsetsMap<'_>,
 ) -> ThinWrapperScan {
-    let gated = declared_deps.contains("react")
-        || declared_deps.contains("react-dom")
-        || declared_deps.contains("next")
-        || declared_deps.contains("preact");
-    if !gated {
+    if !has_react_runtime_dep(declared_deps) {
         return ThinWrapperScan::default();
     }
 
@@ -96,45 +92,7 @@ pub fn find_thin_wrappers(
         let Some(module) = modules_by_id.get(&node.file_id) else {
             continue;
         };
-        if module.component_functions.is_empty() {
-            continue;
-        }
-        scan.components_scanned += module.component_functions.len();
-
-        // Index render edges by parent component name (a file may declare
-        // several components).
-        let mut edges_by_parent: FxHashMap<&str, Vec<&RenderEdge>> = FxHashMap::default();
-        for edge in &module.render_edges {
-            edges_by_parent
-                .entry(edge.parent_component.as_str())
-                .or_default()
-                .push(edge);
-        }
-        // Complexity is gated by `need_complexity` and is absent in the dead-code
-        // pipeline, so the cyclomatic belt below is enforced ONLY when an entry
-        // exists (health / audit). The hook-density belt uses `hook_uses`, which
-        // the React structural walk always populates regardless of complexity.
-        let complexity_by_name: FxHashMap<&str, &FunctionComplexity> = module
-            .complexity
-            .iter()
-            .map(|c| (c.name.as_str(), c))
-            .collect();
-        let hook_counts = component_hook_counts(module);
-
-        let ctx = FileContext {
-            file: node.file_id,
-            path: &node.path,
-            edges_by_parent: &edges_by_parent,
-            complexity_by_name: &complexity_by_name,
-            hook_counts: &hook_counts,
-        };
-        for func in &module.component_functions {
-            if let Some(wrapper) =
-                classify_thin_wrapper(func, &ctx, &resolver, line_offsets_by_file)
-            {
-                scan.wrappers.push(wrapper);
-            }
-        }
+        collect_module_thin_wrappers(node, module, &resolver, line_offsets_by_file, &mut scan);
     }
 
     scan.wrappers.sort_by(|a, b| {
@@ -144,6 +102,60 @@ pub fn find_thin_wrappers(
             .then(a.component.cmp(&b.component))
     });
     scan
+}
+
+fn has_react_runtime_dep(declared_deps: &FxHashSet<String>) -> bool {
+    declared_deps.contains("react")
+        || declared_deps.contains("react-dom")
+        || declared_deps.contains("next")
+        || declared_deps.contains("preact")
+}
+
+fn collect_module_thin_wrappers(
+    node: &ModuleNode,
+    module: &ModuleInfo,
+    resolver: &ChildResolver<'_>,
+    line_offsets_by_file: &LineOffsetsMap<'_>,
+    scan: &mut ThinWrapperScan,
+) {
+    if module.component_functions.is_empty() {
+        return;
+    }
+    scan.components_scanned += module.component_functions.len();
+
+    // A file may declare several components, so render edges are indexed by
+    // parent component once before the per-component abstain ladder runs.
+    let mut edges_by_parent: FxHashMap<&str, Vec<&RenderEdge>> = FxHashMap::default();
+    for edge in &module.render_edges {
+        edges_by_parent
+            .entry(edge.parent_component.as_str())
+            .or_default()
+            .push(edge);
+    }
+
+    // Complexity is gated by `need_complexity` and is absent in the dead-code
+    // pipeline, so the cyclomatic belt below is enforced only when an entry
+    // exists. The hook-density belt uses `hook_uses`, which the React structural
+    // walk always populates regardless of complexity.
+    let complexity_by_name: FxHashMap<&str, &FunctionComplexity> = module
+        .complexity
+        .iter()
+        .map(|c| (c.name.as_str(), c))
+        .collect();
+    let hook_counts = component_hook_counts(module);
+
+    let ctx = FileContext {
+        file: node.file_id,
+        path: &node.path,
+        edges_by_parent: &edges_by_parent,
+        complexity_by_name: &complexity_by_name,
+        hook_counts: &hook_counts,
+    };
+    for func in &module.component_functions {
+        if let Some(wrapper) = classify_thin_wrapper(func, &ctx, resolver, line_offsets_by_file) {
+            scan.wrappers.push(wrapper);
+        }
+    }
 }
 
 /// Count, per component (keyed by its `span_start`), the React hook calls that
