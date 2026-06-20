@@ -1123,23 +1123,49 @@ pub struct UnlistedDependencyInput<'a> {
 
 /// Find dependencies used in imports but not listed in package.json.
 pub fn find_unlisted_dependencies(input: UnlistedDependencyInput<'_>) -> Vec<UnlistedDependency> {
-    let UnlistedDependencyInput {
-        graph,
-        pkg,
-        config,
-        workspaces,
-        plugin_result,
-        resolved_modules,
-        line_offsets_by_file,
-    } = input;
-    let mut all_deps: FxHashSet<String> = pkg.all_dependency_names().into_iter().collect();
-    if let Some(root_name) = &pkg.name {
+    let parts = build_unlisted_dependency_context_parts(&input);
+    let ctx = UnlistedDependencyContext {
+        graph: input.graph,
+        config: input.config,
+        all_deps: &parts.all_deps,
+        ws_dep_map: &parts.ws_dep_map,
+        virtual_prefixes: &parts.virtual_prefixes,
+        virtual_suffixes: &parts.virtual_suffixes,
+        plugin_tooling: &parts.plugin_tooling,
+        provided_dependency_rules: parts.provided_dependency_rules,
+        compiled_provided_dependency_rules: &parts.compiled_provided_dependency_rules,
+        import_spans_by_file: &parts.import_spans_by_file,
+        ignore_deps: &parts.ignore_deps,
+        line_offsets_by_file: input.line_offsets_by_file,
+    };
+
+    collect_unlisted_dependencies(&ctx)
+}
+
+struct UnlistedDependencyContextParts<'a> {
+    all_deps: FxHashSet<String>,
+    ws_dep_map: Vec<(PathBuf, FxHashSet<String>)>,
+    virtual_prefixes: Vec<&'a str>,
+    virtual_suffixes: Vec<&'a str>,
+    plugin_tooling: FxHashSet<&'a str>,
+    provided_dependency_rules: &'a [ProvidedDependencyRule],
+    compiled_provided_dependency_rules: Vec<CompiledProvidedDependencyRule<'a>>,
+    import_spans_by_file: FxHashMap<FileId, Vec<(&'a str, &'a str, u32)>>,
+    ignore_deps: FxHashSet<&'a str>,
+}
+
+fn build_unlisted_dependency_context_parts<'a>(
+    input: &UnlistedDependencyInput<'a>,
+) -> UnlistedDependencyContextParts<'a> {
+    let mut all_deps: FxHashSet<String> = input.pkg.all_dependency_names().into_iter().collect();
+    if let Some(root_name) = &input.pkg.name {
         all_deps.insert(root_name.clone());
     }
 
-    let ws_dep_map = workspace_dependency_map(workspaces, config);
+    let ws_dep_map = workspace_dependency_map(input.workspaces, input.config);
 
-    let virtual_prefixes: Vec<&str> = plugin_result
+    let virtual_prefixes = input
+        .plugin_result
         .map(|pr| {
             pr.virtual_module_prefixes
                 .iter()
@@ -1148,7 +1174,8 @@ pub fn find_unlisted_dependencies(input: UnlistedDependencyInput<'_>) -> Vec<Unl
         })
         .unwrap_or_default();
 
-    let virtual_suffixes: Vec<&str> = plugin_result
+    let virtual_suffixes = input
+        .plugin_result
         .map(|pr| {
             pr.virtual_package_suffixes
                 .iter()
@@ -1157,38 +1184,36 @@ pub fn find_unlisted_dependencies(input: UnlistedDependencyInput<'_>) -> Vec<Unl
         })
         .unwrap_or_default();
 
-    let plugin_tooling: FxHashSet<&str> = plugin_result
+    let plugin_tooling = input
+        .plugin_result
         .map(|pr| pr.tooling_dependencies.iter().map(String::as_str).collect())
         .unwrap_or_default();
-    let provided_dependency_rules: &[ProvidedDependencyRule] =
-        plugin_result.map_or(&[], |pr| pr.provided_dependencies.as_slice());
+    let provided_dependency_rules: &[ProvidedDependencyRule] = input
+        .plugin_result
+        .map_or(&[], |pr| pr.provided_dependencies.as_slice());
     let compiled_provided_dependency_rules =
         compile_provided_dependency_rules(provided_dependency_rules);
 
-    let import_spans_by_file = import_spans_by_file(resolved_modules);
+    let import_spans_by_file = import_spans_by_file(input.resolved_modules);
 
-    let ignore_deps: FxHashSet<&str> = config
+    let ignore_deps = input
+        .config
         .ignore_dependencies
         .iter()
         .map(String::as_str)
         .collect();
 
-    let ctx = UnlistedDependencyContext {
-        graph,
-        config,
-        all_deps: &all_deps,
-        ws_dep_map: &ws_dep_map,
-        virtual_prefixes: &virtual_prefixes,
-        virtual_suffixes: &virtual_suffixes,
-        plugin_tooling: &plugin_tooling,
+    UnlistedDependencyContextParts {
+        all_deps,
+        ws_dep_map,
+        virtual_prefixes,
+        virtual_suffixes,
+        plugin_tooling,
         provided_dependency_rules,
-        compiled_provided_dependency_rules: &compiled_provided_dependency_rules,
-        import_spans_by_file: &import_spans_by_file,
-        ignore_deps: &ignore_deps,
-        line_offsets_by_file,
-    };
-
-    collect_unlisted_dependencies(&ctx)
+        compiled_provided_dependency_rules,
+        import_spans_by_file,
+        ignore_deps,
+    }
 }
 
 /// Walk `package_usage`, gathering per-package import sites into findings.
