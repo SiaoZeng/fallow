@@ -2354,17 +2354,31 @@ fn should_skip_member_for_unused_report(member: &MemberInfo, ctx: &MemberSkipCon
         return true;
     }
 
-    if member.has_decorator
-        && (member.decorator_names.is_empty()
-            || ctx.ignore_decorators.is_empty()
-            || member
-                .decorator_names
-                .iter()
-                .any(|name| !ctx.ignore_decorators.matches(name)))
-    {
+    if member_decorator_requires_skip(member, ctx.ignore_decorators) {
         return true;
     }
 
+    class_member_runtime_credit_applies(member, ctx)
+}
+
+fn is_class_member_kind(kind: MemberKind) -> bool {
+    matches!(kind, MemberKind::ClassMethod | MemberKind::ClassProperty)
+}
+
+fn member_decorator_requires_skip(
+    member: &MemberInfo,
+    ignore_decorators: &IgnoreDecoratorSet,
+) -> bool {
+    member.has_decorator
+        && (member.decorator_names.is_empty()
+            || ignore_decorators.is_empty()
+            || member
+                .decorator_names
+                .iter()
+                .any(|name| !ignore_decorators.matches(name)))
+}
+
+fn class_member_runtime_credit_applies(member: &MemberInfo, ctx: &MemberSkipContext<'_>) -> bool {
     is_class_member_kind(member.kind)
         && (is_react_lifecycle_method(&member.name)
             || is_angular_lifecycle_method(&member.name)
@@ -2379,10 +2393,6 @@ fn should_skip_member_for_unused_report(member: &MemberInfo, ctx: &MemberSkipCon
                 ctx.super_class,
                 ctx.implemented_interfaces,
             ))
-}
-
-fn is_class_member_kind(kind: MemberKind) -> bool {
-    matches!(kind, MemberKind::ClassMethod | MemberKind::ClassProperty)
 }
 
 fn record_seen_ignore_decorators(graph: &ModuleGraph, ignore_decorators: &IgnoreDecoratorSet) {
