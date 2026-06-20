@@ -4,6 +4,7 @@
 //! followed by an O(N) LCP scan. This avoids quadratic pairwise comparisons
 //! and naturally finds all maximal clones in a single linear pass.
 
+mod boundary;
 mod concatenation;
 mod extraction;
 mod filtering;
