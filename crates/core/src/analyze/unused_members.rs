@@ -1844,50 +1844,13 @@ fn propagate_class_inheritance(
     let mut propagations: Vec<(FileId, Vec<String>)> = Vec::new();
 
     for (parent_key, children) in parent_to_children {
-        if let Some(parent_self_accesses) = self_accessed_members.get(&parent_key.file_id) {
-            let accesses: Vec<String> = parent_self_accesses.iter().cloned().collect();
-            for child_key in children {
-                propagations.push((child_key.file_id, accesses.clone()));
-            }
-        }
-
-        let mut child_self_accesses_for_parent: FxHashSet<String> = FxHashSet::default();
-        for child_key in children {
-            if let Some(child_self_accesses) = self_accessed_members.get(&child_key.file_id) {
-                child_self_accesses_for_parent.extend(child_self_accesses.iter().cloned());
-            }
-        }
-        if !child_self_accesses_for_parent.is_empty() {
-            propagations.push((
-                parent_key.file_id,
-                child_self_accesses_for_parent.into_iter().collect(),
-            ));
-        }
-
-        let parent_accesses = accessed_members.get(parent_key).cloned();
-        let mut child_accesses_to_propagate: FxHashSet<String> = FxHashSet::default();
-
-        for child_key in children {
-            if let Some(child_accesses) = accessed_members.get(child_key) {
-                child_accesses_to_propagate.extend(child_accesses.iter().cloned());
-            }
-        }
-
-        if let Some(ref parent_acc) = parent_accesses {
-            for child_key in children {
-                accessed_members
-                    .entry(child_key.clone())
-                    .or_default()
-                    .extend(parent_acc.iter().cloned());
-            }
-        }
-
-        if !child_accesses_to_propagate.is_empty() {
-            accessed_members
-                .entry(parent_key.clone())
-                .or_default()
-                .extend(child_accesses_to_propagate);
-        }
+        collect_self_access_inheritance_propagations(
+            parent_key,
+            children,
+            self_accessed_members,
+            &mut propagations,
+        );
+        propagate_member_accesses_through_inheritance(parent_key, children, accessed_members);
     }
 
     for (file_id, members) in propagations {
@@ -1895,6 +1858,64 @@ fn propagate_class_inheritance(
         for member in members {
             entry.insert(member);
         }
+    }
+}
+
+fn collect_self_access_inheritance_propagations(
+    parent_key: &ExportKey,
+    children: &[ExportKey],
+    self_accessed_members: &FxHashMap<FileId, FxHashSet<String>>,
+    propagations: &mut Vec<(FileId, Vec<String>)>,
+) {
+    if let Some(parent_self_accesses) = self_accessed_members.get(&parent_key.file_id) {
+        let accesses: Vec<String> = parent_self_accesses.iter().cloned().collect();
+        for child_key in children {
+            propagations.push((child_key.file_id, accesses.clone()));
+        }
+    }
+
+    let mut child_self_accesses_for_parent: FxHashSet<String> = FxHashSet::default();
+    for child_key in children {
+        if let Some(child_self_accesses) = self_accessed_members.get(&child_key.file_id) {
+            child_self_accesses_for_parent.extend(child_self_accesses.iter().cloned());
+        }
+    }
+    if !child_self_accesses_for_parent.is_empty() {
+        propagations.push((
+            parent_key.file_id,
+            child_self_accesses_for_parent.into_iter().collect(),
+        ));
+    }
+}
+
+fn propagate_member_accesses_through_inheritance(
+    parent_key: &ExportKey,
+    children: &[ExportKey],
+    accessed_members: &mut FxHashMap<ExportKey, FxHashSet<String>>,
+) {
+    let parent_accesses = accessed_members.get(parent_key).cloned();
+    let mut child_accesses_to_propagate: FxHashSet<String> = FxHashSet::default();
+
+    for child_key in children {
+        if let Some(child_accesses) = accessed_members.get(child_key) {
+            child_accesses_to_propagate.extend(child_accesses.iter().cloned());
+        }
+    }
+
+    if let Some(ref parent_acc) = parent_accesses {
+        for child_key in children {
+            accessed_members
+                .entry(child_key.clone())
+                .or_default()
+                .extend(parent_acc.iter().cloned());
+        }
+    }
+
+    if !child_accesses_to_propagate.is_empty() {
+        accessed_members
+            .entry(parent_key.clone())
+            .or_default()
+            .extend(child_accesses_to_propagate);
     }
 }
 
