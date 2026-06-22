@@ -60,7 +60,38 @@ const ROUTER_PLUGIN_IMPORTS: &[&str] = &[
     "@tanstack/router-plugin/vite",
     "@tanstack/router-plugin/rspack",
     "@tanstack/router-plugin/webpack",
+    "@tanstack/router-plugin/esbuild",
+    "@tanstack/router-vite-plugin",
 ];
+/// Named exports of the router bundler plugin that accept flat route options.
+/// Both the current `tanstackRouter` factory and the legacy `TanStackRouterVite`
+/// alias take `routesDirectory`, `routeFileIgnorePrefix`, and friends directly.
+const ROUTER_PLUGIN_CALL_NAMES: &[&str] = &["tanstackRouter", "TanStackRouterVite"];
+/// Import sources of the TanStack Start framework plugin. Its `tanstackStart`
+/// factory nests the router config (including `routeFileIgnorePrefix`) under a
+/// `router` option, so a custom ignore prefix set here would otherwise be
+/// silently ignored. The legacy pre-rename `@tanstack/start/plugin/*` subpaths
+/// are included because `@tanstack/start` remains an enabler and tooling
+/// dependency; projects pinned to the old package must still resolve the nested
+/// prefix. No `esbuild` adapter is listed because TanStack Start does not ship
+/// one (unlike `@tanstack/router-plugin/esbuild`); add it here if that changes.
+const START_PLUGIN_IMPORTS: &[&str] = &[
+    "@tanstack/react-start/plugin/vite",
+    "@tanstack/react-start/plugin/rsbuild",
+    "@tanstack/react-start/plugin/rspack",
+    "@tanstack/react-start/plugin/webpack",
+    "@tanstack/solid-start/plugin/vite",
+    "@tanstack/solid-start/plugin/rsbuild",
+    "@tanstack/solid-start/plugin/rspack",
+    "@tanstack/solid-start/plugin/webpack",
+    "@tanstack/start/plugin/vite",
+    "@tanstack/start/plugin/rsbuild",
+    "@tanstack/start/plugin/rspack",
+    "@tanstack/start/plugin/webpack",
+];
+const START_PLUGIN_CALL_NAME: &str = "tanstackStart";
+/// Key under which `tanstackStart` nests the router (tsr) configuration.
+const START_ROUTER_OPTION_KEY: &str = "router";
 
 const ALWAYS_USED: &[&str] = &["tsr.config.json", "app.config.{ts,js}"];
 
@@ -576,10 +607,30 @@ fn find_variable_init_expression<'a>(
     None
 }
 
+/// Which TanStack bundler plugin produced a route-options call.
+///
+/// `Router` calls (`tanstackRouter` / `TanStackRouterVite`) accept flat route
+/// options. `Start` calls (`tanstackStart`) nest the same options under a
+/// `router` key.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PluginKind {
+    Router,
+    Start,
+}
+
+fn router_plugin_call_name(kind: PluginKind, name: &str) -> bool {
+    match kind {
+        PluginKind::Router => ROUTER_PLUGIN_CALL_NAMES.contains(&name),
+        PluginKind::Start => name == START_PLUGIN_CALL_NAME,
+    }
+}
+
 struct RouterPluginCallCollector<'a> {
     route_options: Vec<RouteOptions>,
-    local_names: Vec<String>,
-    namespaces: Vec<String>,
+    /// Local bindings of a plugin factory, paired with which plugin they are.
+    local_names: Vec<(String, PluginKind)>,
+    /// Namespace import bindings, paired with which plugin they re-export.
+    namespaces: Vec<(String, PluginKind)>,
     program: &'a Program<'a>,
     config_path: &'a Path,
     root: &'a Path,
@@ -587,25 +638,30 @@ struct RouterPluginCallCollector<'a> {
 
 impl<'a> Visit<'a> for RouterPluginCallCollector<'a> {
     fn visit_import_declaration(&mut self, decl: &ImportDeclaration<'a>) {
-        if !ROUTER_PLUGIN_IMPORTS
-            .iter()
-            .any(|source| decl.source.value == *source)
-        {
+        let Some(kind) = import_plugin_kind(decl.source.value.as_str()) else {
             return;
-        }
+        };
 
         if let Some(specifiers) = &decl.specifiers {
             for specifier in specifiers {
                 match specifier {
                     oxc_ast::ast::ImportDeclarationSpecifier::ImportSpecifier(specifier)
-                        if specifier.imported.name() == "tanstackRouter" =>
+                        if router_plugin_call_name(kind, specifier.imported.name().as_str()) =>
                     {
-                        push_unique(&mut self.local_names, specifier.local.name.to_string());
+                        push_unique_kind(
+                            &mut self.local_names,
+                            specifier.local.name.to_string(),
+                            kind,
+                        );
                     }
                     oxc_ast::ast::ImportDeclarationSpecifier::ImportNamespaceSpecifier(
                         specifier,
                     ) => {
-                        push_unique(&mut self.namespaces, specifier.local.name.to_string());
+                        push_unique_kind(
+                            &mut self.namespaces,
+                            specifier.local.name.to_string(),
+                            kind,
+                        );
                     }
                     _ => {}
                 }
@@ -614,9 +670,8 @@ impl<'a> Visit<'a> for RouterPluginCallCollector<'a> {
     }
 
     fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
-        if self.is_router_plugin_call(call)
-            && let Some(Expression::ObjectExpression(options)) =
-                call.arguments.first().and_then(Argument::as_expression)
+        if let Some(kind) = self.router_plugin_call_kind(call)
+            && let Some(options) = call_route_options(kind, call)
         {
             self.route_options.push(resolve_bundler_route_options(
                 self.program,
@@ -637,23 +692,27 @@ impl<'a> Visit<'a> for RouterPluginCallCollector<'a> {
             let Some(source) = require_source(init) else {
                 continue;
             };
-            if !ROUTER_PLUGIN_IMPORTS.iter().any(|import| source == *import) {
+            let Some(kind) = import_plugin_kind(&source) else {
                 continue;
-            }
+            };
 
             match &declarator.id {
                 BindingPattern::BindingIdentifier(identifier) => {
-                    push_unique(&mut self.namespaces, identifier.name.to_string());
+                    push_unique_kind(&mut self.namespaces, identifier.name.to_string(), kind);
                 }
                 BindingPattern::ObjectPattern(object) => {
                     for prop in &object.properties {
                         if prop
                             .key
                             .static_name()
-                            .is_some_and(|name| name == "tanstackRouter")
+                            .is_some_and(|name| router_plugin_call_name(kind, &name))
                             && let BindingPattern::BindingIdentifier(identifier) = &prop.value
                         {
-                            push_unique(&mut self.local_names, identifier.name.to_string());
+                            push_unique_kind(
+                                &mut self.local_names,
+                                identifier.name.to_string(),
+                                kind,
+                            );
                         }
                     }
                 }
@@ -666,17 +725,68 @@ impl<'a> Visit<'a> for RouterPluginCallCollector<'a> {
 }
 
 impl RouterPluginCallCollector<'_> {
-    fn is_router_plugin_call(&self, call: &CallExpression<'_>) -> bool {
+    fn router_plugin_call_kind(&self, call: &CallExpression<'_>) -> Option<PluginKind> {
         match &call.callee {
             Expression::Identifier(identifier) => self
                 .local_names
                 .iter()
-                .any(|name| name == identifier.name.as_str()),
-            Expression::StaticMemberExpression(member) if matches!(&member.object, Expression::Identifier(object) if self.namespaces.iter().any(|name| name == object.name.as_str())) => {
-                member.property.name == "tanstackRouter"
+                .find_map(|(name, kind)| (name == identifier.name.as_str()).then_some(*kind)),
+            Expression::StaticMemberExpression(member) => {
+                let Expression::Identifier(object) = &member.object else {
+                    return None;
+                };
+                self.namespaces.iter().find_map(|(name, kind)| {
+                    (name == object.name.as_str()
+                        && router_plugin_call_name(*kind, member.property.name.as_str()))
+                    .then_some(*kind)
+                })
             }
-            _ => false,
+            _ => None,
         }
+    }
+}
+
+/// Extract the object expression carrying route options for a plugin call.
+///
+/// Router calls pass the options object directly; Start calls nest it under
+/// the `router` key, so the same downstream resolution applies to both.
+fn call_route_options<'b>(
+    kind: PluginKind,
+    call: &'b CallExpression<'b>,
+) -> Option<&'b ObjectExpression<'b>> {
+    let Some(Expression::ObjectExpression(options)) =
+        call.arguments.first().and_then(Argument::as_expression)
+    else {
+        return None;
+    };
+
+    match kind {
+        PluginKind::Router => Some(options),
+        PluginKind::Start => config_parser::property_object(options, START_ROUTER_OPTION_KEY),
+    }
+}
+
+fn import_plugin_kind(source: &str) -> Option<PluginKind> {
+    if ROUTER_PLUGIN_IMPORTS.contains(&source) {
+        Some(PluginKind::Router)
+    } else if START_PLUGIN_IMPORTS.contains(&source) {
+        Some(PluginKind::Start)
+    } else {
+        None
+    }
+}
+
+/// Deduplicate by binding name only, keeping the first kind seen.
+///
+/// A local binding name resolves to a single value per module, so the same name
+/// cannot legitimately denote both a Router and a Start factory in one file. In
+/// the pathological case where a name is imported from both a Router and a Start
+/// package, first-wins silently drops the later kind; this mirrors the original
+/// `push_unique` design and is acceptable because such a collision cannot occur
+/// in valid JavaScript scope.
+fn push_unique_kind(values: &mut Vec<(String, PluginKind)>, name: String, kind: PluginKind) {
+    if !values.iter().any(|(existing, _)| existing == &name) {
+        values.push((name, kind));
     }
 }
 
@@ -1360,6 +1470,219 @@ export default {
                 .any(|r| r.pattern == "pages/**/*.{ts,tsx,js,jsx}"),
             "namespace import route dir missing: {:?}",
             result.entry_patterns
+        );
+    }
+
+    #[test]
+    fn bundler_config_legacy_tanstack_router_vite_alias_honors_ignore_prefix() {
+        let plugin = TanstackRouterPlugin;
+        let source = r#"
+import { TanStackRouterVite } from "@tanstack/router-plugin/vite";
+export default {
+  plugins: [TanStackRouterVite({ routeFileIgnorePrefix: "__excluded__" })],
+};
+"#;
+        let result = plugin.resolve_config(
+            Path::new("/project/vite.config.ts"),
+            source,
+            Path::new("/project"),
+        );
+        assert!(result.replace_entry_patterns);
+        let standard = result
+            .entry_patterns
+            .iter()
+            .find(|r| r.pattern == "src/routes/**/*.{ts,tsx,js,jsx}")
+            .expect("standard route pattern missing");
+        assert!(
+            standard
+                .exclude_globs
+                .iter()
+                .any(|g| g == "src/routes/**/__excluded__*"),
+            "legacy alias should exclude the configured prefix, got: {:?}",
+            standard.exclude_globs
+        );
+        assert!(
+            !standard
+                .exclude_globs
+                .iter()
+                .any(|g| g == "src/routes/**/-*"),
+            "legacy alias override should not keep the default dash exclusion, got: {:?}",
+            standard.exclude_globs
+        );
+    }
+
+    #[test]
+    fn bundler_config_tanstack_start_nested_router_honors_ignore_prefix() {
+        let plugin = TanstackRouterPlugin;
+        let source = r#"
+import { defineConfig } from "vite";
+import { tanstackStart } from "@tanstack/react-start/plugin/vite";
+export default defineConfig({
+  plugins: [
+    tanstackStart({ router: { routeFileIgnorePrefix: "__excluded__" } }),
+  ],
+});
+"#;
+        let result = plugin.resolve_config(
+            Path::new("/project/vite.config.ts"),
+            source,
+            Path::new("/project"),
+        );
+        assert!(result.replace_entry_patterns);
+        let standard = result
+            .entry_patterns
+            .iter()
+            .find(|r| r.pattern == "src/routes/**/*.{ts,tsx,js,jsx}")
+            .expect("standard route pattern missing");
+        assert!(
+            standard
+                .exclude_globs
+                .iter()
+                .any(|g| g == "src/routes/**/__excluded__*"),
+            "tanstackStart nested router prefix should be honored, got: {:?}",
+            standard.exclude_globs
+        );
+        assert!(
+            !standard
+                .exclude_globs
+                .iter()
+                .any(|g| g == "src/routes/**/-*"),
+            "tanstackStart override should drop the default dash exclusion, got: {:?}",
+            standard.exclude_globs
+        );
+    }
+
+    #[test]
+    fn bundler_config_tanstack_start_without_router_option_yields_no_route_options() {
+        let plugin = TanstackRouterPlugin;
+        // A plain tanstackStart() with no router override must not produce a
+        // bundler PluginResult, so the static default-prefix rules remain.
+        let source = r#"
+import { defineConfig } from "vite";
+import { tanstackStart } from "@tanstack/react-start/plugin/vite";
+export default defineConfig({
+  plugins: [tanstackStart({ server: { build: {} } })],
+});
+"#;
+        let result = plugin.resolve_config(
+            Path::new("/project/vite.config.ts"),
+            source,
+            Path::new("/project"),
+        );
+        assert!(
+            result.entry_patterns.is_empty(),
+            "plain tanstackStart should fall back to default static rules: {:?}",
+            result.entry_patterns
+        );
+    }
+
+    #[test]
+    fn bundler_config_legacy_start_plugin_subpath_honors_nested_ignore_prefix() {
+        let plugin = TanstackRouterPlugin;
+        // Pre-rename @tanstack/start/plugin/vite still nests the router config
+        // under `router`, so its prefix override must resolve like the renamed
+        // @tanstack/react-start subpath.
+        let source = r#"
+import { defineConfig } from "vite";
+import { tanstackStart } from "@tanstack/start/plugin/vite";
+export default defineConfig({
+  plugins: [
+    tanstackStart({ router: { routeFileIgnorePrefix: "__excluded__" } }),
+  ],
+});
+"#;
+        let result = plugin.resolve_config(
+            Path::new("/project/vite.config.ts"),
+            source,
+            Path::new("/project"),
+        );
+        assert!(result.replace_entry_patterns);
+        let standard = result
+            .entry_patterns
+            .iter()
+            .find(|r| r.pattern == "src/routes/**/*.{ts,tsx,js,jsx}")
+            .expect("standard route pattern missing");
+        assert!(
+            standard
+                .exclude_globs
+                .iter()
+                .any(|g| g == "src/routes/**/__excluded__*"),
+            "legacy start subpath nested prefix should be honored, got: {:?}",
+            standard.exclude_globs
+        );
+    }
+
+    #[test]
+    fn bundler_config_tanstack_start_empty_ignore_prefix_disables_exclusion() {
+        let plugin = TanstackRouterPlugin;
+        // routeFileIgnorePrefix: "" is TanStack's documented way to disable the
+        // default dash ignore. The nested Start path must thread the empty
+        // override through and emit no prefix exclusion glob, not fall back to
+        // the default dash.
+        let source = r#"
+import { defineConfig } from "vite";
+import { tanstackStart } from "@tanstack/react-start/plugin/vite";
+export default defineConfig({
+  plugins: [
+    tanstackStart({ router: { routeFileIgnorePrefix: "" } }),
+  ],
+});
+"#;
+        let result = plugin.resolve_config(
+            Path::new("/project/vite.config.ts"),
+            source,
+            Path::new("/project"),
+        );
+        assert!(result.replace_entry_patterns);
+        let standard = result
+            .entry_patterns
+            .iter()
+            .find(|r| r.pattern == "src/routes/**/*.{ts,tsx,js,jsx}")
+            .expect("standard route pattern missing");
+        assert!(
+            !standard
+                .exclude_globs
+                .iter()
+                .any(|g| g == "src/routes/**/-*"),
+            "empty prefix override must not keep the default dash exclusion, got: {:?}",
+            standard.exclude_globs
+        );
+        assert!(
+            !standard.exclude_globs.iter().any(|g| g.ends_with("/**/*")),
+            "empty prefix override must emit no prefix exclusion glob, got: {:?}",
+            standard.exclude_globs
+        );
+    }
+
+    #[test]
+    fn bundler_config_legacy_alias_empty_ignore_prefix_disables_exclusion() {
+        let plugin = TanstackRouterPlugin;
+        // The same empty-string disable must thread through the flat legacy
+        // TanStackRouterVite alias path.
+        let source = r#"
+import { TanStackRouterVite } from "@tanstack/router-plugin/vite";
+export default {
+  plugins: [TanStackRouterVite({ routeFileIgnorePrefix: "" })],
+};
+"#;
+        let result = plugin.resolve_config(
+            Path::new("/project/vite.config.ts"),
+            source,
+            Path::new("/project"),
+        );
+        assert!(result.replace_entry_patterns);
+        let standard = result
+            .entry_patterns
+            .iter()
+            .find(|r| r.pattern == "src/routes/**/*.{ts,tsx,js,jsx}")
+            .expect("standard route pattern missing");
+        assert!(
+            !standard
+                .exclude_globs
+                .iter()
+                .any(|g| g == "src/routes/**/-*"),
+            "empty prefix override must not keep the default dash exclusion, got: {:?}",
+            standard.exclude_globs
         );
     }
 
