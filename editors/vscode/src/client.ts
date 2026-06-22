@@ -1,4 +1,3 @@
-import * as fs from "node:fs";
 // VS Code injects this module into the extension host at runtime.
 // fallow-ignore-next-line unlisted-dependency
 import * as vscode from "vscode";
@@ -30,7 +29,7 @@ import {
   getMutedDiagnosticCategories,
 } from "./config.js";
 import { showBinarySkewToastOnce } from "./binary-skew.js";
-import { findBinaryInPath, findLocalBinary } from "./binary-utils.js";
+import { findBinaryInPath, findLocalBinary, resolveConfiguredBinaryPath } from "./binary-utils.js";
 import type { DiagnosticFilter } from "./diagnosticFilter.js";
 import type { AnalysisCompleteParams } from "./statusBar-utils.js";
 import type { DuplicationMode, IssueTypeConfig } from "./types.js";
@@ -118,12 +117,16 @@ const resolveBinaryPath = async (
 ): Promise<string | null> => {
   const configPath = getLspPath();
   if (configPath) {
-    if (fs.existsSync(configPath)) {
-      outputChannel?.appendLine(`Binary resolution: using fallow.lspPath setting: ${configPath}`);
-      return configPath;
+    // Honor `fallow.lspPath` as the user typed it, tolerating a missing Windows
+    // extension and a directory pointing at the install folder, so a manually
+    // set path actually resolves instead of silently failing existsSync.
+    const resolved = resolveConfiguredBinaryPath(configPath, "fallow-lsp");
+    if (resolved) {
+      outputChannel?.appendLine(`Binary resolution: using fallow.lspPath setting: ${resolved}`);
+      return resolved;
     }
     void vscode.window.showWarningMessage(
-      `Fallow: configured LSP path "${configPath}" does not exist.`,
+      `Fallow: configured LSP path "${configPath}" does not point to a fallow-lsp binary.`,
     );
     return null;
   }

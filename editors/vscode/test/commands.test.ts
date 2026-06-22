@@ -109,6 +109,17 @@ vi.mock("../src/binary-utils.js", () => ({
   getExecutableExtension: () => "",
   findLocalBinary: (name: string) => (name === "fallow" ? mockLocalBinary : null),
   findBinaryInPath: (name: string) => (name === "fallow" ? mockPathBinary : null),
+  // Mirror the real sibling resolution against the mocked fs (mockFiles): the
+  // `fallow` CLI sibling of a configured `fallow.lspPath` is `<dir>/fallow`.
+  resolveConfiguredBinaryPath: (configured: string, name: string) => {
+    const slash = configured.lastIndexOf("/");
+    const dir = slash >= 0 ? configured.slice(0, slash) : ".";
+    const sibling = `${dir}/${name}`;
+    if (mockFiles.has(configured) && configured.endsWith(`/${name}`)) {
+      return configured;
+    }
+    return mockFiles.has(sibling) ? sibling : null;
+  },
 }));
 
 vi.mock("../src/download.js", () => ({

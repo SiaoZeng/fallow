@@ -1,5 +1,4 @@
 import * as child_process from "node:child_process";
-import * as fs from "node:fs";
 import * as path from "node:path";
 // VS Code injects this module into the extension host at runtime.
 // fallow-ignore-next-line unlisted-dependency
@@ -39,7 +38,7 @@ import {
 } from "./analysisBackoff.js";
 import { buildAuditArgs, parseAuditOutput } from "./audit-utils.js";
 import { showBinarySkewToastOnce } from "./binary-skew.js";
-import { findBinaryInPath, findLocalBinary, getExecutableExtension } from "./binary-utils.js";
+import { findBinaryInPath, findLocalBinary, resolveConfiguredBinaryPath } from "./binary-utils.js";
 import {
   downloadCliBinary,
   getBinaryVersion,
@@ -72,10 +71,12 @@ import type {
 export const findCliBinary = async (context: vscode.ExtensionContext): Promise<string | null> => {
   const lspPath = getLspPath();
   if (lspPath) {
-    const dir = path.dirname(lspPath);
-    const cliPath = path.join(dir, `fallow${getExecutableExtension()}`);
-    if (fs.existsSync(cliPath)) {
-      return cliPath;
+    // Resolve the `fallow` CLI sibling of the configured `fallow.lspPath`,
+    // tolerating a directory or an extensionless Windows path the same way the
+    // LSP resolver does, so a manually set lspPath also locates the CLI.
+    const sibling = resolveConfiguredBinaryPath(lspPath, "fallow");
+    if (sibling) {
+      return sibling;
     }
   }
 

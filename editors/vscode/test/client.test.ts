@@ -20,6 +20,7 @@ const mockBinaryResolution = vi.hoisted(() => ({
   localBinary: "/mock/fallow-lsp" as string | null,
   pathBinary: null as string | null,
   installedBinary: null as string | null,
+  configuredBinary: null as string | null,
 }));
 
 const mockWorkspace = vi.hoisted(() => ({
@@ -104,6 +105,7 @@ vi.mock("vscode-languageclient/node", () => ({
 vi.mock("../src/binary-utils.js", () => ({
   findLocalBinary: () => mockBinaryResolution.localBinary,
   findBinaryInPath: () => mockBinaryResolution.pathBinary,
+  resolveConfiguredBinaryPath: (configured: string) => mockBinaryResolution.configuredBinary ?? configured,
 }));
 
 vi.mock("../src/download.js", () => ({
@@ -175,6 +177,7 @@ beforeEach(() => {
   mockBinaryResolution.localBinary = "/mock/fallow-lsp";
   mockBinaryResolution.pathBinary = null;
   mockBinaryResolution.installedBinary = null;
+  mockBinaryResolution.configuredBinary = null;
   mockLanguageClient.instances = [];
   mockLanguageClient.startError = null;
   mockWorkspace.textDocuments = [];
