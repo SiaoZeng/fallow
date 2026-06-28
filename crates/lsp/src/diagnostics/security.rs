@@ -17,7 +17,8 @@ use ls_types::{
     CodeDescription, Diagnostic, DiagnosticSeverity, NumberOrString, Position, Range, Uri,
 };
 
-use fallow_core::results::{AnalysisResults, SecurityFinding, SecurityFindingKind};
+use fallow_api::EditorAnalysisResults as AnalysisResults;
+use fallow_api::editor_results::{SecurityFinding, SecurityFindingKind};
 
 /// Documentation page for the security candidate surface. The dead-code
 /// `DOCS_BASE` in `super` points at the dead-code explanation; security has its
@@ -44,7 +45,7 @@ pub fn security_label(finding: &SecurityFinding) -> String {
             let title = finding
                 .category
                 .as_deref()
-                .and_then(fallow_core::analyze::security_catalogue_title)
+                .and_then(fallow_api::editor_security::security_catalogue_title)
                 .or(finding.category.as_deref())
                 .unwrap_or("tainted-sink");
             match finding.cwe {
@@ -141,7 +142,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    use fallow_core::results::{
+    use fallow_api::editor_results::{
         SecurityFinding, SecurityFindingKind, SecurityReachability, SecuritySeverity,
         TaintConfidence,
     };
@@ -157,7 +158,7 @@ mod tests {
     fn tainted_sink(path: PathBuf) -> SecurityFinding {
         SecurityFinding {
             finding_id: String::new(),
-            candidate: fallow_core::results::SecurityCandidate::default(),
+            candidate: fallow_api::editor_results::SecurityCandidate::default(),
             taint_flow: None,
             attack_surface: None,
             kind: SecurityFindingKind::TaintedSink,
@@ -189,7 +190,7 @@ mod tests {
     fn client_server_leak(path: PathBuf) -> SecurityFinding {
         SecurityFinding {
             finding_id: String::new(),
-            candidate: fallow_core::results::SecurityCandidate::default(),
+            candidate: fallow_api::editor_results::SecurityCandidate::default(),
             taint_flow: None,
             attack_surface: None,
             kind: SecurityFindingKind::ClientServerLeak,

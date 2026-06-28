@@ -27,16 +27,15 @@ use tower_lsp_server::{Client, LanguageServer, LspService, Server};
 
 use serde::{Deserialize, Serialize};
 
-use fallow_config::{DetectionMode, DuplicatesConfig};
-use fallow_core::changed_files::{
-    filter_duplication_by_changed_files, filter_results_by_changed_files, resolve_git_toplevel,
-    try_get_changed_files_with_toplevel,
+#[cfg(test)]
+use fallow_api::EditorInlineComplexityExceeded as InlineComplexityExceeded;
+use fallow_api::{
+    EditorAnalysisOutput, EditorAnalysisResults as AnalysisResults,
+    EditorAnalysisSession as AnalysisSession, EditorDuplicationReport as DuplicationReport,
+    EditorInlineComplexityFinding as InlineComplexityFinding, resolve_git_toplevel,
 };
-use fallow_core::duplicates::DuplicationReport;
-use fallow_core::results::AnalysisResults;
+use fallow_config::{DetectionMode, DuplicatesConfig};
 use fallow_types::issue_meta::{IssueKindMeta, diagnostic_issue_metas};
-
-use crate::code_lens::{InlineComplexityExceeded, InlineComplexityFinding};
 
 /// Custom notification sent to the client after every analysis completes.
 /// Carries summary stats so the extension can update the status bar, context
@@ -89,10 +88,26 @@ struct AnalysisCompleteParams {
     clone_groups: usize,
 }
 
-fn analysis_complete_params(
-    results: &AnalysisResults,
-    duplication: &DuplicationReport,
-) -> AnalysisCompleteParams {
+#[derive(Clone, Copy)]
+struct AnalysisCompleteInput<'a> {
+    results: &'a AnalysisResults,
+    duplication: &'a DuplicationReport,
+}
+
+impl<'a> AnalysisCompleteInput<'a> {
+    const fn new(results: &'a AnalysisResults, duplication: &'a DuplicationReport) -> Self {
+        Self {
+            results,
+            duplication,
+        }
+    }
+}
+
+fn analysis_complete_params(input: AnalysisCompleteInput<'_>) -> AnalysisCompleteParams {
+    let AnalysisCompleteInput {
+        results,
+        duplication,
+    } = input;
     let boundary_violations = results.boundary_violations.len()
         + results.boundary_coverage_violations.len()
         + results.boundary_call_violations.len();
@@ -134,6 +149,14 @@ fn analysis_complete_params(
         duplication_percentage: duplication.stats.duplication_percentage,
         clone_groups: duplication.stats.clone_groups,
     }
+}
+
+#[cfg(test)]
+fn analysis_complete_params_for_test(
+    results: &AnalysisResults,
+    duplication: &DuplicationReport,
+) -> AnalysisCompleteParams {
+    analysis_complete_params(AnalysisCompleteInput::new(results, duplication))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -181,8 +204,7 @@ struct ProjectRootAnalysisInput<'a> {
     duplication_options: Option<&'a LspDuplicationOptions>,
     production_override: Option<bool>,
     inline_complexity_enabled: bool,
-    merged_results: &'a mut AnalysisResults,
-    merged_duplication: &'a mut DuplicationReport,
+    merged_analysis: &'a mut EditorAnalysisOutput,
     merged_inline_complexity: &'a mut Vec<InlineComplexityFinding>,
     config_messages: &'a mut Vec<(MessageType, String)>,
 }
@@ -198,60 +220,102 @@ struct BlockingAnalysisInput {
     changed_since: Option<String>,
 }
 
+#[derive(Clone, Copy)]
+struct CodeActionInput<'a> {
+    results: &'a AnalysisResults,
+    root: Option<&'a Path>,
+    file_path: &'a Path,
+    uri: &'a Uri,
+    range: &'a Range,
+    file_lines: &'a [&'a str],
+}
+
+impl<'a> CodeActionInput<'a> {
+    const fn new(
+        results: &'a AnalysisResults,
+        root: Option<&'a Path>,
+        file_path: &'a Path,
+        uri: &'a Uri,
+        range: &'a Range,
+        file_lines: &'a [&'a str],
+    ) -> Self {
+        Self {
+            results,
+            root,
+            file_path,
+            uri,
+            range,
+            file_lines,
+        }
+    }
+}
+
 struct BlockingAnalysisOutput {
-    results: AnalysisResults,
-    duplication: DuplicationReport,
+    analysis: EditorAnalysisOutput,
     inline_complexity: Vec<InlineComplexityFinding>,
     config_messages: Vec<(MessageType, String)>,
     changed_message: Option<(MessageType, String)>,
 }
 
+struct LspAnalysisSnapshot {
+    results: AnalysisResults,
+    duplication: DuplicationReport,
+    inline_complexity: Vec<InlineComplexityFinding>,
+}
+
+impl LspAnalysisSnapshot {
+    fn new(
+        results: AnalysisResults,
+        duplication: DuplicationReport,
+        inline_complexity: Vec<InlineComplexityFinding>,
+    ) -> Self {
+        Self {
+            results,
+            duplication,
+            inline_complexity,
+        }
+    }
+}
+
 fn analyze_project_root(input: &mut ProjectRootAnalysisInput<'_>) {
-    let load = fallow_core::config_for_project(input.project_root, input.config_path);
-    let (mut config, message) = match load {
-        Ok((config, Some(path))) => (
-            config,
-            (
-                MessageType::INFO,
-                format!("loaded config: {}", path.display()),
-            ),
-        ),
-        Ok((config, None)) => (
-            config,
-            (
-                MessageType::INFO,
+    let session =
+        match AnalysisSession::load_with_config(input.project_root, input.config_path, |config| {
+            // Override the project config's production resolution when the
+            // editor forwarded an explicit `fallow.production` (on/off).
+            // Mirrors the CLI-driven sidebar receiving
+            // `--production`/`--no-production`, so the two surfaces agree;
+            // `None` leaves the project config in force (issue #1055).
+            if let Some(production) = input.production_override {
+                config.production = production;
+            }
+        }) {
+            Ok(session) => session,
+            Err(e) => {
+                analyze_project_root_config_fallback(input, &e);
+                return;
+            }
+        };
+
+    let message = (
+        MessageType::INFO,
+        session.config_path().map_or_else(
+            || {
                 format!(
                     "no config file found for {}, using defaults",
                     input.project_root.display()
-                ),
-            ),
+                )
+            },
+            |path| format!("loaded config: {}", path.display()),
         ),
-        Err(e) => {
-            analyze_project_root_config_fallback(input, &e);
-            return;
-        }
-    };
-
-    // Override the project config's production resolution when the editor
-    // forwarded an explicit `fallow.production` (on/off). Mirrors the
-    // CLI-driven sidebar receiving `--production`/`--no-production`, so the two
-    // surfaces agree; `None` leaves the project config in force (issue #1055).
-    if let Some(production) = input.production_override {
-        config.production = production;
-    }
+    );
 
     input.config_messages.push(message);
 
-    run_typed_dead_code_analysis(input, &config);
-
-    let files = fallow_core::discover::discover_files_with_plugin_scopes(&config);
     let duplicates_config = input.duplication_options.map_or_else(
-        || config.duplicates.clone(),
-        |options| options.merge_with(&config.duplicates),
+        || session.config().duplicates.clone(),
+        |options| options.merge_with(&session.config().duplicates),
     );
-    let duplication =
-        fallow_core::duplicates::find_duplicates(input.project_root, &files, &duplicates_config);
-    merge_duplication(input.merged_duplication, duplication);
+    run_typed_project_analysis(input, &session, &duplicates_config);
 }
 
 /// Config-load failure path: record the warning, and when no explicit config
@@ -266,52 +330,35 @@ fn analyze_project_root_config_fallback(
     if input.config_path.is_some() {
         return;
     }
-    #[expect(
-        deprecated,
-        reason = "ADR-008 deprecates fallow_core::analyze_project externally; the LSP still uses the workspace path dependency"
-    )]
-    if let Ok(results) = fallow_core::analyze_project(input.project_root) {
-        merge_results(input.merged_results, results);
-    }
-    let duplication = fallow_core::duplicates::find_duplicates_in_project(
-        input.project_root,
-        &DuplicatesConfig::default(),
-    );
-    merge_duplication(input.merged_duplication, duplication);
+    let session = AnalysisSession::load_default(input.project_root);
+    run_typed_project_analysis(input, &session, &DuplicatesConfig::default());
 }
 
-/// Run the typed dead-code analysis for a loaded config, with the optional
-/// inline-complexity pass when the client opted in, folding results into the
-/// accumulators.
-fn run_typed_dead_code_analysis(
+/// Run typed project analysis for a loaded config, with the optional
+/// inline-complexity artifact retention when the client opted in, folding
+/// results into the accumulators.
+fn run_typed_project_analysis(
     input: &mut ProjectRootAnalysisInput<'_>,
-    config: &fallow_config::ResolvedConfig,
+    session: &AnalysisSession,
+    duplicates_config: &DuplicatesConfig,
 ) {
-    if input.inline_complexity_enabled {
-        #[expect(
-            deprecated,
-            reason = "ADR-008 deprecates fallow_core typed analysis externally; the LSP still uses the workspace path dependency"
-        )]
-        if let Ok(output) = fallow_core::analyze_with_usages_and_complexity(config) {
+    if let Ok(output) =
+        session.analyze_project_with(duplicates_config, input.inline_complexity_enabled)
+    {
+        if input.inline_complexity_enabled {
             input
                 .merged_inline_complexity
-                .extend(collect_inline_complexity(config, &output));
-            merge_results(input.merged_results, output.results);
+                .extend(fallow_api::collect_inline_complexity(
+                    session.config(),
+                    &output.dead_code,
+                ));
         }
-    } else {
-        #[expect(
-            deprecated,
-            reason = "ADR-008 deprecates fallow_core::analyze_with_usages externally; the LSP still uses the workspace path dependency"
-        )]
-        if let Ok(results) = fallow_core::analyze_with_usages(config) {
-            merge_results(input.merged_results, results);
-        }
+        input.merged_analysis.merge_project_output(output);
     }
 }
 
 fn run_blocking_analysis(input: &BlockingAnalysisInput) -> BlockingAnalysisOutput {
-    let mut results = AnalysisResults::default();
-    let mut duplication = DuplicationReport::default();
+    let mut analysis = EditorAnalysisOutput::default();
     let mut inline_complexity = Vec::new();
     let mut config_messages: Vec<(MessageType, String)> =
         Vec::with_capacity(input.project_roots.len());
@@ -322,8 +369,7 @@ fn run_blocking_analysis(input: &BlockingAnalysisInput) -> BlockingAnalysisOutpu
             duplication_options: input.duplication_options.as_ref(),
             production_override: input.production_override,
             inline_complexity_enabled: input.inline_complexity_enabled,
-            merged_results: &mut results,
-            merged_duplication: &mut duplication,
+            merged_analysis: &mut analysis,
             merged_inline_complexity: &mut inline_complexity,
             config_messages: &mut config_messages,
         });
@@ -333,14 +379,12 @@ fn run_blocking_analysis(input: &BlockingAnalysisInput) -> BlockingAnalysisOutpu
         input.changed_since.as_deref(),
         input.toplevel.as_deref().unwrap_or(input.root.as_path()),
         &input.root,
-        &mut results,
-        &mut duplication,
+        &mut analysis,
         &mut inline_complexity,
     );
 
     BlockingAnalysisOutput {
-        results,
-        duplication,
+        analysis,
         inline_complexity,
         config_messages,
         changed_message,
@@ -351,17 +395,15 @@ fn apply_changed_since_filter(
     changed_since: Option<&str>,
     toplevel: &Path,
     root: &Path,
-    results: &mut AnalysisResults,
-    duplication: &mut DuplicationReport,
+    analysis: &mut EditorAnalysisOutput,
     inline_complexity: &mut Vec<InlineComplexityFinding>,
 ) -> Option<(MessageType, String)> {
     let git_ref = changed_since?;
 
-    match try_get_changed_files_with_toplevel(root, toplevel, git_ref) {
+    match fallow_api::try_get_changed_files_with_toplevel(root, toplevel, git_ref) {
         Ok(changed) => {
-            filter_results_by_changed_files(results, &changed);
-            filter_duplication_by_changed_files(duplication, &changed, root);
-            filter_inline_complexity_by_changed_files(inline_complexity, &changed);
+            analysis.filter_by_changed_files(&changed, root);
+            fallow_api::filter_inline_complexity_by_changed_files(inline_complexity, &changed);
             Some((
                 MessageType::INFO,
                 format!(
@@ -476,95 +518,11 @@ fn initialization_inline_complexity_enabled(opts: &serde_json::Value) -> bool {
         .unwrap_or(false)
 }
 
-fn build_health_ignore_set(patterns: &[String]) -> Option<globset::GlobSet> {
-    if patterns.is_empty() {
-        return None;
-    }
-
-    let mut builder = globset::GlobSetBuilder::new();
-    for pattern in patterns {
-        let Ok(glob) = globset::Glob::new(pattern) else {
-            continue;
-        };
-        builder.add(glob);
-    }
-    builder.build().ok()
-}
-
-fn collect_inline_complexity(
-    config: &fallow_config::ResolvedConfig,
-    output: &fallow_core::AnalysisOutput,
-) -> Vec<InlineComplexityFinding> {
-    let Some(modules) = output.modules.as_ref() else {
-        return Vec::new();
-    };
-    let Some(files) = output.files.as_ref() else {
-        return Vec::new();
-    };
-
-    let file_paths: FxHashMap<_, _> = files.iter().map(|file| (file.id, &file.path)).collect();
-    let ignore_set = build_health_ignore_set(&config.health.ignore);
-    let mut findings = Vec::new();
-
-    for module in modules {
-        let Some(path) = file_paths.get(&module.file_id) else {
-            continue;
-        };
-        let relative = path.strip_prefix(&config.root).unwrap_or(path);
-        if ignore_set
-            .as_ref()
-            .is_some_and(|set| set.is_match(relative))
-        {
-            continue;
-        }
-
-        for function in &module.complexity {
-            if fallow_core::suppress::is_suppressed(
-                &module.suppressions,
-                function.line,
-                fallow_core::suppress::IssueKind::Complexity,
-            ) {
-                continue;
-            }
-
-            let exceeds_cyclomatic = function.cyclomatic > config.health.max_cyclomatic;
-            let exceeds_cognitive = function.cognitive > config.health.max_cognitive;
-            let exceeded = match (exceeds_cyclomatic, exceeds_cognitive) {
-                (true, true) => InlineComplexityExceeded::CyclomaticAndCognitive,
-                (true, false) => InlineComplexityExceeded::Cyclomatic,
-                (false, true) => InlineComplexityExceeded::Cognitive,
-                (false, false) => continue,
-            };
-
-            findings.push(InlineComplexityFinding {
-                path: (*path).clone(),
-                name: function.name.clone(),
-                line: function.line,
-                col: function.col,
-                cyclomatic: function.cyclomatic,
-                cognitive: function.cognitive,
-                exceeded,
-            });
-        }
-    }
-
-    findings
-}
-
-fn filter_inline_complexity_by_changed_files(
-    findings: &mut Vec<InlineComplexityFinding>,
-    changed_files: &FxHashSet<PathBuf>,
-) {
-    findings.retain(|finding| changed_files.contains(&finding.path));
-}
-
 #[derive(Clone)]
 struct FallowLspServer {
     client: Client,
     root: Arc<RwLock<Option<PathBuf>>>,
-    results: Arc<RwLock<Option<AnalysisResults>>>,
-    duplication: Arc<RwLock<Option<DuplicationReport>>>,
-    inline_complexity: Arc<RwLock<Vec<InlineComplexityFinding>>>,
+    analysis: Arc<RwLock<Option<LspAnalysisSnapshot>>>,
     previous_diagnostic_uris: Arc<RwLock<FxHashSet<Uri>>>,
     last_analysis: Arc<Mutex<Instant>>,
     analysis_guard: Arc<tokio::sync::Mutex<()>>,
@@ -863,8 +821,8 @@ impl LanguageServer for FallowLspServer {
         reason = "RwLock guard scope is intentional"
     )]
     async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
-        let results = self.results.read().await;
-        let Some(results) = results.as_ref() else {
+        let analysis = self.analysis.read().await;
+        let Some(analysis) = analysis.as_ref() else {
             return Ok(None);
         };
 
@@ -877,14 +835,14 @@ impl LanguageServer for FallowLspServer {
         let file_lines: Vec<&str> = file_content.lines().collect();
         let root = self.root.read().await.clone();
 
-        Ok(Self::build_code_action_response(
-            results,
+        Ok(Self::build_code_action_response(CodeActionInput::new(
+            &analysis.results,
             root.as_deref(),
             &file_path,
             uri,
             &params.range,
             &file_lines,
-        ))
+        )))
     }
 
     #[expect(
@@ -892,8 +850,8 @@ impl LanguageServer for FallowLspServer {
         reason = "RwLock guard scope is intentional"
     )]
     async fn code_lens(&self, params: CodeLensParams) -> Result<Option<Vec<CodeLens>>> {
-        let results = self.results.read().await;
-        let Some(results) = results.as_ref() else {
+        let analysis = self.analysis.read().await;
+        let Some(analysis) = analysis.as_ref() else {
             return Ok(None);
         };
 
@@ -901,13 +859,12 @@ impl LanguageServer for FallowLspServer {
             return Ok(None);
         };
 
-        let inline_complexity = self.inline_complexity.read().await;
-        let lenses = code_lens::build_code_lenses(
-            results,
-            &inline_complexity,
+        let lenses = code_lens::build_code_lenses(code_lens::CodeLensInput::new(
+            &analysis.results,
+            &analysis.inline_complexity,
             &file_path,
             &params.text_document.uri,
-        );
+        ));
 
         if lenses.is_empty() {
             Ok(None)
@@ -921,8 +878,8 @@ impl LanguageServer for FallowLspServer {
         reason = "RwLock guard scope is intentional"
     )]
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
-        let results = self.results.read().await;
-        let Some(results) = results.as_ref() else {
+        let analysis = self.analysis.read().await;
+        let Some(analysis) = analysis.as_ref() else {
             return Ok(None);
         };
 
@@ -933,16 +890,12 @@ impl LanguageServer for FallowLspServer {
 
         let position = params.text_document_position_params.position;
 
-        let duplication = self.duplication.read().await;
-        let empty_report = fallow_core::duplicates::DuplicationReport::default();
-        let duplication_ref = duplication.as_ref().unwrap_or(&empty_report);
-
-        Ok(hover::build_hover(
-            results,
-            duplication_ref,
+        Ok(hover::build_hover(hover::HoverInput::new(
+            &analysis.results,
+            &analysis.duplication,
             &file_path,
             position,
-        ))
+        )))
     }
 }
 
@@ -951,9 +904,7 @@ impl FallowLspServer {
         Self {
             client,
             root: Arc::new(RwLock::new(None)),
-            results: Arc::new(RwLock::new(None)),
-            duplication: Arc::new(RwLock::new(None)),
-            inline_complexity: Arc::new(RwLock::new(Vec::new())),
+            analysis: Arc::new(RwLock::new(None)),
             previous_diagnostic_uris: Arc::new(RwLock::new(FxHashSet::default())),
             last_analysis: Arc::new(Mutex::new(
                 Instant::now()
@@ -984,34 +935,39 @@ impl FallowLspServer {
         )
     }
 
-    fn build_code_action_response(
-        results: &AnalysisResults,
-        root: Option<&Path>,
-        file_path: &Path,
-        uri: &Uri,
-        range: &Range,
-        file_lines: &[&str],
-    ) -> Option<CodeActionResponse> {
+    fn build_code_action_response(input: CodeActionInput<'_>) -> Option<CodeActionResponse> {
+        let CodeActionInput {
+            results,
+            root,
+            file_path,
+            uri,
+            range,
+            file_lines,
+        } = input;
         let mut actions = Vec::new();
 
         actions.extend(code_actions::build_remove_export_actions(
-            results, file_path, uri, range, file_lines,
+            code_actions::RemoveExportActionInput::new(results, file_path, uri, range, file_lines),
         ));
         actions.extend(code_actions::build_delete_file_actions(
-            results, file_path, uri, range,
+            code_actions::DeleteFileActionInput::new(results, file_path, uri, range),
         ));
 
         if let Some(root) = root {
             actions.extend(code_actions::build_remove_catalog_entry_actions(
-                results, root, uri, range, file_lines,
+                code_actions::CatalogEntryActionInput::new(results, root, uri, range, file_lines),
             ));
             actions.extend(code_actions::build_remove_empty_catalog_group_actions(
-                results, root, uri, range, file_lines,
+                code_actions::EmptyCatalogGroupActionInput::new(
+                    results, root, uri, range, file_lines,
+                ),
             ));
         }
 
         actions.extend(code_actions::build_suppress_security_actions(
-            results, file_path, uri, range, file_lines,
+            code_actions::SuppressSecurityActionInput::new(
+                results, file_path, uri, range, file_lines,
+            ),
         ));
 
         (!actions.is_empty()).then_some(actions)
@@ -1210,15 +1166,24 @@ impl FallowLspServer {
         }
 
         let mut all_diagnostics =
-            diagnostics::build_diagnostics(&output.results, &output.duplication, root);
+            diagnostics::build_diagnostics(diagnostics::DiagnosticInput::new(
+                &output.analysis.results,
+                &output.analysis.duplication,
+                root,
+            ));
         attach_changed_since_data(&mut all_diagnostics, changed_since_for_data);
         self.publish_collected_diagnostics(all_diagnostics, version_snapshot)
             .await;
 
-        let complete_params = analysis_complete_params(&output.results, &output.duplication);
-        *self.results.write().await = Some(output.results);
-        *self.duplication.write().await = Some(output.duplication);
-        *self.inline_complexity.write().await = output.inline_complexity;
+        let complete_params = analysis_complete_params(AnalysisCompleteInput::new(
+            &output.analysis.results,
+            &output.analysis.duplication,
+        ));
+        *self.analysis.write().await = Some(LspAnalysisSnapshot::new(
+            output.analysis.results,
+            output.analysis.duplication,
+            output.inline_complexity,
+        ));
 
         self.client
             .send_notification::<AnalysisComplete>(complete_params)
@@ -1529,47 +1494,29 @@ fn attach_changed_since_data(
     }
 }
 
-/// Fold the analysis results from the single project root into the accumulator.
-///
-/// Thin wrapper over [`AnalysisResults::merge_into`], the single
-/// field-exhaustive union (issue #444). The LSP analyzes one root per run
-/// (see [`find_project_roots`]), so this folds exactly one result; the wrapper
-/// stays because [`AnalysisResults::merge_into`] is the field-drift guard that
-/// `merge_results_covers_all_fields` pins against new `AnalysisResults` fields.
+/// Test helper over the editor API accumulator.
+#[cfg(test)]
 fn merge_results(target: &mut AnalysisResults, source: AnalysisResults) {
-    target.merge_into(source);
+    let mut output =
+        EditorAnalysisOutput::new(std::mem::take(target), DuplicationReport::default());
+    output.merge_results(source);
+    *target = output.results;
 }
 
-/// Fold the duplication report from the single project root into the
-/// accumulator. The LSP analyzes one root per run (see [`find_project_roots`]),
-/// so this folds exactly one report.
+/// Test helper over the editor API accumulator.
+#[cfg(test)]
 fn merge_duplication(target: &mut DuplicationReport, source: DuplicationReport) {
-    target.clone_groups.extend(source.clone_groups);
-    target.clone_families.extend(source.clone_families);
-    target
-        .mirrored_directories
-        .extend(source.mirrored_directories);
-    target.stats.clone_groups += source.stats.clone_groups;
-    target.stats.clone_instances += source.stats.clone_instances;
-    target.stats.total_files += source.stats.total_files;
-    target.stats.files_with_clones += source.stats.files_with_clones;
-    target.stats.total_lines += source.stats.total_lines;
-    target.stats.duplicated_lines += source.stats.duplicated_lines;
-    target.stats.total_tokens += source.stats.total_tokens;
-    target.stats.duplicated_tokens += source.stats.duplicated_tokens;
-    target.stats.duplication_percentage = if target.stats.total_lines > 0 {
-        (target.stats.duplicated_lines as f64 / target.stats.total_lines as f64) * 100.0
-    } else {
-        0.0
-    };
+    let mut output = EditorAnalysisOutput::new(AnalysisResults::default(), std::mem::take(target));
+    output.merge_duplication(source);
+    *target = output.duplication;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use fallow_core::duplicates::{CloneGroup, CloneInstance, DuplicationStats};
-    use fallow_core::results::{
+    use fallow_api::editor_duplicates::{CloneGroup, CloneInstance, DuplicationStats};
+    use fallow_api::editor_results::{
         BoundaryViolation, BoundaryViolationFinding, CircularDependency, CircularDependencyFinding,
         ExportUsage, SecuritySeverity, TestOnlyDependency, TestOnlyDependencyFinding,
         TypeOnlyDependency, UnlistedDependency, UnlistedDependencyFinding,
@@ -1597,17 +1544,22 @@ mod tests {
         merged_inline_complexity: &mut Vec<InlineComplexityFinding>,
         config_messages: &mut Vec<(MessageType, String)>,
     ) {
+        let mut merged_analysis = EditorAnalysisOutput::new(
+            std::mem::take(merged_results),
+            std::mem::take(merged_duplication),
+        );
         analyze_project_root(&mut ProjectRootAnalysisInput {
             project_root,
             config_path,
             duplication_options,
             production_override,
             inline_complexity_enabled,
-            merged_results,
-            merged_duplication,
+            merged_analysis: &mut merged_analysis,
             merged_inline_complexity,
             config_messages,
         });
+        *merged_results = merged_analysis.results;
+        *merged_duplication = merged_analysis.duplication;
     }
 
     #[test]
@@ -1657,8 +1609,8 @@ mod tests {
                 col: 0,
             })],
             boundary_coverage_violations: vec![
-                fallow_core::results::BoundaryCoverageViolationFinding::with_actions(
-                    fallow_core::results::BoundaryCoverageViolation {
+                fallow_api::editor_results::BoundaryCoverageViolationFinding::with_actions(
+                    fallow_api::editor_results::BoundaryCoverageViolation {
                         path: "/unzoned.ts".into(),
                         line: 2,
                         col: 0,
@@ -1666,8 +1618,8 @@ mod tests {
                 ),
             ],
             boundary_call_violations: vec![
-                fallow_core::results::BoundaryCallViolationFinding::with_actions(
-                    fallow_core::results::BoundaryCallViolation {
+                fallow_api::editor_results::BoundaryCallViolationFinding::with_actions(
+                    fallow_api::editor_results::BoundaryCallViolation {
                         path: "/domain.ts".into(),
                         line: 3,
                         col: 0,
@@ -1680,13 +1632,13 @@ mod tests {
             ..AnalysisResults::default()
         };
 
-        let params = analysis_complete_params(&results, &DuplicationReport::default());
+        let params = analysis_complete_params_for_test(&results, &DuplicationReport::default());
 
         assert_eq!(params.boundary_violations, 3);
         assert_eq!(params.total_issues, 3);
 
         results.boundary_call_violations.clear();
-        let params = analysis_complete_params(&results, &DuplicationReport::default());
+        let params = analysis_complete_params_for_test(&results, &DuplicationReport::default());
         assert_eq!(params.boundary_violations, 2);
     }
 
@@ -1743,8 +1695,8 @@ mod tests {
         backend.shutdown().await.expect("shutdown returns Ok");
         backend.run_analysis().await;
         assert!(
-            backend.results.read().await.is_none(),
-            "results must stay None when run_analysis short-circuits on cancellation",
+            backend.analysis.read().await.is_none(),
+            "analysis snapshot must stay None when run_analysis short-circuits on cancellation",
         );
     }
 
@@ -1774,7 +1726,7 @@ mod tests {
         backend.initialized(InitializedParams {}).await;
 
         assert!(
-            backend.results.read().await.is_none(),
+            backend.analysis.read().await.is_none(),
             "initialized must not publish provisional startup results before any file is open",
         );
         assert!(
@@ -1811,14 +1763,14 @@ mod tests {
         );
 
         for _ in 0..50 {
-            if backend.results.read().await.is_some() {
+            if backend.analysis.read().await.is_some() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
 
         assert!(
-            backend.results.read().await.is_some(),
+            backend.analysis.read().await.is_some(),
             "the first opened file must trigger the initial LSP analysis",
         );
     }
@@ -1851,7 +1803,7 @@ mod tests {
             "didSave-triggered analysis must wait behind an in-flight startup analysis",
         );
         assert!(
-            backend.results.read().await.is_none(),
+            backend.analysis.read().await.is_none(),
             "analysis cannot publish while the guard is held",
         );
 
@@ -1859,7 +1811,7 @@ mod tests {
         save_task.await.expect("didSave analysis task completes");
 
         assert!(
-            backend.results.read().await.is_some(),
+            backend.analysis.read().await.is_some(),
             "didSave must rerun analysis after the in-flight startup analysis completes",
         );
     }
@@ -2284,6 +2236,53 @@ mod tests {
     }
 
     #[test]
+    fn analyze_project_root_implicit_config_error_falls_back_to_default_session() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).expect("create src dir");
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"name":"lsp-config-fallback","private":true,"main":"src/index.ts"}"#,
+        )
+        .expect("write package");
+        std::fs::write(root.join(".fallowrc.jsonc"), "{ invalid json").expect("write config");
+        std::fs::write(root.join("src/index.ts"), "export const used = 1;\n").expect("write index");
+        std::fs::write(root.join("src/orphan.ts"), "export const orphan = 2;\n")
+            .expect("write orphan");
+
+        let mut results = AnalysisResults::default();
+        let mut duplication = DuplicationReport::default();
+        let mut inline_complexity = Vec::new();
+        let mut messages = Vec::new();
+        analyze_project_root_for_test(
+            root,
+            None,
+            None,
+            None,
+            false,
+            &mut results,
+            &mut duplication,
+            &mut inline_complexity,
+            &mut messages,
+        );
+
+        assert!(
+            messages
+                .iter()
+                .any(|(kind, message)| *kind == MessageType::WARNING
+                    && message.contains("config error for")),
+            "implicit config failure should be surfaced as a warning"
+        );
+        assert!(
+            results
+                .unused_files
+                .iter()
+                .any(|finding| finding.file.path.ends_with("orphan.ts")),
+            "implicit config failure should still produce default-session diagnostics"
+        );
+    }
+
+    #[test]
     fn analyze_project_root_applies_lsp_duplication_options() {
         let dir = tempfile::tempdir().expect("temp dir");
         let root = dir.path();
@@ -2525,8 +2524,8 @@ export function choose(value: number): string {
                 path: "/a.ts".into(),
             }));
         source_a.unresolved_imports.push(
-            fallow_core::results::UnresolvedImportFinding::with_actions(
-                fallow_core::results::UnresolvedImport {
+            fallow_api::editor_results::UnresolvedImportFinding::with_actions(
+                fallow_api::editor_results::UnresolvedImport {
                     path: "/a.ts".into(),
                     specifier: "./missing".to_string(),
                     line: 1,
@@ -2581,7 +2580,7 @@ export function choose(value: number): string {
 
     fn merge_test_unused_dependency(
         package_name: &str,
-        location: fallow_core::results::DependencyLocation,
+        location: fallow_api::editor_results::DependencyLocation,
         line: u32,
     ) -> UnusedDependency {
         UnusedDependency {
@@ -2596,7 +2595,7 @@ export function choose(value: number): string {
     fn merge_test_unused_member(
         parent_name: &str,
         member_name: &str,
-        kind: fallow_core::extract::MemberKind,
+        kind: fallow_api::editor_extract::MemberKind,
         line: u32,
     ) -> UnusedMember {
         UnusedMember {
@@ -2627,32 +2626,37 @@ export function choose(value: number): string {
             unused_dependencies: vec![UnusedDependencyFinding::with_actions(
                 merge_test_unused_dependency(
                     "dep",
-                    fallow_core::results::DependencyLocation::Dependencies,
+                    fallow_api::editor_results::DependencyLocation::Dependencies,
                     3,
                 ),
             )],
             unused_dev_dependencies: vec![UnusedDevDependencyFinding::with_actions(
                 merge_test_unused_dependency(
                     "dev-dep",
-                    fallow_core::results::DependencyLocation::DevDependencies,
+                    fallow_api::editor_results::DependencyLocation::DevDependencies,
                     4,
                 ),
             )],
             unused_optional_dependencies: vec![UnusedOptionalDependencyFinding::with_actions(
                 merge_test_unused_dependency(
                     "opt-dep",
-                    fallow_core::results::DependencyLocation::OptionalDependencies,
+                    fallow_api::editor_results::DependencyLocation::OptionalDependencies,
                     5,
                 ),
             )],
             unused_enum_members: vec![UnusedEnumMemberFinding::with_actions(
-                merge_test_unused_member("E", "A", fallow_core::extract::MemberKind::EnumMember, 6),
+                merge_test_unused_member(
+                    "E",
+                    "A",
+                    fallow_api::editor_extract::MemberKind::EnumMember,
+                    6,
+                ),
             )],
             unused_class_members: vec![UnusedClassMemberFinding::with_actions(
                 merge_test_unused_member(
                     "C",
                     "m",
-                    fallow_core::extract::MemberKind::ClassMethod,
+                    fallow_api::editor_extract::MemberKind::ClassMethod,
                     7,
                 ),
             )],
@@ -2660,37 +2664,43 @@ export function choose(value: number): string {
                 merge_test_unused_member(
                     "S",
                     "a",
-                    fallow_core::extract::MemberKind::StoreMember,
+                    fallow_api::editor_extract::MemberKind::StoreMember,
                     7,
                 ),
             )],
-            unresolved_imports: vec![fallow_core::results::UnresolvedImportFinding::with_actions(
-                fallow_core::results::UnresolvedImport {
-                    path: "/f.ts".into(),
-                    specifier: "./gone".to_string(),
-                    line: 8,
-                    col: 0,
-                    specifier_col: 10,
-                },
-            )],
+            unresolved_imports: vec![
+                fallow_api::editor_results::UnresolvedImportFinding::with_actions(
+                    fallow_api::editor_results::UnresolvedImport {
+                        path: "/f.ts".into(),
+                        specifier: "./gone".to_string(),
+                        line: 8,
+                        col: 0,
+                        specifier_col: 10,
+                    },
+                ),
+            ],
             unlisted_dependencies: vec![UnlistedDependencyFinding::with_actions(
                 UnlistedDependency {
                     package_name: "unlisted".to_string(),
                     imported_from: vec![],
                 },
             )],
-            duplicate_exports: vec![fallow_core::results::DuplicateExportFinding::with_actions(
-                fallow_core::results::DuplicateExport {
-                    export_name: "dup".to_string(),
-                    locations: vec![],
-                },
-            )],
+            duplicate_exports: vec![
+                fallow_api::editor_results::DuplicateExportFinding::with_actions(
+                    fallow_api::editor_results::DuplicateExport {
+                        export_name: "dup".to_string(),
+                        locations: vec![],
+                    },
+                ),
+            ],
             type_only_dependencies: vec![
-                fallow_core::results::TypeOnlyDependencyFinding::with_actions(TypeOnlyDependency {
-                    package_name: "type-only".to_string(),
-                    path: "/pkg.json".into(),
-                    line: 9,
-                }),
+                fallow_api::editor_results::TypeOnlyDependencyFinding::with_actions(
+                    TypeOnlyDependency {
+                        package_name: "type-only".to_string(),
+                        path: "/pkg.json".into(),
+                        line: 9,
+                    },
+                ),
             ],
             circular_dependencies: vec![CircularDependencyFinding::with_actions(
                 CircularDependency {
@@ -2719,8 +2729,8 @@ export function choose(value: number): string {
                 col: 0,
             })],
             boundary_coverage_violations: vec![
-                fallow_core::results::BoundaryCoverageViolationFinding::with_actions(
-                    fallow_core::results::BoundaryCoverageViolation {
+                fallow_api::editor_results::BoundaryCoverageViolationFinding::with_actions(
+                    fallow_api::editor_results::BoundaryCoverageViolation {
                         path: "/unzoned.ts".into(),
                         line: 13,
                         col: 0,
@@ -2728,8 +2738,8 @@ export function choose(value: number): string {
                 ),
             ],
             boundary_call_violations: vec![
-                fallow_core::results::BoundaryCallViolationFinding::with_actions(
-                    fallow_core::results::BoundaryCallViolation {
+                fallow_api::editor_results::BoundaryCallViolationFinding::with_actions(
+                    fallow_api::editor_results::BoundaryCallViolation {
                         path: "/zoned.ts".into(),
                         line: 14,
                         col: 0,
@@ -2739,19 +2749,21 @@ export function choose(value: number): string {
                     },
                 ),
             ],
-            policy_violations: vec![fallow_core::results::PolicyViolationFinding::with_actions(
-                fallow_core::results::PolicyViolation {
-                    path: "/zoned.ts".into(),
-                    line: 15,
-                    col: 0,
-                    pack: "team-policy".to_string(),
-                    rule_id: "no-console".to_string(),
-                    kind: fallow_core::results::PolicyRuleKind::BannedCall,
-                    matched: "console.log".to_string(),
-                    severity: fallow_core::results::PolicyViolationSeverity::Warn,
-                    message: None,
-                },
-            )],
+            policy_violations: vec![
+                fallow_api::editor_results::PolicyViolationFinding::with_actions(
+                    fallow_api::editor_results::PolicyViolation {
+                        path: "/zoned.ts".into(),
+                        line: 15,
+                        col: 0,
+                        pack: "team-policy".to_string(),
+                        rule_id: "no-console".to_string(),
+                        kind: fallow_api::editor_results::PolicyRuleKind::BannedCall,
+                        matched: "console.log".to_string(),
+                        severity: fallow_api::editor_results::PolicyViolationSeverity::Warn,
+                        message: None,
+                    },
+                ),
+            ],
             export_usages: vec![ExportUsage {
                 path: "/f.ts".into(),
                 export_name: "used".to_string(),
@@ -2760,38 +2772,40 @@ export function choose(value: number): string {
                 reference_count: 3,
                 reference_locations: vec![],
             }],
-            private_type_leaks: vec![fallow_core::results::PrivateTypeLeakFinding::with_actions(
-                fallow_core::results::PrivateTypeLeak {
-                    path: "/f.ts".into(),
-                    export_name: "pub_fn".to_string(),
-                    type_name: "Secret".to_string(),
-                    line: 14,
-                    col: 0,
-                    span_start: 0,
-                },
-            )],
-            re_export_cycles: vec![fallow_core::results::ReExportCycleFinding::with_actions(
-                fallow_core::results::ReExportCycle {
+            private_type_leaks: vec![
+                fallow_api::editor_results::PrivateTypeLeakFinding::with_actions(
+                    fallow_api::editor_results::PrivateTypeLeak {
+                        path: "/f.ts".into(),
+                        export_name: "pub_fn".to_string(),
+                        type_name: "Secret".to_string(),
+                        line: 14,
+                        col: 0,
+                        span_start: 0,
+                    },
+                ),
+            ],
+            re_export_cycles: vec![fallow_api::editor_results::ReExportCycleFinding::with_actions(
+                fallow_api::editor_results::ReExportCycle {
                     files: vec!["/barrel.ts".into()],
-                    kind: fallow_core::results::ReExportCycleKind::SelfLoop,
+                    kind: fallow_api::editor_results::ReExportCycleKind::SelfLoop,
                 },
             )],
-            stale_suppressions: vec![fallow_core::results::StaleSuppression {
+            stale_suppressions: vec![fallow_api::editor_results::StaleSuppression {
                 path: "/f.ts".into(),
                 line: 15,
                 col: 0,
-                origin: fallow_core::results::SuppressionOrigin::Comment {
+                origin: fallow_api::editor_results::SuppressionOrigin::Comment {
                     issue_kind: None,
                     reason: None,
                     is_file_level: false,
                     kind_known: true,
                 },
                 missing_reason: false,
-                actions: fallow_core::results::StaleSuppression::actions_for(false),
+                actions: fallow_api::editor_results::StaleSuppression::actions_for(false),
             }],
             unused_catalog_entries: vec![
-                fallow_core::results::UnusedCatalogEntryFinding::with_actions(
-                    fallow_core::results::UnusedCatalogEntry {
+                fallow_api::editor_results::UnusedCatalogEntryFinding::with_actions(
+                    fallow_api::editor_results::UnusedCatalogEntry {
                         entry_name: "react".to_string(),
                         catalog_name: "default".to_string(),
                         path: "/pnpm-workspace.yaml".into(),
@@ -2801,8 +2815,8 @@ export function choose(value: number): string {
                 ),
             ],
             empty_catalog_groups: vec![
-                fallow_core::results::EmptyCatalogGroupFinding::with_actions(
-                    fallow_core::results::EmptyCatalogGroup {
+                fallow_api::editor_results::EmptyCatalogGroupFinding::with_actions(
+                    fallow_api::editor_results::EmptyCatalogGroup {
                         catalog_name: "ui".to_string(),
                         path: "/pnpm-workspace.yaml".into(),
                         line: 17,
@@ -2810,8 +2824,8 @@ export function choose(value: number): string {
                 ),
             ],
             unresolved_catalog_references: vec![
-                fallow_core::results::UnresolvedCatalogReferenceFinding::with_actions(
-                    fallow_core::results::UnresolvedCatalogReference {
+                fallow_api::editor_results::UnresolvedCatalogReferenceFinding::with_actions(
+                    fallow_api::editor_results::UnresolvedCatalogReference {
                         entry_name: "vue".to_string(),
                         catalog_name: "default".to_string(),
                         path: "/pkg.json".into(),
@@ -2821,14 +2835,14 @@ export function choose(value: number): string {
                 ),
             ],
             unused_dependency_overrides: vec![
-                fallow_core::results::UnusedDependencyOverrideFinding::with_actions(
-                    fallow_core::results::UnusedDependencyOverride {
+                fallow_api::editor_results::UnusedDependencyOverrideFinding::with_actions(
+                    fallow_api::editor_results::UnusedDependencyOverride {
                         raw_key: "react".to_string(),
                         target_package: "react".to_string(),
                         parent_package: None,
                         version_constraint: None,
                         version_range: "18".to_string(),
-                        source: fallow_core::results::DependencyOverrideSource::PnpmWorkspaceYaml,
+                        source: fallow_api::editor_results::DependencyOverrideSource::PnpmWorkspaceYaml,
                         path: "/pnpm-workspace.yaml".into(),
                         line: 19,
                         hint: None,
@@ -2836,21 +2850,22 @@ export function choose(value: number): string {
                 ),
             ],
             misconfigured_dependency_overrides: vec![
-                fallow_core::results::MisconfiguredDependencyOverrideFinding::with_actions(
-                    fallow_core::results::MisconfiguredDependencyOverride {
+                fallow_api::editor_results::MisconfiguredDependencyOverrideFinding::with_actions(
+                    fallow_api::editor_results::MisconfiguredDependencyOverride {
                         raw_key: "bad>".to_string(),
                         target_package: None,
                         raw_value: String::new(),
-                        reason: fallow_core::results::DependencyOverrideMisconfigReason::EmptyValue,
-                        source: fallow_core::results::DependencyOverrideSource::PnpmPackageJson,
+                        reason:
+                            fallow_api::editor_results::DependencyOverrideMisconfigReason::EmptyValue,
+                        source: fallow_api::editor_results::DependencyOverrideSource::PnpmPackageJson,
                         path: "/pkg.json".into(),
                         line: 20,
                     },
                 ),
             ],
             invalid_client_exports: vec![
-                fallow_core::results::InvalidClientExportFinding::with_actions(
-                    fallow_core::results::InvalidClientExport {
+                fallow_api::editor_results::InvalidClientExportFinding::with_actions(
+                    fallow_api::editor_results::InvalidClientExport {
                         path: "/app/page.tsx".into(),
                         export_name: "metadata".to_string(),
                         directive: "use client".to_string(),
@@ -2860,8 +2875,8 @@ export function choose(value: number): string {
                 ),
             ],
             mixed_client_server_barrels: vec![
-                fallow_core::results::MixedClientServerBarrelFinding::with_actions(
-                    fallow_core::results::MixedClientServerBarrel {
+                fallow_api::editor_results::MixedClientServerBarrelFinding::with_actions(
+                    fallow_api::editor_results::MixedClientServerBarrel {
                         path: "/app/components/index.ts".into(),
                         client_origin: "./Button".to_string(),
                         server_origin: "./fetchUser".to_string(),
@@ -2871,8 +2886,8 @@ export function choose(value: number): string {
                 ),
             ],
             misplaced_directives: vec![
-                fallow_core::results::MisplacedDirectiveFinding::with_actions(
-                    fallow_core::results::MisplacedDirective {
+                fallow_api::editor_results::MisplacedDirectiveFinding::with_actions(
+                    fallow_api::editor_results::MisplacedDirective {
                         path: "/app/widget.tsx".into(),
                         directive: "use client".to_string(),
                         line: 24,
@@ -2893,8 +2908,8 @@ export function choose(value: number): string {
             prop_drilling_chains: vec![],
             thin_wrappers: vec![],
             duplicate_prop_shapes: vec![],
-            route_collisions: vec![fallow_core::results::RouteCollisionFinding::with_actions(
-                fallow_core::results::RouteCollision {
+            route_collisions: vec![fallow_api::editor_results::RouteCollisionFinding::with_actions(
+                fallow_api::editor_results::RouteCollision {
                     path: "/app/(a)/about/page.tsx".into(),
                     url: "/about".to_string(),
                     conflicting_paths: vec!["/app/(b)/about/page.tsx".into()],
@@ -2903,8 +2918,8 @@ export function choose(value: number): string {
                 },
             )],
             dynamic_segment_name_conflicts: vec![
-                fallow_core::results::DynamicSegmentNameConflictFinding::with_actions(
-                    fallow_core::results::DynamicSegmentNameConflict {
+                fallow_api::editor_results::DynamicSegmentNameConflictFinding::with_actions(
+                    fallow_api::editor_results::DynamicSegmentNameConflict {
                         path: "/app/shop/[id]/page.tsx".into(),
                         position: "/shop".to_string(),
                         conflicting_segments: vec!["[id]".to_string(), "[slug]".to_string()],
@@ -2916,11 +2931,11 @@ export function choose(value: number): string {
             ],
             suppression_count: 1,
             active_suppressions: Vec::new(),
-            feature_flags: vec![fallow_core::results::FeatureFlag {
+            feature_flags: vec![fallow_api::editor_results::FeatureFlag {
                 path: "/f.ts".into(),
                 flag_name: "ENABLE_X".to_string(),
-                kind: fallow_core::results::FlagKind::EnvironmentVariable,
-                confidence: fallow_core::results::FlagConfidence::High,
+                kind: fallow_api::editor_results::FlagKind::EnvironmentVariable,
+                confidence: fallow_api::editor_results::FlagConfidence::High,
                 line: 21,
                 col: 0,
                 guard_span_start: None,
@@ -2930,16 +2945,16 @@ export function choose(value: number): string {
                 guard_line_end: None,
                 guarded_dead_exports: vec![],
             }],
-            entry_point_summary: Some(fallow_core::results::EntryPointSummary {
+            entry_point_summary: Some(fallow_api::editor_results::EntryPointSummary {
                 total: 0,
                 by_source: vec![],
             }),
-            security_findings: vec![fallow_core::results::SecurityFinding {
+            security_findings: vec![fallow_api::editor_results::SecurityFinding {
                 finding_id: String::new(),
-                candidate: fallow_core::results::SecurityCandidate::default(),
+                candidate: fallow_api::editor_results::SecurityCandidate::default(),
                 taint_flow: None,
                 attack_surface: None,
-                kind: fallow_core::results::SecurityFindingKind::ClientServerLeak,
+                kind: fallow_api::editor_results::SecurityFindingKind::ClientServerLeak,
                 category: None,
                 cwe: None,
                 path: "/client.tsx".into(),
@@ -2958,17 +2973,17 @@ export function choose(value: number): string {
             security_unresolved_edge_files: 2,
             security_unresolved_callee_sites: 0,
             security_unresolved_callee_diagnostics: vec![
-                fallow_core::results::SecurityUnresolvedCalleeDiagnostic {
+                fallow_api::editor_results::SecurityUnresolvedCalleeDiagnostic {
                     path: "/client.tsx".into(),
                     line: 2,
                     col: 0,
-                    reason: fallow_core::extract::SkippedSecurityCalleeReason::DynamicDispatch,
+                    reason: fallow_api::editor_extract::SkippedSecurityCalleeReason::DynamicDispatch,
                     expression_kind:
-                        fallow_core::extract::SkippedSecurityCalleeExpressionKind::Other,
+                        fallow_api::editor_extract::SkippedSecurityCalleeExpressionKind::Other,
                 },
             ],
-            render_fan_in: Some(fallow_core::results::RenderFanInMetric {
-                per_component: vec![fallow_core::results::RenderFanInComponent {
+            render_fan_in: Some(fallow_api::editor_results::RenderFanInMetric {
+                per_component: vec![fallow_api::editor_results::RenderFanInComponent {
                     file: "/Button.tsx".into(),
                     component: "Button".to_string(),
                     render_sites: 6,
@@ -2978,7 +2993,7 @@ export function choose(value: number): string {
                 high_pct: Some(0.0),
                 max_distinct_parents: Some(3),
             }),
-            react_component_intel: vec![fallow_core::results::ReactComponentIntel {
+            react_component_intel: vec![fallow_api::editor_results::ReactComponentIntel {
                 path: "/Button.tsx".into(),
                 component_name: "Button".to_string(),
                 anchor_line: 1,
@@ -2986,7 +3001,7 @@ export function choose(value: number): string {
                 render_sites: 6,
                 distinct_parents: 3,
                 prop_count: 1,
-                hooks: fallow_core::results::ReactHookSummary::default(),
+                hooks: fallow_api::editor_results::ReactHookSummary::default(),
                 props: Vec::new(),
             }],
         }
@@ -3845,12 +3860,12 @@ export function choose(value: number): string {
         install_document(backend, &uri, 1, "doRender();").await;
         let snapshot = snapshot_for(&uri, 1);
 
-        let finding = fallow_core::results::SecurityFinding {
+        let finding = fallow_api::editor_results::SecurityFinding {
             finding_id: String::new(),
-            candidate: fallow_core::results::SecurityCandidate::default(),
+            candidate: fallow_api::editor_results::SecurityCandidate::default(),
             taint_flow: None,
             attack_surface: None,
-            kind: fallow_core::results::SecurityFindingKind::TaintedSink,
+            kind: fallow_api::editor_results::SecurityFindingKind::TaintedSink,
             category: Some("dangerous-html".to_string()),
             cwe: Some(79),
             path: std::path::PathBuf::from("/render.ts"),
@@ -4346,118 +4361,6 @@ export function choose(value: number): string {
         assert!(
             msg.contains("parse error"),
             "message must include the original error"
-        );
-    }
-
-    // -------------------------------------------------------------------------
-    // build_health_ignore_set
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn build_health_ignore_set_returns_none_for_empty_patterns() {
-        assert!(
-            build_health_ignore_set(&[]).is_none(),
-            "empty pattern list must yield None so callers skip the match check"
-        );
-    }
-
-    #[test]
-    fn build_health_ignore_set_matches_glob_patterns() {
-        let set =
-            build_health_ignore_set(&["**/*.test.ts".to_string(), "src/generated/**".to_string()])
-                .expect("non-empty patterns must yield Some(GlobSet)");
-
-        assert!(
-            set.is_match(Path::new("src/utils.test.ts")),
-            "*.test.ts glob must match test files"
-        );
-        assert!(
-            set.is_match(Path::new("src/generated/api.ts")),
-            "src/generated/** glob must match generated files"
-        );
-        assert!(
-            !set.is_match(Path::new("src/utils.ts")),
-            "non-matching path must not be covered"
-        );
-    }
-
-    #[test]
-    fn build_health_ignore_set_skips_invalid_patterns() {
-        // An invalid glob is silently skipped; the result is still a valid
-        // (empty) GlobSet rather than None, because at least one token was
-        // processed.
-        let result = build_health_ignore_set(&["[invalid-glob".to_string()]);
-        // Whether this is None or Some(empty set) depends on the globset
-        // implementation; the key property is that it does not panic.
-        if let Some(set) = result {
-            assert!(
-                !set.is_match(Path::new("any/path.ts")),
-                "set built from only invalid patterns must not match anything"
-            );
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // filter_inline_complexity_by_changed_files
-    // -------------------------------------------------------------------------
-
-    fn make_inline_finding(path: PathBuf) -> InlineComplexityFinding {
-        InlineComplexityFinding {
-            path,
-            name: "myFn".to_string(),
-            line: 1,
-            col: 0,
-            cyclomatic: 5,
-            cognitive: 4,
-            exceeded: InlineComplexityExceeded::Cyclomatic,
-        }
-    }
-
-    #[test]
-    fn filter_inline_complexity_keeps_findings_in_changed_set() {
-        let changed: FxHashSet<PathBuf> = [PathBuf::from("/src/a.ts"), PathBuf::from("/src/b.ts")]
-            .into_iter()
-            .collect();
-        let mut findings = vec![
-            make_inline_finding(PathBuf::from("/src/a.ts")),
-            make_inline_finding(PathBuf::from("/src/c.ts")),
-        ];
-
-        filter_inline_complexity_by_changed_files(&mut findings, &changed);
-
-        assert_eq!(findings.len(), 1);
-        assert_eq!(
-            findings[0].path.to_string_lossy().replace('\\', "/"),
-            "/src/a.ts"
-        );
-    }
-
-    #[test]
-    fn filter_inline_complexity_removes_all_when_changed_set_empty() {
-        let changed: FxHashSet<PathBuf> = FxHashSet::default();
-        let mut findings = vec![make_inline_finding(PathBuf::from("/src/a.ts"))];
-
-        filter_inline_complexity_by_changed_files(&mut findings, &changed);
-
-        assert!(
-            findings.is_empty(),
-            "empty changed-files set must drop all inline complexity findings"
-        );
-    }
-
-    #[test]
-    fn filter_inline_complexity_keeps_all_when_all_in_changed_set() {
-        let path_a = PathBuf::from("/src/a.ts");
-        let path_b = PathBuf::from("/src/b.ts");
-        let changed: FxHashSet<PathBuf> = [path_a.clone(), path_b.clone()].into_iter().collect();
-        let mut findings = vec![make_inline_finding(path_a), make_inline_finding(path_b)];
-
-        filter_inline_complexity_by_changed_files(&mut findings, &changed);
-
-        assert_eq!(
-            findings.len(),
-            2,
-            "all findings in the changed set must be retained"
         );
     }
 

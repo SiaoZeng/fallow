@@ -2,7 +2,7 @@ use std::io::{BufWriter, Write};
 use std::process::ExitCode;
 
 use fallow_config::{OutputFormat, ResolvedConfig};
-use fallow_core::graph::ModuleGraph;
+use fallow_engine::graph::ModuleGraph;
 use rustc_hash::FxHashSet;
 
 use super::TraceOptions;
@@ -24,7 +24,7 @@ pub(super) fn handle_trace_output(
                 output,
             ));
         };
-        match fallow_core::trace::trace_export(graph, root, file_path, export_name) {
+        match fallow_engine::trace::trace_export(graph, root, file_path, export_name) {
             Some(trace) => {
                 report::print_export_trace(&trace, output);
                 return Some(ExitCode::SUCCESS);
@@ -40,7 +40,7 @@ pub(super) fn handle_trace_output(
     }
 
     if let Some(ref file_path) = trace_opts.trace_file {
-        match fallow_core::trace::trace_file(graph, root, file_path) {
+        match fallow_engine::trace::trace_file(graph, root, file_path) {
             Some(trace) => {
                 report::print_file_trace(&trace, output);
                 return Some(ExitCode::SUCCESS);
@@ -57,13 +57,13 @@ pub(super) fn handle_trace_output(
 
     if let Some(ref pkg_name) = trace_opts.trace_dependency {
         let trace =
-            fallow_core::trace::trace_dependency(graph, root, pkg_name, script_used_packages);
+            fallow_engine::trace::trace_dependency(graph, root, pkg_name, script_used_packages);
         report::print_dependency_trace(&trace, output);
         return Some(ExitCode::SUCCESS);
     }
 
     if let Some(ref file_path) = trace_opts.impact_closure {
-        match fallow_core::trace::trace_impact_closure(graph, root, file_path) {
+        match fallow_engine::trace::trace_impact_closure(graph, root, file_path) {
             Some(trace) => {
                 report::print_impact_closure_trace(&trace, output);
                 return Some(ExitCode::SUCCESS);
@@ -83,12 +83,12 @@ pub(super) fn handle_trace_output(
 
 /// Write SARIF output to a file if `--sarif-file` was specified.
 pub fn write_sarif_file(
-    results: &fallow_core::results::AnalysisResults,
+    results: &fallow_engine::results::AnalysisResults,
     config: &ResolvedConfig,
     sarif_path: &std::path::Path,
     quiet: bool,
 ) {
-    let sarif = report::build_sarif(results, &config.root, &config.rules);
+    let sarif = report::api_sarif_document(results, &config.root, &config.rules);
     if let Some(parent) = sarif_path.parent()
         && !parent.as_os_str().is_empty()
         && let Err(e) = std::fs::create_dir_all(parent)
@@ -124,13 +124,14 @@ pub fn write_sarif_file(
 /// Run duplication cross-reference and print combined findings.
 pub fn run_cross_reference(
     config: &ResolvedConfig,
-    unfiltered_results: &fallow_core::results::AnalysisResults,
+    unfiltered_results: &fallow_engine::results::AnalysisResults,
     quiet: bool,
 ) {
-    let files = fallow_core::discover::discover_files_with_plugin_scopes(config);
+    let files = fallow_engine::discover::discover_files_with_plugin_scopes(config);
     let dupe_report =
-        fallow_core::duplicates::find_duplicates(&config.root, &files, &config.duplicates);
-    let cross_ref = fallow_core::cross_reference::cross_reference(&dupe_report, unfiltered_results);
+        fallow_engine::duplicates::find_duplicates(&config.root, &files, &config.duplicates);
+    let cross_ref =
+        fallow_engine::cross_reference::cross_reference(&dupe_report, unfiltered_results);
 
     if cross_ref.has_findings() {
         report::print_cross_reference_findings(&cross_ref, &config.root, quiet, config.output);
@@ -141,7 +142,7 @@ pub fn run_cross_reference(
 ///
 /// The format is `FILE:EXPORT_NAME`. Uses `rsplit_once` so that colons
 /// in Windows drive letters (e.g., `C:\src\utils.ts:foo`) are handled
-/// correctly — only the last colon is used as the separator.
+/// correctly, only the last colon is used as the separator.
 pub(super) fn parse_trace_spec(spec: &str) -> Option<(&str, &str)> {
     spec.rsplit_once(':')
 }
@@ -250,7 +251,7 @@ mod tests {
 
     #[test]
     fn write_sarif_file_creates_output() {
-        let results = fallow_core::results::AnalysisResults::default();
+        let results = fallow_engine::results::AnalysisResults::default();
         let config = make_resolved_config();
 
         let dir = tempfile::tempdir().expect("create temp dir");
@@ -267,7 +268,7 @@ mod tests {
 
     #[test]
     fn write_sarif_file_creates_parent_directories() {
-        let results = fallow_core::results::AnalysisResults::default();
+        let results = fallow_engine::results::AnalysisResults::default();
         let config = make_resolved_config();
 
         let dir = tempfile::tempdir().expect("create temp dir");

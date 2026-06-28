@@ -1,51 +1,94 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use ls_types::{CodeLens, Command, Position, Range, Uri};
+use serde::Serialize;
 
-use fallow_core::results::AnalysisResults;
+use fallow_api::{
+    EditorAnalysisResults as AnalysisResults,
+    EditorInlineComplexityExceeded as InlineComplexityExceeded,
+    EditorInlineComplexityFinding as InlineComplexityFinding,
+};
 
-/// LSP-local inline complexity signal rendered as a code lens.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InlineComplexityFinding {
-    pub path: PathBuf,
-    pub name: String,
-    pub line: u32,
-    pub col: u32,
-    pub cyclomatic: u16,
-    pub cognitive: u16,
-    pub exceeded: InlineComplexityExceeded,
+fn complexity_exceeded_label(exceeded: InlineComplexityExceeded) -> &'static str {
+    match exceeded {
+        InlineComplexityExceeded::Cyclomatic => "cyclomatic",
+        InlineComplexityExceeded::Cognitive => "cognitive",
+        InlineComplexityExceeded::CyclomaticAndCognitive => "cyclomatic, cognitive",
+    }
 }
 
-/// Which health complexity threshold(s) a function exceeded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InlineComplexityExceeded {
-    Cyclomatic,
-    Cognitive,
-    CyclomaticAndCognitive,
+/// Typed input for building Code Lens items from editor analysis state.
+#[derive(Clone, Copy)]
+pub struct CodeLensInput<'a> {
+    pub results: &'a AnalysisResults,
+    pub complexity: &'a [InlineComplexityFinding],
+    pub file_path: &'a Path,
+    pub document_uri: &'a Uri,
 }
 
-impl InlineComplexityExceeded {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Cyclomatic => "cyclomatic",
-            Self::Cognitive => "cognitive",
-            Self::CyclomaticAndCognitive => "cyclomatic, cognitive",
+impl<'a> CodeLensInput<'a> {
+    #[must_use]
+    pub const fn new(
+        results: &'a AnalysisResults,
+        complexity: &'a [InlineComplexityFinding],
+        file_path: &'a Path,
+        document_uri: &'a Uri,
+    ) -> Self {
+        Self {
+            results,
+            complexity,
+            file_path,
+            document_uri,
         }
     }
 }
 
 /// Build Code Lens items for a file showing reference counts above each export declaration.
-pub fn build_code_lenses(
-    results: &AnalysisResults,
-    complexity: &[InlineComplexityFinding],
-    file_path: &Path,
-    document_uri: &Uri,
-) -> Vec<CodeLens> {
+pub fn build_code_lenses(input: CodeLensInput<'_>) -> Vec<CodeLens> {
+    let CodeLensInput {
+        results,
+        complexity,
+        file_path,
+        document_uri,
+    } = input;
     let mut lenses = export_usage_code_lenses(results, file_path, document_uri);
     lenses.extend(complexity_code_lenses(complexity, file_path));
     lenses.extend(react_component_code_lenses(results, file_path));
 
     lenses
+}
+
+#[cfg(test)]
+fn build_code_lenses_for_test(
+    results: &AnalysisResults,
+    complexity: &[InlineComplexityFinding],
+    file_path: &Path,
+    document_uri: &Uri,
+) -> Vec<CodeLens> {
+    build_code_lenses(CodeLensInput::new(
+        results,
+        complexity,
+        file_path,
+        document_uri,
+    ))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ReferenceCommandPosition {
+    line: u32,
+    character: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ReferenceCommandRange {
+    start: ReferenceCommandPosition,
+    end: ReferenceCommandPosition,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ReferenceLocationPayload {
+    uri: String,
+    range: ReferenceCommandRange,
 }
 
 /// Build the DESCRIPTIVE per-component React summary lenses for a file: one lens
@@ -62,7 +105,7 @@ fn react_component_code_lenses(results: &AnalysisResults, file_path: &Path) -> V
         .collect()
 }
 
-fn react_component_code_lens(intel: &fallow_core::results::ReactComponentIntel) -> CodeLens {
+fn react_component_code_lens(intel: &fallow_api::editor_results::ReactComponentIntel) -> CodeLens {
     let position = Position {
         line: intel.anchor_line.saturating_sub(1),
         character: intel.anchor_col,
@@ -87,7 +130,7 @@ fn react_component_code_lens(intel: &fallow_core::results::ReactComponentIntel) 
 /// honored (`1 prop`, `1 parent`). A component with no render sites, no props,
 /// and no hooks falls back to a bare `component` label so the lens is never
 /// empty.
-fn react_component_lens_title(intel: &fallow_core::results::ReactComponentIntel) -> String {
+fn react_component_lens_title(intel: &fallow_api::editor_results::ReactComponentIntel) -> String {
     let mut segments: Vec<String> = Vec::new();
 
     if intel.render_sites > 0 {
@@ -110,7 +153,7 @@ fn react_component_lens_title(intel: &fallow_core::results::ReactComponentIntel)
 
 /// Build the `N hooks (a state, b effect, ...)` segment, or `None` when the
 /// component uses no hooks. Each kind sub-count is omitted when zero.
-fn react_hook_segment(hooks: &fallow_core::results::ReactHookSummary) -> Option<String> {
+fn react_hook_segment(hooks: &fallow_api::editor_results::ReactHookSummary) -> Option<String> {
     let total = u32::from(hooks.state)
         + u32::from(hooks.effect)
         + u32::from(hooks.memo)
@@ -164,7 +207,7 @@ fn export_usage_code_lenses(
 }
 
 fn export_usage_code_lens(
-    usage: &fallow_core::results::ExportUsage,
+    usage: &fallow_api::editor_results::ExportUsage,
     document_uri: &Uri,
 ) -> CodeLens {
     let line = usage.line.saturating_sub(1);
@@ -177,7 +220,7 @@ fn export_usage_code_lens(
         line,
         character: usage.col,
     };
-    let ref_locations: Vec<serde_json::Value> = usage
+    let ref_locations: Vec<ReferenceLocationPayload> = usage
         .reference_locations
         .iter()
         .filter_map(reference_location_payload)
@@ -200,23 +243,27 @@ fn export_usage_code_lens(
 }
 
 fn reference_location_payload(
-    loc: &fallow_core::results::ReferenceLocation,
-) -> Option<serde_json::Value> {
+    loc: &fallow_api::editor_results::ReferenceLocation,
+) -> Option<ReferenceLocationPayload> {
     let uri = Uri::from_file_path(&loc.path)?;
     let ref_line = loc.line.saturating_sub(1);
-    Some(serde_json::json!({
-        "uri": uri.as_str(),
-        "range": {
-            "start": { "line": ref_line, "character": loc.col },
-            "end": { "line": ref_line, "character": loc.col }
-        }
-    }))
+    let position = ReferenceCommandPosition {
+        line: ref_line,
+        character: loc.col,
+    };
+    Some(ReferenceLocationPayload {
+        uri: uri.as_str().to_string(),
+        range: ReferenceCommandRange {
+            start: position.clone(),
+            end: position,
+        },
+    })
 }
 
 fn reference_command(
     document_uri: &Uri,
     export_position: Position,
-    ref_locations: &[serde_json::Value],
+    ref_locations: &[ReferenceLocationPayload],
 ) -> (String, Option<Vec<serde_json::Value>>) {
     if ref_locations.is_empty() {
         return ("fallow.noop".to_string(), None);
@@ -224,15 +271,24 @@ fn reference_command(
 
     (
         "fallow.showReferences".to_string(),
-        Some(vec![
-            serde_json::json!(document_uri.as_str()),
-            serde_json::json!({
-                "line": export_position.line,
-                "character": export_position.character,
-            }),
-            serde_json::json!(ref_locations),
-        ]),
+        reference_command_arguments(document_uri, export_position, ref_locations),
     )
+}
+
+fn reference_command_arguments(
+    document_uri: &Uri,
+    export_position: Position,
+    ref_locations: &[ReferenceLocationPayload],
+) -> Option<Vec<serde_json::Value>> {
+    let export_position = ReferenceCommandPosition {
+        line: export_position.line,
+        character: export_position.character,
+    };
+    Some(vec![
+        serde_json::to_value(document_uri.as_str()).ok()?,
+        serde_json::to_value(export_position).ok()?,
+        serde_json::to_value(ref_locations).ok()?,
+    ])
 }
 
 fn complexity_code_lenses(
@@ -262,7 +318,7 @@ fn complexity_code_lens(finding: &InlineComplexityFinding) -> CodeLens {
                 finding.name,
                 finding.cyclomatic,
                 finding.cognitive,
-                finding.exceeded.label()
+                complexity_exceeded_label(finding.exceeded)
             ),
             command: "fallow.noop".to_string(),
             arguments: None,
@@ -276,7 +332,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    use fallow_core::results::{
+    use fallow_api::editor_results::{
         ExportUsage, ReactComponentIntel, ReactHookSummary, ReactPropIntel, ReferenceLocation,
     };
 
@@ -322,7 +378,7 @@ mod tests {
         let results = AnalysisResults::default();
         let uri = Uri::from_file_path(&mod_path).unwrap();
 
-        let lenses = build_code_lenses(&results, &[], &mod_path, &uri);
+        let lenses = build_code_lenses_for_test(&results, &[], &mod_path, &uri);
         assert!(lenses.is_empty());
     }
 
@@ -341,7 +397,7 @@ mod tests {
         });
 
         let uri = Uri::from_file_path(&mod_path).unwrap();
-        let lenses = build_code_lenses(&results, &[], &mod_path, &uri);
+        let lenses = build_code_lenses_for_test(&results, &[], &mod_path, &uri);
         assert!(lenses.is_empty());
     }
 
@@ -360,7 +416,7 @@ mod tests {
         });
 
         let uri = Uri::from_file_path(&utils_path).unwrap();
-        let lenses = build_code_lenses(&results, &[], &utils_path, &uri);
+        let lenses = build_code_lenses_for_test(&results, &[], &utils_path, &uri);
         assert_eq!(lenses.len(), 1);
 
         let cmd = lenses[0].command.as_ref().unwrap();
@@ -382,7 +438,7 @@ mod tests {
         });
 
         let uri = Uri::from_file_path(&utils_path).unwrap();
-        let lenses = build_code_lenses(&results, &[], &utils_path, &uri);
+        let lenses = build_code_lenses_for_test(&results, &[], &utils_path, &uri);
         assert_eq!(lenses.len(), 1);
 
         let cmd = lenses[0].command.as_ref().unwrap();
@@ -404,7 +460,7 @@ mod tests {
         });
 
         let uri = Uri::from_file_path(&utils_path).unwrap();
-        let lenses = build_code_lenses(&results, &[], &utils_path, &uri);
+        let lenses = build_code_lenses_for_test(&results, &[], &utils_path, &uri);
         assert_eq!(lenses.len(), 1);
 
         let cmd = lenses[0].command.as_ref().unwrap();
@@ -426,7 +482,7 @@ mod tests {
         });
 
         let uri = Uri::from_file_path(&utils_path).unwrap();
-        let lenses = build_code_lenses(&results, &[], &utils_path, &uri);
+        let lenses = build_code_lenses_for_test(&results, &[], &utils_path, &uri);
         assert_eq!(lenses.len(), 1);
 
         assert_eq!(lenses[0].range.start.line, 14);
@@ -450,7 +506,7 @@ mod tests {
         });
 
         let uri = Uri::from_file_path(&utils_path).unwrap();
-        let lenses = build_code_lenses(&results, &[], &utils_path, &uri);
+        let lenses = build_code_lenses_for_test(&results, &[], &utils_path, &uri);
         assert_eq!(lenses.len(), 1);
 
         let cmd = lenses[0].command.as_ref().unwrap();
@@ -484,7 +540,7 @@ mod tests {
         });
 
         let uri = Uri::from_file_path(&utils_path).unwrap();
-        let lenses = build_code_lenses(&results, &[], &utils_path, &uri);
+        let lenses = build_code_lenses_for_test(&results, &[], &utils_path, &uri);
         assert_eq!(lenses.len(), 1);
 
         let cmd = lenses[0].command.as_ref().unwrap();
@@ -535,7 +591,7 @@ mod tests {
         });
 
         let uri = Uri::from_file_path(&path).unwrap();
-        let lenses = build_code_lenses(&results, &[], &path, &uri);
+        let lenses = build_code_lenses_for_test(&results, &[], &path, &uri);
         assert_eq!(lenses.len(), 3);
 
         let titles: Vec<&str> = lenses
@@ -563,7 +619,7 @@ mod tests {
         });
 
         let uri = Uri::from_file_path(&edge_path).unwrap();
-        let lenses = build_code_lenses(&results, &[], &edge_path, &uri);
+        let lenses = build_code_lenses_for_test(&results, &[], &edge_path, &uri);
         assert_eq!(lenses.len(), 1);
         assert_eq!(lenses[0].range.start.line, 0);
     }
@@ -594,7 +650,7 @@ mod tests {
         });
 
         let uri = Uri::from_file_path(&utils_path).unwrap();
-        let lenses = build_code_lenses(&results, &[], &utils_path, &uri);
+        let lenses = build_code_lenses_for_test(&results, &[], &utils_path, &uri);
         assert_eq!(lenses.len(), 1);
 
         let cmd = lenses[0].command.as_ref().unwrap();
@@ -620,7 +676,7 @@ mod tests {
         });
 
         let uri = Uri::from_file_path(&path).unwrap();
-        let lenses = build_code_lenses(&results, &[], &path, &uri);
+        let lenses = build_code_lenses_for_test(&results, &[], &path, &uri);
         assert_eq!(lenses.len(), 1);
 
         assert_eq!(lenses[0].range.start, lenses[0].range.end);
@@ -641,7 +697,7 @@ mod tests {
         });
 
         let uri = Uri::from_file_path(&path).unwrap();
-        let lenses = build_code_lenses(&results, &[], &path, &uri);
+        let lenses = build_code_lenses_for_test(&results, &[], &path, &uri);
         assert!(
             lenses[0].data.is_none(),
             "Code lens data should be None since resolve_provider is false"
@@ -667,7 +723,7 @@ mod tests {
         });
 
         let uri = Uri::from_file_path(&utils_path).unwrap();
-        let lenses = build_code_lenses(&results, &[], &utils_path, &uri);
+        let lenses = build_code_lenses_for_test(&results, &[], &utils_path, &uri);
 
         let cmd = lenses[0].command.as_ref().unwrap();
         let args = cmd.arguments.as_ref().unwrap();
@@ -693,7 +749,7 @@ mod tests {
         }];
 
         let uri = Uri::from_file_path(&utils_path).unwrap();
-        let lenses = build_code_lenses(&results, &complexity, &utils_path, &uri);
+        let lenses = build_code_lenses_for_test(&results, &complexity, &utils_path, &uri);
 
         assert_eq!(lenses.len(), 1);
         assert_eq!(lenses[0].range.start.line, 11);
@@ -723,7 +779,7 @@ mod tests {
         }];
 
         let uri = Uri::from_file_path(&utils_path).unwrap();
-        let lenses = build_code_lenses(&results, &complexity, &utils_path, &uri);
+        let lenses = build_code_lenses_for_test(&results, &complexity, &utils_path, &uri);
 
         assert!(lenses.is_empty());
     }
@@ -738,7 +794,7 @@ mod tests {
             .push(react_intel(path.clone()));
 
         let uri = Uri::from_file_path(&path).unwrap();
-        let lenses = build_code_lenses(&results, &[], &path, &uri);
+        let lenses = build_code_lenses_for_test(&results, &[], &path, &uri);
         assert_eq!(lenses.len(), 1);
 
         let cmd = lenses[0].command.as_ref().unwrap();
@@ -769,7 +825,7 @@ mod tests {
         results.react_component_intel.push(intel);
 
         let uri = Uri::from_file_path(&path).unwrap();
-        let lenses = build_code_lenses(&results, &[], &path, &uri);
+        let lenses = build_code_lenses_for_test(&results, &[], &path, &uri);
         let cmd = lenses[0].command.as_ref().unwrap();
         // Singular "1 parent" / "1 prop" / "1 hook", no zero memo/effect/etc.
         assert_eq!(
@@ -793,7 +849,7 @@ mod tests {
         results.react_component_intel.push(intel);
 
         let uri = Uri::from_file_path(&path).unwrap();
-        let lenses = build_code_lenses(&results, &[], &path, &uri);
+        let lenses = build_code_lenses_for_test(&results, &[], &path, &uri);
         let cmd = lenses[0].command.as_ref().unwrap();
         // No segments -> the bare "component" fallback (never "rendered 0x").
         assert_eq!(cmd.title, "component");
@@ -808,7 +864,7 @@ mod tests {
         results.react_component_intel.push(react_intel(other));
 
         let uri = Uri::from_file_path(&path).unwrap();
-        let lenses = build_code_lenses(&results, &[], &path, &uri);
+        let lenses = build_code_lenses_for_test(&results, &[], &path, &uri);
         assert!(lenses.is_empty());
     }
 }

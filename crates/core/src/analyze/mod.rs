@@ -736,7 +736,7 @@ fn build_dead_code_run_context<'a>(
 /// Find all dead code, with optional resolved module data, plugin context, and workspace info.
 #[deprecated(
     since = "2.76.0",
-    note = "fallow_core is internal; use fallow_cli::programmatic::detect_dead_code instead. NOTE: replacement returns serde_json::Value, not typed AnalysisResults. See docs/fallow-core-migration.md and ADR-008."
+    note = "fallow_core is internal; use fallow_api::detect_dead_code instead. NOTE: replacement returns serde_json::Value, not typed AnalysisResults. See docs/fallow-core-migration.md and ADR-008."
 )]
 #[expect(
     clippy::too_many_arguments,
@@ -2830,7 +2830,8 @@ mod tests {
                 resolved_dynamic_imports: vec![],
                 resolved_dynamic_patterns: vec![],
                 member_accesses: vec![],
-                whole_object_uses: vec![],
+                semantic_facts: Box::default(),
+                whole_object_uses: Box::default(),
                 has_cjs_exports: false,
                 has_angular_component_template_url: false,
                 unused_import_bindings: FxHashSet::default(),
@@ -2935,7 +2936,8 @@ mod tests {
                 resolved_dynamic_imports: vec![],
                 resolved_dynamic_patterns: vec![],
                 member_accesses: vec![],
-                whole_object_uses: vec![],
+                semantic_facts: Box::default(),
+                whole_object_uses: Box::default(),
                 has_cjs_exports: false,
                 has_angular_component_template_url: false,
                 unused_import_bindings: FxHashSet::default(),
@@ -3017,7 +3019,8 @@ mod tests {
                 resolved_dynamic_imports: vec![],
                 resolved_dynamic_patterns: vec![],
                 member_accesses: vec![],
-                whole_object_uses: vec![],
+                semantic_facts: Box::default(),
+                whole_object_uses: Box::default(),
                 has_cjs_exports: false,
                 has_angular_component_template_url: false,
                 unused_import_bindings: FxHashSet::default(),
@@ -3073,7 +3076,8 @@ mod tests {
                     resolved_dynamic_imports: vec![],
                     resolved_dynamic_patterns: vec![],
                     member_accesses: vec![],
-                    whole_object_uses: vec![],
+                    semantic_facts: Box::default(),
+                    whole_object_uses: Box::default(),
                     has_cjs_exports: false,
                     has_angular_component_template_url: false,
                     unused_import_bindings: FxHashSet::default(),
@@ -3093,9 +3097,10 @@ mod tests {
                 dynamic_imports: vec![],
                 dynamic_import_patterns: vec![],
                 require_calls: vec![],
-                package_path_references: vec![],
+                package_path_references: Box::default(),
                 member_accesses: vec![],
-                whole_object_uses: vec![],
+                semantic_facts: Box::default(),
+                whole_object_uses: Box::default(),
                 has_cjs_exports: false,
                 has_angular_component_template_url: false,
                 content_hash: 0,

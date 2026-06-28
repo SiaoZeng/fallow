@@ -1,7 +1,10 @@
 use std::process::ExitCode;
 
 use clap::CommandFactory;
-use fallow_types::issue_meta::{issue_meta_by_code, issue_result_meta_by_code};
+#[cfg(test)]
+use fallow_output::issue_output_contracts;
+use fallow_output::{TsAliasMeta, issue_output_contract_by_code};
+use fallow_types::issue_meta::issue_meta_by_code;
 use fallow_types::mcp_manifest::{MCP_TOOLS, RUNTIME_COVERAGE_LICENSE_NOTE};
 
 use crate::Cli;
@@ -111,6 +114,11 @@ fn task_matrix_schema() -> serde_json::Value {
 struct IssueTypeMeta {
     filter_flag: Option<&'static str>,
     result_key: Option<&'static str>,
+    summary_label: Option<&'static str>,
+    summary_docs_anchor: Option<&'static str>,
+    sarif_rule_ids: Option<Vec<String>>,
+    codeclimate_check_names: Option<Vec<String>>,
+    ts_alias: Option<TsAliasMeta>,
     counts_in_total: bool,
     fixable: bool,
     /// `(suppression token, file_level)` when comment-suppressible. The
@@ -130,9 +138,16 @@ impl IssueTypeMeta {
                 meta.suppress = Some((token, shared.suppress_file_level));
             }
         }
-        if let Some(result) = issue_result_meta_by_code(bare_id) {
-            meta.result_key = Some(result.result_key);
-            meta.counts_in_total = result.counts_in_total;
+        if let Some(contract) = issue_output_contract_by_code(bare_id) {
+            meta.result_key = Some(contract.result_key);
+            meta.summary_label = Some(contract.summary_label);
+            meta.summary_docs_anchor = Some(contract.summary_docs_anchor);
+            meta.sarif_rule_ids = Some(contract.sarif_rule_ids);
+            if !contract.codeclimate_check_names.is_empty() {
+                meta.codeclimate_check_names = Some(contract.codeclimate_check_names);
+            }
+            meta.ts_alias = contract.ts_alias;
+            meta.counts_in_total = contract.counts_in_total;
         }
         meta
     }
@@ -176,6 +191,14 @@ fn issue_type_row(rule: &RuleDef, command: &str) -> serde_json::Value {
         "description": rule.short,
         "filter_flag": meta.filter_flag,
         "result_key": meta.result_key,
+        "summary_label": meta.summary_label,
+        "summary_docs_anchor": meta.summary_docs_anchor,
+        "sarif_rule_ids": meta.sarif_rule_ids,
+        "codeclimate_check_names": meta.codeclimate_check_names,
+        "ts_alias": meta.ts_alias.map(|alias| serde_json::json!({
+            "name": alias.name,
+            "parent": alias.parent,
+        })),
         "counts_in_total": meta.counts_in_total,
         "fixable": meta.fixable,
         "suppressible": meta.suppress.is_some(),
@@ -518,7 +541,7 @@ fn mcp_tools_schema() -> serde_json::Value {
 }
 
 fn plugins_schema() -> serde_json::Value {
-    let names = fallow_core::plugins::registry::builtin_plugin_names();
+    let names = fallow_engine::plugins::registry::builtin_plugin_names();
     serde_json::json!({
         "count": names.len(),
         "note": "Built-in framework plugins, auto-activated when their enabler dependency is present; run fallow list --plugins for the set active in a specific project",
@@ -1012,6 +1035,11 @@ mod tests {
             for key in [
                 "filter_flag",
                 "result_key",
+                "summary_label",
+                "summary_docs_anchor",
+                "sarif_rule_ids",
+                "codeclimate_check_names",
+                "ts_alias",
                 "suppress_comment",
                 "note",
                 "license_note",
@@ -1049,6 +1077,31 @@ mod tests {
                     "non dead-code row {} must not expose a dead-code result_key",
                     row["id"]
                 );
+                assert!(
+                    row["summary_label"].is_null(),
+                    "non dead-code row {} must not expose a dead-code summary_label",
+                    row["id"]
+                );
+                assert!(
+                    row["summary_docs_anchor"].is_null(),
+                    "non dead-code row {} must not expose a dead-code summary_docs_anchor",
+                    row["id"]
+                );
+                assert!(
+                    row["sarif_rule_ids"].is_null(),
+                    "non dead-code row {} must not expose dead-code sarif_rule_ids",
+                    row["id"]
+                );
+                assert!(
+                    row["codeclimate_check_names"].is_null(),
+                    "non dead-code row {} must not expose dead-code codeclimate_check_names",
+                    row["id"]
+                );
+                assert!(
+                    row["ts_alias"].is_null(),
+                    "non dead-code row {} must not expose a dead-code ts_alias",
+                    row["id"]
+                );
                 assert_eq!(
                     row["counts_in_total"].as_bool(),
                     Some(false),
@@ -1060,6 +1113,37 @@ mod tests {
 
             let counts = row["counts_in_total"].as_bool().unwrap();
             if let Some(result_key) = row["result_key"].as_str() {
+                assert!(
+                    row["summary_label"]
+                        .as_str()
+                        .is_some_and(|label| !label.is_empty()),
+                    "dead-code row {} has result_key {result_key} but no summary_label",
+                    row["id"]
+                );
+                assert!(
+                    row["summary_docs_anchor"]
+                        .as_str()
+                        .is_some_and(|anchor| !anchor.is_empty()),
+                    "dead-code row {} has result_key {result_key} but no summary_docs_anchor",
+                    row["id"]
+                );
+                let sarif_rule_ids: FxHashSet<&str> = row["sarif_rule_ids"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|value| value.as_str().unwrap())
+                    .collect();
+                assert!(
+                    sarif_rule_ids.contains(row["rule_id"].as_str().unwrap()),
+                    "dead-code row {} must include the rule id in SARIF rule ids",
+                    row["id"]
+                );
+                if row["id"].as_str() == Some("stale-suppression") {
+                    assert!(
+                        sarif_rule_ids.contains("fallow/missing-suppression-reason"),
+                        "stale-suppression must expose its missing-reason SARIF variant"
+                    );
+                }
                 if counts {
                     counted.insert(result_key);
                 } else {
@@ -1083,6 +1167,123 @@ mod tests {
             ]),
             advisory
         );
+    }
+
+    #[test]
+    fn dead_code_codeclimate_contract_is_explicit() {
+        let schema = schema();
+        let rows = schema["issue_types"].as_array().unwrap();
+
+        let missing: FxHashSet<&str> = rows
+            .iter()
+            .filter(|row| row["command"].as_str() == Some("dead-code"))
+            .filter(|row| row["result_key"].as_str().is_some())
+            .filter(|row| row["codeclimate_check_names"].is_null())
+            .map(|row| row["id"].as_str().unwrap())
+            .collect();
+
+        assert_eq!(
+            FxHashSet::from_iter(["duplicate-prop-shape", "prop-drilling", "thin-wrapper"]),
+            missing
+        );
+
+        for row in rows {
+            if row["command"].as_str() == Some("dead-code")
+                && row["codeclimate_check_names"].as_array().is_some()
+            {
+                let codeclimate_check_names: FxHashSet<&str> = row["codeclimate_check_names"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|value| value.as_str().unwrap())
+                    .collect();
+                assert!(
+                    codeclimate_check_names.contains(row["rule_id"].as_str().unwrap()),
+                    "dead-code row {} must include the rule id in CodeClimate check names",
+                    row["id"]
+                );
+                if row["id"].as_str() == Some("stale-suppression") {
+                    assert!(
+                        codeclimate_check_names.contains("fallow/missing-suppression-reason"),
+                        "stale-suppression must expose its missing-reason CodeClimate variant"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dead_code_ts_alias_contract_is_explicit() {
+        let schema = schema();
+        let rows = schema["issue_types"].as_array().unwrap();
+        let aliases: FxHashSet<(String, String, String)> = rows
+            .iter()
+            .filter(|row| row["command"].as_str() == Some("dead-code"))
+            .filter_map(|row| {
+                let alias = row["ts_alias"].as_object()?;
+                Some((
+                    row["id"].as_str().unwrap().to_string(),
+                    alias["name"].as_str().unwrap().to_string(),
+                    alias["parent"].as_str().unwrap().to_string(),
+                ))
+            })
+            .collect();
+        let expected: FxHashSet<(String, String, String)> = issue_output_contracts()
+            .filter_map(|contract| {
+                let alias = contract.ts_alias?;
+                Some((
+                    contract.code.to_string(),
+                    alias.name.to_string(),
+                    alias.parent.to_string(),
+                ))
+            })
+            .collect();
+
+        assert!(aliases.contains(&(
+            "unused-dependency".to_string(),
+            "UnusedDependency".to_string(),
+            "UnusedDependencyFinding".to_string()
+        )));
+        assert!(aliases.contains(&(
+            "unused-dev-dependency".to_string(),
+            "UnusedDependency".to_string(),
+            "UnusedDevDependencyFinding".to_string()
+        )));
+        assert!(aliases.contains(&(
+            "unused-optional-dependency".to_string(),
+            "UnusedDependency".to_string(),
+            "UnusedOptionalDependencyFinding".to_string()
+        )));
+        assert!(aliases.contains(&(
+            "unused-class-member".to_string(),
+            "UnusedMember".to_string(),
+            "UnusedClassMemberFinding".to_string()
+        )));
+        assert!(aliases.contains(&(
+            "unused-enum-member".to_string(),
+            "UnusedMember".to_string(),
+            "UnusedEnumMemberFinding".to_string()
+        )));
+        assert!(aliases.contains(&(
+            "unused-store-member".to_string(),
+            "UnusedMember".to_string(),
+            "UnusedStoreMemberFinding".to_string()
+        )));
+        assert_eq!(
+            expected, aliases,
+            "schema ts_alias rows must exactly mirror fallow-output contracts"
+        );
+
+        for (_, name, parent) in aliases {
+            assert!(
+                name.chars().next().is_some_and(char::is_uppercase),
+                "TS alias name must be PascalCase: {name}"
+            );
+            assert!(
+                parent.ends_with("Finding"),
+                "TS alias parent must target a finding wrapper: {parent}"
+            );
+        }
     }
 
     /// Filter flags in the manifest must exist on the live clap command,
@@ -1180,7 +1381,7 @@ mod tests {
         assert_eq!(names.len(), count);
         assert_eq!(
             count,
-            fallow_core::plugins::registry::builtin_plugin_names().len()
+            fallow_engine::plugins::registry::builtin_plugin_names().len()
         );
         assert!(count >= 110, "plugin registry shrank unexpectedly");
     }

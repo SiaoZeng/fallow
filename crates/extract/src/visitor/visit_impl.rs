@@ -36,9 +36,10 @@ use super::helpers::{
     ts_import_type_qualifier_root,
 };
 use super::{
-    ModuleInfoExtractor, PendingLocalExportSpecifier, SecurityPathSinkBinding,
-    SideEffectRegistrationTarget, try_extract_arrow_wrapped_import, try_extract_dynamic_import,
-    try_extract_import_then_callback, try_extract_property_callback_import, try_extract_require,
+    BindingTarget, FactoryAssignedValue, ModuleInfoExtractor, PendingLocalExportSpecifier,
+    SecurityPathSinkBinding, SideEffectRegistrationTarget, try_extract_arrow_wrapped_import,
+    try_extract_dynamic_import, try_extract_import_then_callback,
+    try_extract_property_callback_import, try_extract_require,
 };
 
 #[path = "visit_impl_helpers.rs"]
@@ -590,14 +591,12 @@ impl ModuleInfoExtractor {
             // and `const { m } = s` credit the store member through the
             // `binding_target_names` remap (issue #1489 Case 2). Also flag it as a
             // store-instance local so the destructure-on-a-bound-store path fires.
-            self.binding_target_names
-                .insert(binding_name.to_string(), factory);
+            self.insert_class_binding_target(binding_name.to_string(), factory);
             self.store_instance_locals.insert(binding_name.to_string());
         } else if let Some(type_name) = extract_type_annotation_name(type_annotation)
             && let Some(resolved) = self.resolve_class_type_param(&type_name)
         {
-            self.binding_target_names
-                .insert(binding_name.to_string(), resolved);
+            self.insert_class_binding_target(binding_name.to_string(), resolved);
         }
 
         for (property_path, type_name) in extract_nested_type_bindings(type_annotation) {
@@ -605,15 +604,16 @@ impl ModuleInfoExtractor {
             // `props.store` path to the factory so `props.store.member` credits
             // (issue #1489 Case 2). Falls back to the class-type-param resolution.
             if let Some(factory) = self.store_factory_for_type_name(&type_name) {
-                self.binding_target_names
-                    .insert(format!("{binding_name}.{property_path}"), factory);
+                self.insert_class_binding_target(
+                    format!("{binding_name}.{property_path}"),
+                    factory,
+                );
                 continue;
             }
             let Some(resolved) = self.resolve_class_type_param(&type_name) else {
                 continue;
             };
-            self.binding_target_names
-                .insert(format!("{binding_name}.{property_path}"), resolved);
+            self.insert_class_binding_target(format!("{binding_name}.{property_path}"), resolved);
         }
     }
 
@@ -637,13 +637,11 @@ impl ModuleInfoExtractor {
                 // bind the local to the store factory + mark it a store instance so
                 // `store.member` and `const { m } = store` credit (issue #1489 Case 2).
                 if let Some(factory) = self.store_factory_for_type_name(class_name) {
-                    self.binding_target_names.insert(local.clone(), factory);
+                    self.insert_class_binding_target(local.clone(), factory);
                     self.store_instance_locals.insert(local);
                     continue;
                 }
-                self.binding_target_names
-                    .entry(local)
-                    .or_insert_with(|| class_name.clone());
+                self.insert_class_binding_target_if_absent(local, class_name.clone());
             }
         } else if let Some(type_name) = extract_type_annotation_name(type_annotation) {
             for (local, key) in bindings {
@@ -857,7 +855,8 @@ impl ModuleInfoExtractor {
 
     /// Capture `const local = callee(...)` (bare-identifier callee) as a factory
     /// return candidate. `resolve_factory_return_candidates` keeps only those
-    /// whose callee is a known same-file `new Class()` factory. See issue #1441.
+    /// whose callee is a known same-file `new Class()` factory or an imported
+    /// callee (cross-module). See issue #1441.
     ///
     /// Not scope-gated, mirroring the `const n = new Class()` instance binding:
     /// the consumer is commonly inside a setup/composable function, and
@@ -996,7 +995,7 @@ impl ModuleInfoExtractor {
         }
     }
 
-    /// Emit a fluent-chain sentinel `MemberAccess` for chained calls.
+    /// Emit typed fluent-chain facts for chained calls.
     fn try_record_fluent_chain_access(&mut self, expr: &CallExpression<'_>) {
         let Expression::StaticMemberExpression(member) = &expr.callee else {
             return;
@@ -1016,17 +1015,12 @@ impl ModuleInfoExtractor {
             };
             if let Expression::Identifier(root_id) = &inner_member.object {
                 chain_prefix_reversed.reverse();
-                let chain_prefix = chain_prefix_reversed.join(",");
-                self.member_accesses.push(MemberAccess {
-                    object: format!(
-                        "{}{}:{}:{}",
-                        crate::FLUENT_CHAIN_SENTINEL,
-                        root_id.name,
-                        inner_member.property.name,
-                        chain_prefix,
-                    ),
-                    member: this_method.to_string(),
-                });
+                self.record_fluent_chain_member_fact(
+                    root_id.name.to_string(),
+                    inner_member.property.name.to_string(),
+                    chain_prefix_reversed,
+                    this_method.to_string(),
+                );
                 return;
             }
             if let Expression::NewExpression(new_expr) = &inner_member.object
@@ -1034,16 +1028,11 @@ impl ModuleInfoExtractor {
             {
                 chain_prefix_reversed.push(inner_member.property.name.to_string());
                 chain_prefix_reversed.reverse();
-                let chain_prefix = chain_prefix_reversed.join(",");
-                self.member_accesses.push(MemberAccess {
-                    object: format!(
-                        "{}{}:{}",
-                        crate::FLUENT_CHAIN_NEW_SENTINEL,
-                        class_id.name,
-                        chain_prefix,
-                    ),
-                    member: this_method.to_string(),
-                });
+                self.record_fluent_chain_new_member_fact(
+                    class_id.name.to_string(),
+                    chain_prefix_reversed,
+                    this_method.to_string(),
+                );
                 return;
             }
             chain_prefix_reversed.push(inner_member.property.name.to_string());
@@ -1091,7 +1080,7 @@ impl ModuleInfoExtractor {
             _ => None,
         };
         if let Some(name) = param_name {
-            self.binding_target_names.insert(name, element_type);
+            self.insert_class_binding_target(name, element_type);
         }
     }
 
@@ -2181,7 +2170,7 @@ impl ModuleInfoExtractor {
     fn copy_nested_binding_targets(&mut self, source_binding: &str, target_binding: &str) -> bool {
         let source_prefix = format!("{source_binding}.");
         let target_prefix = format!("{target_binding}.");
-        let copied: Vec<(String, String)> = self
+        let copied: Vec<(String, BindingTarget)> = self
             .binding_target_names
             .iter()
             .filter_map(|(binding, target)| {
@@ -2198,7 +2187,7 @@ impl ModuleInfoExtractor {
         changed
     }
 
-    fn insert_binding_target(&mut self, binding: String, target: String) -> bool {
+    fn insert_binding_target(&mut self, binding: String, target: BindingTarget) -> bool {
         if self.binding_target_names.get(&binding) == Some(&target) {
             return false;
         }
@@ -2218,7 +2207,7 @@ impl ModuleInfoExtractor {
         {
             changed |= self.insert_binding_target(
                 candidate.binding_path.clone(),
-                candidate.source_name.clone(),
+                BindingTarget::Class(candidate.source_name.clone()),
             );
         } else if let Some(target_name) = self
             .binding_target_names
@@ -2503,20 +2492,13 @@ impl ModuleInfoExtractor {
         if !bindings.is_empty() {
             self.playwright_fixture_types
                 .insert(alias.id.name.to_string(), bindings.clone());
-            self.member_accesses
-                .extend(
-                    bindings
-                        .into_iter()
-                        .map(|(fixture_name, type_name)| MemberAccess {
-                            object: format!(
-                                "{}{}:{}",
-                                crate::PLAYWRIGHT_FIXTURE_TYPE_SENTINEL,
-                                alias.id.name,
-                                fixture_name
-                            ),
-                            member: type_name,
-                        }),
+            for (fixture_name, type_name) in bindings {
+                self.record_playwright_fixture_type_fact(
+                    alias.id.name.to_string(),
+                    fixture_name.clone(),
+                    type_name,
                 );
+            }
         }
     }
 
@@ -2540,27 +2522,17 @@ impl ModuleInfoExtractor {
         }
         bindings.sort_unstable();
         bindings.dedup();
-        self.member_accesses
-            .extend(
-                bindings
-                    .into_iter()
-                    .map(|(fixture_name, type_name)| MemberAccess {
-                        object: format!(
-                            "{}{}:{}",
-                            crate::PLAYWRIGHT_FIXTURE_DEF_SENTINEL,
-                            test_name,
-                            fixture_name
-                        ),
-                        member: type_name,
-                    }),
+        for (fixture_name, type_name) in bindings {
+            self.record_playwright_fixture_definition_fact(
+                test_name.to_string(),
+                fixture_name.clone(),
+                type_name,
             );
+        }
     }
 
     fn record_playwright_fixture_alias(&mut self, test_name: &str, base_name: &str) {
-        self.member_accesses.push(MemberAccess {
-            object: format!("{}{}:", crate::PLAYWRIGHT_FIXTURE_ALIAS_SENTINEL, test_name),
-            member: base_name.to_string(),
-        });
+        self.record_playwright_fixture_alias_fact(test_name.to_string(), base_name.to_string());
     }
 
     fn record_playwright_wrapper_aliases(&mut self, test_name: &str, call: &CallExpression<'_>) {
@@ -3553,18 +3525,18 @@ impl<'a> ModuleInfoExtractor {
         declarator: &VariableDeclarator<'a>,
         init: &Expression<'a>,
     ) {
-        if let BindingPattern::BindingIdentifier(id) = &declarator.id
-            && let Some(class_name) = new_expression_class_name(init)
+        if let Expression::NewExpression(new_expr) = init
+            && let Expression::Identifier(callee) = &new_expr.callee
+            && let BindingPattern::BindingIdentifier(id) = &declarator.id
+            && !super::helpers::is_builtin_constructor(callee.name.as_str())
         {
-            self.binding_target_names
-                .insert(id.name.to_string(), class_name);
+            self.insert_class_binding_target(id.name.to_string(), callee.name.to_string());
         }
 
         if let BindingPattern::BindingIdentifier(id) = &declarator.id
             && let Some(class_name) = Self::svelte_derived_new_class(init)
         {
-            self.binding_target_names
-                .insert(id.name.to_string(), class_name);
+            self.insert_class_binding_target(id.name.to_string(), class_name);
         }
 
         if let Expression::CallExpression(call) = init
@@ -3572,8 +3544,7 @@ impl<'a> ModuleInfoExtractor {
             && let Some(Some(BindingPattern::BindingIdentifier(id))) = arr_pat.elements.first()
             && let Some(class_name) = super::helpers::try_extract_factory_new_class(&call.arguments)
         {
-            self.binding_target_names
-                .insert(id.name.to_string(), class_name);
+            self.insert_class_binding_target(id.name.to_string(), class_name);
         }
 
         // `const svc = useMemo(() => new Svc())`: useMemo returns the factory's
@@ -3586,9 +3557,7 @@ impl<'a> ModuleInfoExtractor {
             && is_value_returning_memo_callee(&call.callee)
             && let Some(class_name) = super::helpers::try_extract_factory_new_class(&call.arguments)
         {
-            self.binding_target_names
-                .entry(id.name.to_string())
-                .or_insert(class_name);
+            self.insert_class_binding_target_if_absent(id.name.to_string(), class_name);
         }
 
         if let Expression::CallExpression(call) = init
@@ -3760,7 +3729,7 @@ impl<'a> ModuleInfoExtractor {
             && let Expression::Identifier(callee) = &new_expr.callee
             && !super::helpers::is_builtin_constructor(callee.name.as_str())
         {
-            self.binding_target_names.insert(
+            self.insert_class_binding_target(
                 format!("this.{}", member.property.name),
                 callee.name.to_string(),
             );
@@ -3896,10 +3865,7 @@ impl<'a> ModuleInfoExtractor {
 
         let refs = crate::sfc_template::angular::collect_angular_template_refs(template);
         for name in refs.identifiers {
-            self.member_accesses.push(MemberAccess {
-                object: crate::sfc_template::angular::ANGULAR_TPL_SENTINEL.to_string(),
-                member: name,
-            });
+            self.record_angular_template_member_fact(name.clone());
         }
         self.member_accesses.extend(refs.member_accesses);
         let template_offset = meta
@@ -3920,19 +3886,13 @@ impl<'a> ModuleInfoExtractor {
     }
 
     /// Record Angular `host:` binding and `inputs:` / `outputs:` member refs as
-    /// template-sentinel member accesses.
+    /// typed template member facts.
     fn record_angular_template_members(&mut self, meta: &super::helpers::AngularComponentMetadata) {
         for name in &meta.host_member_refs {
-            self.member_accesses.push(MemberAccess {
-                object: crate::sfc_template::angular::ANGULAR_TPL_SENTINEL.to_string(),
-                member: name.clone(),
-            });
+            self.record_angular_template_member_fact(name.clone());
         }
         for name in &meta.input_output_members {
-            self.member_accesses.push(MemberAccess {
-                object: crate::sfc_template::angular::ANGULAR_TPL_SENTINEL.to_string(),
-                member: name.clone(),
-            });
+            self.record_angular_template_member_fact(name.clone());
         }
     }
 }
@@ -3989,15 +3949,13 @@ impl<'a> Visit<'a> for ModuleInfoExtractor {
                 && let Expression::Identifier(callee) = &new_expr.callee
                 && !super::helpers::is_builtin_constructor(callee.name.as_str())
             {
-                self.binding_target_names
-                    .insert(format!("this.{name}"), callee.name.to_string());
+                self.insert_class_binding_target(format!("this.{name}"), callee.name.to_string());
             }
 
             if let Some(Expression::CallExpression(call)) = &prop.value
                 && let Some(type_name) = self.extract_angular_inject_target(call)
             {
-                self.binding_target_names
-                    .insert(format!("this.{name}"), type_name);
+                self.insert_class_binding_target(format!("this.{name}"), type_name);
             }
 
             if let Some(value) = prop.value.as_ref()
@@ -4007,7 +3965,7 @@ impl<'a> Visit<'a> for ModuleInfoExtractor {
                 if query.plural {
                     self.iterable_element_types.insert(call_key, query.type_arg);
                 } else {
-                    self.binding_target_names.insert(call_key, query.type_arg);
+                    self.insert_class_binding_target(call_key, query.type_arg);
                 }
             }
 
@@ -4341,11 +4299,14 @@ impl<'a> Visit<'a> for ModuleInfoExtractor {
         self.react_record_hook_call(expr);
 
         if let Some(test_name) = playwright_test_callee_name(&expr.callee) {
-            self.member_accesses
-                .extend(collect_playwright_fixture_member_uses(
-                    test_name.as_str(),
-                    &expr.arguments,
-                ));
+            let fixture_uses = collect_playwright_fixture_member_uses(&expr.arguments);
+            for access in &fixture_uses {
+                self.record_playwright_fixture_use_fact(
+                    test_name.clone(),
+                    access.fixture_name.clone(),
+                    access.member.clone(),
+                );
+            }
         }
 
         if let Some((tag, class_name)) = extract_custom_elements_define(expr) {
@@ -4539,7 +4500,8 @@ impl<'a> Visit<'a> for ModuleInfoExtractor {
             // `useFooStore().member` with no bound local: the generic receiver
             // name would be the inert `useFooStore()` string. Credit the member on
             // the factory import directly, mirroring the bound
-            // `const s = useFooStore(); s.member` path (see `record_pinia_store`).
+            // `const s = useFooStore(); s.member` path (see `record_pinia_store`,
+            // issue #1489 Case 1).
             self.member_accesses.push(MemberAccess {
                 object: store_factory,
                 member: expr.property.name.to_string(),
@@ -4632,7 +4594,7 @@ impl<'a> Visit<'a> for ModuleInfoExtractor {
         let mut narrowings = Vec::new();
         collect_instanceof_narrowings(&stmt.test, &mut narrowings);
         for (local, class_name) in narrowings {
-            self.binding_target_names.entry(local).or_insert(class_name);
+            self.insert_class_binding_target_if_absent(local, class_name);
         }
         walk::walk_if_statement(self, stmt);
     }
@@ -4644,14 +4606,9 @@ impl<'a> Visit<'a> for ModuleInfoExtractor {
             }
             // `{ ...this }` forwards every member opaquely (the Angular "headless
             // pattern" convention spreads `this` into a behavior pattern). Record
-            // a sentinel member access so the Angular input/output detectors
-            // abstain the whole component instead of false-flagging spread inputs.
-            Expression::ThisExpression(_) => {
-                self.member_accesses.push(MemberAccess {
-                    object: crate::sfc_template::angular::ANGULAR_THIS_SPREAD_SENTINEL.to_string(),
-                    member: String::new(),
-                });
-            }
+            // a typed fact so the Angular input/output detectors abstain the
+            // whole component instead of false-flagging spread inputs.
+            Expression::ThisExpression(_) => self.record_angular_this_spread_fact(),
             _ => {}
         }
         walk::walk_spread_element(self, elem);
@@ -4734,8 +4691,7 @@ impl<'a> Visit<'a> for ModuleInfoExtractor {
                     .as_ref()
                     .map_or_else(|| quasi.value.raw.as_str(), |c| c.as_str());
                 if text.ends_with('<') || text.ends_with("</") {
-                    self.used_custom_element_tags
-                        .insert(fallow_types::extract::DYNAMIC_CUSTOM_ELEMENT_TAG.to_string());
+                    self.record_dynamic_custom_element_render_fact();
                 }
             }
         }
@@ -5676,10 +5632,6 @@ fn ts_type_reference_base_name(ty: &TSType<'_>) -> Option<String> {
     }
 }
 
-/// Count every `return` statement reachable inside a function body (recursively
-/// through nested blocks / control flow, but NOT into nested function or arrow
-/// bodies, which have their own return scope). More than one means an
-/// early-return / multi-branch `load`, which the harvest abstains on.
 /// Visit every `return` statement reachable in `statements` in source order,
 /// recursing through control flow (block / if / loops / try / switch / labeled)
 /// but NOT into nested functions, which have their own return scope. The shared
@@ -5731,6 +5683,10 @@ fn for_each_return_in_statement<'b, 'a>(
     }
 }
 
+/// Count every `return` statement reachable inside a function body (recursively
+/// through nested blocks / control flow, but NOT into nested function or arrow
+/// bodies, which have their own return scope). More than one means an
+/// early-return / multi-branch `load`, which the harvest abstains on.
 fn count_returns_in_statements(statements: &[Statement<'_>]) -> usize {
     let mut count = 0;
     for_each_return_statement(statements, &mut |_| count += 1);
@@ -6915,20 +6871,18 @@ fn new_expression_class_name(expr: &Expression<'_>) -> Option<String> {
 /// `callee` is a strict same-file factory, resolved later), or anything else
 /// (which poisons the proof). Unwraps parenthesized / `as` / `satisfies` / `!`
 /// wrappers; `await` and every other shape are `Other`. See issue #1441 (Part A).
-fn classify_factory_assigned_value(expr: &Expression<'_>) -> super::FactoryAssignedValue {
+fn classify_factory_assigned_value(expr: &Expression<'_>) -> FactoryAssignedValue {
     let expr = unwrap_static_expr(expr);
     match expr {
         Expression::NewExpression(_) => match new_expression_class_name(expr) {
-            Some(class) => super::FactoryAssignedValue::NewClass(class),
-            None => super::FactoryAssignedValue::Other,
+            Some(class) => FactoryAssignedValue::NewClass(class),
+            None => FactoryAssignedValue::Other,
         },
         Expression::CallExpression(call) => match &call.callee {
-            Expression::Identifier(callee) => {
-                super::FactoryAssignedValue::Call(callee.name.to_string())
-            }
-            _ => super::FactoryAssignedValue::Other,
+            Expression::Identifier(callee) => FactoryAssignedValue::Call(callee.name.to_string()),
+            _ => FactoryAssignedValue::Other,
         },
-        _ => super::FactoryAssignedValue::Other,
+        _ => FactoryAssignedValue::Other,
     }
 }
 
@@ -6947,7 +6901,7 @@ fn classify_factory_assigned_value(expr: &Expression<'_>) -> super::FactoryAssig
 fn collect_self_scope_assignments(
     statements: &[Statement<'_>],
     target: &str,
-    out: &mut Vec<super::FactoryAssignedValue>,
+    out: &mut Vec<FactoryAssignedValue>,
 ) {
     for stmt in statements {
         collect_self_scope_assignments_in_statement(stmt, target, out);
@@ -6957,7 +6911,7 @@ fn collect_self_scope_assignments(
 fn collect_self_scope_assignments_in_statement(
     stmt: &Statement<'_>,
     target: &str,
-    out: &mut Vec<super::FactoryAssignedValue>,
+    out: &mut Vec<FactoryAssignedValue>,
 ) {
     match stmt {
         Statement::ExpressionStatement(expr_stmt) => {
@@ -7030,7 +6984,7 @@ fn is_undefined(expr: &Expression<'_>) -> bool {
 fn collect_self_scope_assignment_expr(
     expr: &Expression<'_>,
     target: &str,
-    out: &mut Vec<super::FactoryAssignedValue>,
+    out: &mut Vec<FactoryAssignedValue>,
 ) {
     match expr {
         Expression::AssignmentExpression(assign)
@@ -7675,9 +7629,10 @@ impl ModuleInfoExtractor {
             && let Expression::Identifier(callee) = &call.callee
             && self.is_store_factory_call(callee.name.as_str())
         {
-            self.binding_target_names
-                .entry(id.name.to_string())
-                .or_insert_with(|| callee.name.to_string());
+            self.insert_class_binding_target_if_absent(
+                id.name.to_string(),
+                callee.name.to_string(),
+            );
             self.store_instance_locals.insert(id.name.to_string());
             return;
         }
@@ -7728,10 +7683,12 @@ impl ModuleInfoExtractor {
             // Pinia-specific destructure arm.
             Expression::StaticMemberExpression(_) => {
                 if let Some(path) = static_member_object_name(init)
-                    && let Some(factory) = self.binding_target_names.get(&path).cloned()
+                    && let Some(BindingTarget::Class(factory)) =
+                        self.binding_target_names.get(&path)
                     && factory.starts_with("use")
                     && factory.ends_with("Store")
                 {
+                    let factory = factory.clone();
                     self.credit_store_pattern_members(obj_pat, &factory);
                 }
             }
@@ -8160,14 +8117,16 @@ impl ModuleInfoExtractor {
     /// Gated on the `use<Name>Store` convention (NOT the broad
     /// `is_store_factory_call`, which matches any import) so a
     /// `ReturnType<typeof makeAnything>` never treats an arbitrary factory as a
-    /// store and masks a real unused member. Mirrors `inline_store_factory_receiver`.
-    /// Backs the typed-param store crediting for issue #1489 Case 2.
+    /// store and masks a real unused member. Backs the typed-param store
+    /// crediting for issue #1489 Case 2.
     fn store_factory_from_return_type(ty: &TSType<'_>) -> Option<String> {
         let TSType::TSTypeReference(type_ref) = ty else {
             return None;
         };
-        let (root, _) = type_name_root(&type_ref.type_name)?;
-        if root != "ReturnType" {
+        let TSTypeName::IdentifierReference(root) = &type_ref.type_name else {
+            return None;
+        };
+        if root.name != "ReturnType" {
             return None;
         }
         let TSType::TSTypeQuery(query) = type_ref.type_arguments.as_deref()?.params.first()? else {
@@ -8187,9 +8146,12 @@ impl ModuleInfoExtractor {
             return Some(factory);
         }
         if let TSType::TSTypeReference(type_ref) = ty
-            && let Some((name, _)) = type_name_root(&type_ref.type_name)
+            && let TSTypeName::IdentifierReference(ident) = &type_ref.type_name
         {
-            return self.type_alias_store_factory.get(&name).cloned();
+            return self
+                .type_alias_store_factory
+                .get(ident.name.as_str())
+                .cloned();
         }
         None
     }

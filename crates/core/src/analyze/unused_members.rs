@@ -6,16 +6,17 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::discover::FileId;
-use crate::extract::{
-    ANGULAR_TPL_SENTINEL, ExportName, FACTORY_CALL_SENTINEL, FACTORY_FN_SENTINEL,
-    FLUENT_CHAIN_NEW_SENTINEL, FLUENT_CHAIN_SENTINEL, INSTANCE_EXPORT_SENTINEL, MemberInfo,
-    MemberKind, ModuleInfo, PLAYWRIGHT_FIXTURE_ALIAS_SENTINEL, PLAYWRIGHT_FIXTURE_DEF_SENTINEL,
-    PLAYWRIGHT_FIXTURE_TYPE_SENTINEL, PLAYWRIGHT_FIXTURE_USE_SENTINEL,
-};
+use crate::extract::{ExportName, MemberInfo, MemberKind, ModuleInfo};
 use crate::graph::{ModuleGraph, ReferenceKind};
 use crate::resolve::ResolvedModule;
 use crate::results::UnusedMember;
 use crate::suppress::{IssueKind, SuppressionContext};
+use fallow_types::extract::{
+    FactoryCallMemberAccessFact, FactoryFnMemberAccessFact, FluentChainMemberAccessFact,
+    FluentChainNewMemberAccessFact, InstanceExportBindingFact, PlaywrightFixtureAliasFact,
+    PlaywrightFixtureDefinitionFact, PlaywrightFixtureTypeFact, PlaywrightFixtureUseFact,
+    SemanticFactView, ordinary_whole_object_uses,
+};
 
 use super::predicates::{is_angular_lifecycle_method, is_react_lifecycle_method};
 use super::{LineOffsetsMap, byte_offset_to_line_col};
@@ -574,12 +575,10 @@ fn build_angular_template_refs(
     resolved_modules
         .iter()
         .filter_map(|module| {
-            let refs: Vec<&str> = module
-                .member_accesses
-                .iter()
-                .filter(|access| access.object == ANGULAR_TPL_SENTINEL)
-                .map(|access| access.member.as_str())
-                .collect();
+            let refs: Vec<&str> =
+                SemanticFactView::new(&module.semantic_facts, &module.member_accesses)
+                    .angular_template_member_names()
+                    .collect();
             if refs.is_empty() {
                 None
             } else {
@@ -595,27 +594,17 @@ fn build_angular_template_chain_accesses(
     resolved_modules
         .iter()
         .filter_map(|module| {
-            if !module
-                .member_accesses
-                .iter()
-                .any(|access| access.object == ANGULAR_TPL_SENTINEL)
+            if !SemanticFactView::new(&module.semantic_facts, &module.member_accesses)
+                .has_angular_template_members()
             {
                 return None;
             }
-            let chains: Vec<(&str, &str)> = module
-                .member_accesses
-                .iter()
-                .filter(|access| {
-                    access.object != ANGULAR_TPL_SENTINEL
-                        && access.object != "this"
-                        && !access.object.starts_with(INSTANCE_EXPORT_SENTINEL)
-                        && !access.object.starts_with(FACTORY_CALL_SENTINEL)
-                        && !access.object.starts_with(FACTORY_FN_SENTINEL)
-                        && !access.object.starts_with(FLUENT_CHAIN_SENTINEL)
-                        && !access.object.starts_with(FLUENT_CHAIN_NEW_SENTINEL)
-                })
-                .map(|access| (access.object.as_str(), access.member.as_str()))
-                .collect();
+            let chains: Vec<(&str, &str)> =
+                SemanticFactView::new(&module.semantic_facts, &module.member_accesses)
+                    .ordinary_member_accesses()
+                    .filter(|access| access.object != "this")
+                    .map(|access| (access.object.as_str(), access.member.as_str()))
+                    .collect();
             if chains.is_empty() {
                 None
             } else {
@@ -928,13 +917,6 @@ fn is_entry_point_public_class_export(
             || export_has_entry_point_re_export_reference(graph, export, public_api_entry_points))
 }
 
-fn parse_playwright_fixture_sentinel<'a>(
-    object: &'a str,
-    prefix: &str,
-) -> Option<(&'a str, &'a str)> {
-    object.strip_prefix(prefix)?.split_once(':')
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum PlaywrightTestKey {
     Export(ExportKey),
@@ -947,28 +929,71 @@ fn push_playwright_test_key(keys: &mut Vec<PlaywrightTestKey>, key: PlaywrightTe
     }
 }
 
-fn collect_playwright_local_test_names(resolved: &ResolvedModule) -> FxHashSet<&str> {
+fn collect_playwright_local_test_names(resolved: &ResolvedModule) -> FxHashSet<String> {
     let mut names = FxHashSet::default();
-    for access in &resolved.member_accesses {
-        if let Some((test_local_name, _)) = parse_playwright_fixture_sentinel(
-            access.object.as_str(),
-            PLAYWRIGHT_FIXTURE_DEF_SENTINEL,
-        ) {
-            names.insert(test_local_name);
-        }
-        if let Some((test_local_name, _)) = parse_playwright_fixture_sentinel(
-            access.object.as_str(),
-            PLAYWRIGHT_FIXTURE_ALIAS_SENTINEL,
-        ) {
-            names.insert(test_local_name);
-        }
+    let definition_facts = playwright_fixture_definitions(resolved);
+    for access in &definition_facts {
+        names.insert(access.test_name.clone());
+    }
+    let alias_facts = playwright_fixture_aliases(resolved);
+    for access in &alias_facts {
+        names.insert(access.test_name.clone());
     }
     names
 }
 
+fn playwright_fixture_uses(resolved: &ResolvedModule) -> Vec<PlaywrightFixtureUseFact> {
+    let view = SemanticFactView::new(&resolved.semantic_facts, &resolved.member_accesses);
+    view.playwright_fixture_uses()
+}
+
+fn playwright_fixture_definitions(
+    resolved: &ResolvedModule,
+) -> Vec<PlaywrightFixtureDefinitionFact> {
+    let view = SemanticFactView::new(&resolved.semantic_facts, &resolved.member_accesses);
+    view.playwright_fixture_definitions()
+}
+
+fn playwright_fixture_aliases(resolved: &ResolvedModule) -> Vec<PlaywrightFixtureAliasFact> {
+    let view = SemanticFactView::new(&resolved.semantic_facts, &resolved.member_accesses);
+    view.playwright_fixture_aliases()
+}
+
+fn playwright_fixture_types(resolved: &ResolvedModule) -> Vec<PlaywrightFixtureTypeFact> {
+    let view = SemanticFactView::new(&resolved.semantic_facts, &resolved.member_accesses);
+    view.playwright_fixture_types()
+}
+
+fn instance_export_bindings(resolved: &ResolvedModule) -> Vec<InstanceExportBindingFact> {
+    let view = SemanticFactView::new(&resolved.semantic_facts, &resolved.member_accesses);
+    view.instance_export_bindings()
+}
+
+fn factory_call_member_accesses(resolved: &ResolvedModule) -> Vec<FactoryCallMemberAccessFact> {
+    let view = SemanticFactView::new(&resolved.semantic_facts, &resolved.member_accesses);
+    view.factory_call_member_accesses()
+}
+
+fn factory_fn_member_accesses(resolved: &ResolvedModule) -> Vec<FactoryFnMemberAccessFact> {
+    let view = SemanticFactView::new(&resolved.semantic_facts, &resolved.member_accesses);
+    view.factory_fn_member_accesses()
+}
+
+fn fluent_chain_member_accesses(resolved: &ResolvedModule) -> Vec<FluentChainMemberAccessFact> {
+    let view = SemanticFactView::new(&resolved.semantic_facts, &resolved.member_accesses);
+    view.fluent_chain_member_accesses()
+}
+
+fn fluent_chain_new_member_accesses(
+    resolved: &ResolvedModule,
+) -> Vec<FluentChainNewMemberAccessFact> {
+    let view = SemanticFactView::new(&resolved.semantic_facts, &resolved.member_accesses);
+    view.fluent_chain_new_member_accesses()
+}
+
 fn playwright_test_keys_for_local(
     local_to_export_keys: &FxHashMap<&str, Vec<ExportKey>>,
-    local_playwright_test_names: &FxHashSet<&str>,
+    local_playwright_test_names: &FxHashSet<String>,
     file_id: FileId,
     local_name: &str,
 ) -> Vec<PlaywrightTestKey> {
@@ -1028,30 +1053,25 @@ fn build_playwright_fixture_targets(
         .collect()
 }
 
-/// Collect fixture-definition sentinels for one module, recording each fixture's
-/// POM-type export keys under its owning test key.
+/// Collect fixture-definition facts for one module, recording each fixture's
+/// POM type export keys under its owning test key.
 fn collect_playwright_fixture_def_targets(
     graph: &ModuleGraph,
     resolved: &ResolvedModule,
     local_to_export_keys: &FxHashMap<&str, Vec<ExportKey>>,
-    local_playwright_test_names: &FxHashSet<&str>,
+    local_playwright_test_names: &FxHashSet<String>,
     type_targets: &FxHashMap<ExportKey, FxHashMap<String, Vec<ExportKey>>>,
     targets_by_test: &mut FxHashMap<PlaywrightTestKey, FxHashMap<String, Vec<ExportKey>>>,
 ) {
-    for access in &resolved.member_accesses {
-        let Some((test_local_name, fixture_name)) = parse_playwright_fixture_sentinel(
-            access.object.as_str(),
-            PLAYWRIGHT_FIXTURE_DEF_SENTINEL,
-        ) else {
-            continue;
-        };
+    let definition_facts = playwright_fixture_definitions(resolved);
+    for access in definition_facts {
         let test_keys = playwright_test_keys_for_local(
             local_to_export_keys,
             local_playwright_test_names,
             resolved.file_id,
-            test_local_name,
+            access.test_name.as_str(),
         );
-        let Some(target_keys) = local_to_export_keys.get(access.member.as_str()) else {
+        let Some(target_keys) = local_to_export_keys.get(access.type_name.as_str()) else {
             continue;
         };
 
@@ -1062,7 +1082,7 @@ fn collect_playwright_fixture_def_targets(
                     graph,
                     type_targets,
                     fixture_targets,
-                    fixture_name,
+                    access.fixture_name.as_str(),
                     target_key,
                 );
             }
@@ -1070,33 +1090,28 @@ fn collect_playwright_fixture_def_targets(
     }
 }
 
-/// Collect wrapper-alias sentinels for one module, recording each alias's base
-/// test keys (origins expanded) under its owning test key.
+/// Collect wrapper-alias facts for one module, recording each alias's base test
+/// keys (origins expanded) under its owning test key.
 fn collect_playwright_fixture_aliases(
     graph: &ModuleGraph,
     resolved: &ResolvedModule,
     local_to_export_keys: &FxHashMap<&str, Vec<ExportKey>>,
-    local_playwright_test_names: &FxHashSet<&str>,
+    local_playwright_test_names: &FxHashSet<String>,
     aliases_by_test: &mut FxHashMap<PlaywrightTestKey, Vec<PlaywrightTestKey>>,
 ) {
-    for access in &resolved.member_accesses {
-        let Some((test_local_name, _)) = parse_playwright_fixture_sentinel(
-            access.object.as_str(),
-            PLAYWRIGHT_FIXTURE_ALIAS_SENTINEL,
-        ) else {
-            continue;
-        };
+    let alias_facts = playwright_fixture_aliases(resolved);
+    for access in alias_facts {
         let test_keys = playwright_test_keys_for_local(
             local_to_export_keys,
             local_playwright_test_names,
             resolved.file_id,
-            test_local_name,
+            access.test_name.as_str(),
         );
         let base_keys = playwright_test_keys_for_local(
             local_to_export_keys,
             local_playwright_test_names,
             resolved.file_id,
-            access.member.as_str(),
+            access.base_name.as_str(),
         );
 
         for test_key in test_keys {
@@ -1202,23 +1217,20 @@ fn build_playwright_fixture_type_targets(
 
     for resolved in resolved_modules {
         let local_to_export_keys = build_local_to_export_keys(resolved);
-        for access in &resolved.member_accesses {
-            let Some((alias_name, fixture_name)) = parse_playwright_fixture_sentinel(
-                access.object.as_str(),
-                PLAYWRIGHT_FIXTURE_TYPE_SENTINEL,
-            ) else {
+        let type_facts = playwright_fixture_types(resolved);
+        for access in type_facts {
+            let Some(alias_keys) = local_to_export_keys.get(access.alias_name.as_str()) else {
                 continue;
             };
-            let Some(alias_keys) = local_to_export_keys.get(alias_name) else {
-                continue;
-            };
-            let Some(target_keys) = local_to_export_keys.get(access.member.as_str()) else {
+            let Some(target_keys) = local_to_export_keys.get(access.type_name.as_str()) else {
                 continue;
             };
 
             for alias_key in alias_keys {
                 let alias_targets = targets_by_alias.entry(alias_key.clone()).or_default();
-                let fixture_targets = alias_targets.entry(fixture_name.to_string()).or_default();
+                let fixture_targets = alias_targets
+                    .entry(access.fixture_name.clone())
+                    .or_default();
                 for target_key in target_keys {
                     for key in export_key_with_origins(graph, target_key) {
                         push_export_key(fixture_targets, key);
@@ -1243,14 +1255,9 @@ fn propagate_playwright_fixture_accesses(
 
     for resolved in resolved_modules {
         let local_to_export_keys = build_local_to_export_keys(resolved);
-        for access in &resolved.member_accesses {
-            let Some((test_local_name, fixture_name)) = parse_playwright_fixture_sentinel(
-                access.object.as_str(),
-                PLAYWRIGHT_FIXTURE_USE_SENTINEL,
-            ) else {
-                continue;
-            };
-            let Some(test_keys) = local_to_export_keys.get(test_local_name) else {
+        let use_facts = playwright_fixture_uses(resolved);
+        for access in use_facts {
+            let Some(test_keys) = local_to_export_keys.get(access.test_name.as_str()) else {
                 continue;
             };
 
@@ -1258,7 +1265,7 @@ fn propagate_playwright_fixture_accesses(
                 let Some(fixture_targets) = targets_by_test.get(test_key) else {
                     continue;
                 };
-                let Some(target_keys) = fixture_targets.get(fixture_name) else {
+                let Some(target_keys) = fixture_targets.get(access.fixture_name.as_str()) else {
                     continue;
                 };
                 for target_key in target_keys {
@@ -1280,16 +1287,12 @@ fn build_instance_export_targets(
 
     for resolved in resolved_modules {
         let local_to_export_keys = build_local_to_export_keys(resolved);
-        for access in &resolved.member_accesses {
-            let Some(instance_export_name) = access.object.strip_prefix(INSTANCE_EXPORT_SENTINEL)
-            else {
-                continue;
-            };
-            let Some(target_keys) = local_to_export_keys.get(access.member.as_str()) else {
+        for access in instance_export_bindings(resolved) {
+            let Some(target_keys) = local_to_export_keys.get(access.target_name.as_str()) else {
                 continue;
             };
 
-            let instance_key = ExportKey::new(resolved.file_id, instance_export_name);
+            let instance_key = ExportKey::new(resolved.file_id, access.export_name.clone());
             let instance_targets = targets_by_instance.entry(instance_key).or_default();
             for target_key in target_keys {
                 for key in export_key_with_origins(graph, target_key) {
@@ -1468,36 +1471,7 @@ fn propagate_accesses_through_typed_instance_bindings(
     }
 }
 
-/// Whether an access-object name is a synthetic sentinel (instance / factory /
-/// fluent-chain / Playwright-fixture / Angular-template), which the typed-instance
-/// chain resolver must skip because it is handled by a dedicated propagation pass.
-fn is_typed_instance_member_sentinel(object: &str) -> bool {
-    object.starts_with(INSTANCE_EXPORT_SENTINEL)
-        || object.starts_with(FACTORY_CALL_SENTINEL)
-        || object.starts_with(FACTORY_FN_SENTINEL)
-        || object.starts_with(FLUENT_CHAIN_SENTINEL)
-        || object.starts_with(FLUENT_CHAIN_NEW_SENTINEL)
-        || object.starts_with(PLAYWRIGHT_FIXTURE_ALIAS_SENTINEL)
-        || object.starts_with(PLAYWRIGHT_FIXTURE_DEF_SENTINEL)
-        || object.starts_with(PLAYWRIGHT_FIXTURE_TYPE_SENTINEL)
-        || object.starts_with(PLAYWRIGHT_FIXTURE_USE_SENTINEL)
-        || object == ANGULAR_TPL_SENTINEL
-}
-
-/// Whether a whole-object-use name is a synthetic sentinel the typed-instance
-/// chain resolver must skip (the fluent-chain sentinels never appear here).
-fn is_typed_instance_whole_object_sentinel(object: &str) -> bool {
-    object.starts_with(INSTANCE_EXPORT_SENTINEL)
-        || object.starts_with(FACTORY_CALL_SENTINEL)
-        || object.starts_with(FACTORY_FN_SENTINEL)
-        || object.starts_with(PLAYWRIGHT_FIXTURE_ALIAS_SENTINEL)
-        || object.starts_with(PLAYWRIGHT_FIXTURE_DEF_SENTINEL)
-        || object.starts_with(PLAYWRIGHT_FIXTURE_TYPE_SENTINEL)
-        || object.starts_with(PLAYWRIGHT_FIXTURE_USE_SENTINEL)
-        || object == ANGULAR_TPL_SENTINEL
-}
-
-/// Credit each non-sentinel member access in one module onto the typed-instance
+/// Credit each ordinary member access in one module onto the typed-instance
 /// chain's target export keys.
 fn propagate_typed_member_accesses(
     graph: &ModuleGraph,
@@ -1506,10 +1480,9 @@ fn propagate_typed_member_accesses(
     local_to_export_keys: &FxHashMap<&str, Vec<ExportKey>>,
     accessed_members: &mut FxHashMap<ExportKey, FxHashSet<String>>,
 ) {
-    for access in &resolved.member_accesses {
-        if is_typed_instance_member_sentinel(&access.object) {
-            continue;
-        }
+    for access in SemanticFactView::new(&resolved.semantic_facts, &resolved.member_accesses)
+        .ordinary_member_accesses()
+    {
         for target_key in resolve_typed_instance_chain_targets(
             graph,
             typed_instance_targets,
@@ -1524,8 +1497,8 @@ fn propagate_typed_member_accesses(
     }
 }
 
-/// Mark each non-sentinel whole-object use in one module as whole-object-used on
-/// the typed-instance chain's target export keys.
+/// Mark each ordinary whole-object use in one module as whole-object-used on the
+/// typed-instance chain's target export keys.
 fn propagate_typed_whole_object_uses(
     graph: &ModuleGraph,
     resolved: &ResolvedModule,
@@ -1533,10 +1506,7 @@ fn propagate_typed_whole_object_uses(
     local_to_export_keys: &FxHashMap<&str, Vec<ExportKey>>,
     whole_object_used_exports: &mut FxHashSet<ExportKey>,
 ) {
-    for object_name in &resolved.whole_object_uses {
-        if is_typed_instance_whole_object_sentinel(object_name) {
-            continue;
-        }
+    for object_name in ordinary_whole_object_uses(&resolved.whole_object_uses) {
         for target_key in resolve_typed_instance_chain_targets(
             graph,
             typed_instance_targets,
@@ -1546,14 +1516,6 @@ fn propagate_typed_whole_object_uses(
             whole_object_used_exports.insert(target_key);
         }
     }
-}
-
-/// Decode a `FACTORY_CALL_SENTINEL{callee_object}:{callee_method}` access
-/// object into its components.
-fn parse_factory_call_sentinel(object: &str) -> Option<(&str, &str)> {
-    object
-        .strip_prefix(FACTORY_CALL_SENTINEL)
-        .and_then(|payload| payload.split_once(':'))
 }
 
 /// Credit member accesses produced by static-factory call bindings on the
@@ -1570,13 +1532,8 @@ fn propagate_factory_call_accesses(
 
     for resolved in resolved_modules {
         let local_to_export_keys = build_local_to_export_keys(resolved);
-        for access in &resolved.member_accesses {
-            let Some((callee_object, callee_method)) =
-                parse_factory_call_sentinel(access.object.as_str())
-            else {
-                continue;
-            };
-            let Some(seed_keys) = local_to_export_keys.get(callee_object) else {
+        for access in factory_call_member_accesses(resolved) {
+            let Some(seed_keys) = local_to_export_keys.get(access.callee_object.as_str()) else {
                 continue;
             };
             for seed_key in seed_keys {
@@ -1591,7 +1548,7 @@ fn propagate_factory_call_accesses(
                             && export.members.iter().any(|member| {
                                 member.is_instance_returning_static
                                     && member.kind == MemberKind::ClassMethod
-                                    && member.name == callee_method
+                                    && member.name == access.callee_method
                             })
                     });
                     if !matches_factory {
@@ -1605,11 +1562,6 @@ fn propagate_factory_call_accesses(
             }
         }
     }
-}
-
-/// Decode a `FACTORY_FN_SENTINEL{callee}` access object into the bare callee.
-fn parse_factory_fn_sentinel(object: &str) -> Option<&str> {
-    object.strip_prefix(FACTORY_FN_SENTINEL)
 }
 
 /// Whether an export named `name` in `module` is a class carrying members, the
@@ -1674,7 +1626,7 @@ fn credit_factory_return_class_member<'a>(
 /// returns. Each link in the resolution chain is also an over-credit guard, and
 /// a wrong credit is a silent false-negative, so every link must hold:
 ///
-///   1. the sentinel callee resolves through the consumer's imports/exports to an
+///   1. the fact's callee resolves through the consumer's imports/exports to an
 ///      export key (`local_to_export_keys`);
 ///   2. that key walks (re-export aware) to an origin module that actually
 ///      declares an `exported_factory_returns` entry for the export, i.e. an
@@ -1706,11 +1658,8 @@ fn propagate_factory_fn_accesses(
 
     for resolved in resolved_modules {
         let local_to_export_keys = build_local_to_export_keys(resolved);
-        for access in &resolved.member_accesses {
-            let Some(callee) = parse_factory_fn_sentinel(access.object.as_str()) else {
-                continue;
-            };
-            let Some(seed_keys) = local_to_export_keys.get(callee) else {
+        for access in factory_fn_member_accesses(resolved) {
+            let Some(seed_keys) = local_to_export_keys.get(access.callee_name.as_str()) else {
                 continue;
             };
             for seed_key in seed_keys {
@@ -1748,20 +1697,6 @@ fn propagate_factory_fn_accesses(
             }
         }
     }
-}
-
-/// Decode a `FLUENT_CHAIN_SENTINEL{root}:{root_method}:{chain}` access object
-/// into its components.
-fn parse_fluent_chain_sentinel(object: &str) -> Option<(&str, &str, Vec<&str>)> {
-    let payload = object.strip_prefix(FLUENT_CHAIN_SENTINEL)?;
-    let (root, rest) = payload.split_once(':')?;
-    let (root_method, chain_str) = rest.split_once(':')?;
-    let chain: Vec<&str> = if chain_str.is_empty() {
-        Vec::new()
-    } else {
-        chain_str.split(',').collect()
-    };
-    Some((root, root_method, chain))
 }
 
 /// Validate a fluent chain against a single class export.
@@ -1804,13 +1739,8 @@ fn propagate_fluent_chain_accesses(
 
     for resolved in resolved_modules {
         let local_to_export_keys = build_local_to_export_keys(resolved);
-        for access in &resolved.member_accesses {
-            let Some((root_local, root_method, chain)) =
-                parse_fluent_chain_sentinel(access.object.as_str())
-            else {
-                continue;
-            };
-            let Some(seed_keys) = local_to_export_keys.get(root_local) else {
+        for access in fluent_chain_member_accesses(resolved) {
+            let Some(seed_keys) = local_to_export_keys.get(access.root_object.as_str()) else {
                 continue;
             };
             for seed_key in seed_keys {
@@ -1820,8 +1750,14 @@ fn propagate_fluent_chain_accesses(
                     let Some(origin_module) = module_by_id.get(&origin.file_id) else {
                         continue;
                     };
+                    let chain = access.chain.iter().map(String::as_str).collect::<Vec<_>>();
                     let chain_valid = origin_module.exports.iter().any(|export| {
-                        export_validates_fluent_chain(export, &origin, root_method, &chain)
+                        export_validates_fluent_chain(
+                            export,
+                            &origin,
+                            access.root_method.as_str(),
+                            &chain,
+                        )
                     });
                     if !chain_valid {
                         continue;
@@ -1834,17 +1770,6 @@ fn propagate_fluent_chain_accesses(
             }
         }
     }
-}
-
-/// Decode a `FLUENT_CHAIN_NEW_SENTINEL{class}:{chain}` access object into its
-/// components.
-fn parse_fluent_chain_new_sentinel(object: &str) -> Option<(&str, Vec<&str>)> {
-    let payload = object.strip_prefix(FLUENT_CHAIN_NEW_SENTINEL)?;
-    let (class, chain_str) = payload.split_once(':')?;
-    if chain_str.is_empty() {
-        return None;
-    }
-    Some((class, chain_str.split(',').collect()))
 }
 
 /// Validate a constructor-rooted fluent chain against a single class export.
@@ -1878,13 +1803,8 @@ fn propagate_fluent_chain_new_accesses(
 
     for resolved in resolved_modules {
         let local_to_export_keys = build_local_to_export_keys(resolved);
-        for access in &resolved.member_accesses {
-            let Some((class_local, chain)) =
-                parse_fluent_chain_new_sentinel(access.object.as_str())
-            else {
-                continue;
-            };
-            let Some(seed_keys) = local_to_export_keys.get(class_local) else {
+        for access in fluent_chain_new_member_accesses(resolved) {
+            let Some(seed_keys) = local_to_export_keys.get(access.class_name.as_str()) else {
                 continue;
             };
             for seed_key in seed_keys {
@@ -1894,6 +1814,7 @@ fn propagate_fluent_chain_new_accesses(
                     let Some(origin_module) = module_by_id.get(&origin.file_id) else {
                         continue;
                     };
+                    let chain = access.chain.iter().map(String::as_str).collect::<Vec<_>>();
                     let chain_valid = origin_module
                         .exports
                         .iter()
@@ -2068,7 +1989,7 @@ fn propagate_member_accesses_through_inheritance(
 
 #[deprecated(
     since = "2.76.0",
-    note = "fallow_core is internal; use fallow_cli::programmatic::detect_dead_code instead. NOTE: replacement returns serde_json::Value, not typed AnalysisResults. See docs/fallow-core-migration.md and ADR-008."
+    note = "fallow_core is internal; use fallow_api::detect_dead_code instead. NOTE: replacement returns serde_json::Value, not typed AnalysisResults. See docs/fallow-core-migration.md and ADR-008."
 )]
 #[allow(dead_code, reason = "kept for the deprecated fallow_core helper API")]
 #[expect(
@@ -2649,15 +2570,9 @@ fn collect_direct_member_accesses(resolved_modules: &[ResolvedModule]) -> Member
 
     for resolved in resolved_modules {
         let local_to_export_keys = build_local_to_export_keys(resolved);
-        for access in &resolved.member_accesses {
-            if access.object.starts_with(INSTANCE_EXPORT_SENTINEL)
-                || access.object.starts_with(FACTORY_CALL_SENTINEL)
-                || access.object.starts_with(FACTORY_FN_SENTINEL)
-                || access.object.starts_with(FLUENT_CHAIN_SENTINEL)
-                || access.object.starts_with(FLUENT_CHAIN_NEW_SENTINEL)
-            {
-                continue;
-            }
+        for access in SemanticFactView::new(&resolved.semantic_facts, &resolved.member_accesses)
+            .ordinary_member_accesses()
+        {
             if access.object == "this" {
                 self_accessed_members
                     .entry(resolved.file_id)
@@ -2704,7 +2619,12 @@ mod tests {
     use crate::graph::{ExportSymbol, ModuleGraph, SymbolReference};
     use crate::resolve::{ResolveResult, ResolvedImport, ResolvedModule};
     use fallow_config::{ScopedUsedClassMemberRule, UsedClassMemberRule};
-    use fallow_types::extract::ClassHeritageInfo;
+    use fallow_types::extract::{
+        ClassHeritageInfo, FactoryCallMemberAccessFact, FluentChainMemberAccessFact,
+        FluentChainNewMemberAccessFact, InstanceExportBindingFact, PlaywrightFixtureAliasFact,
+        PlaywrightFixtureDefinitionFact, PlaywrightFixtureTypeFact, PlaywrightFixtureUseFact,
+        SemanticFact,
+    };
     use oxc_span::Span;
     use std::path::PathBuf;
 
@@ -2756,6 +2676,40 @@ mod tests {
         }
     }
 
+    fn make_factory_member(name: &str) -> MemberInfo {
+        MemberInfo {
+            is_instance_returning_static: true,
+            ..make_member(name, MemberKind::ClassMethod)
+        }
+    }
+
+    fn make_self_member(name: &str) -> MemberInfo {
+        MemberInfo {
+            is_self_returning: true,
+            ..make_member(name, MemberKind::ClassMethod)
+        }
+    }
+
+    fn make_resolved_import(
+        source: &str,
+        imported: &str,
+        local: &str,
+        target: u32,
+    ) -> ResolvedImport {
+        ResolvedImport {
+            info: ImportInfo {
+                source: source.to_string(),
+                imported_name: ImportedName::Named(imported.to_string()),
+                local_name: local.to_string(),
+                is_type_only: false,
+                from_style: false,
+                span: Span::new(0, 10),
+                source_span: Span::default(),
+            },
+            target: ResolveResult::InternalModule(FileId(target)),
+        }
+    }
+
     fn make_export_with_members(
         name: &str,
         members: Vec<MemberInfo>,
@@ -2782,6 +2736,494 @@ mod tests {
         }
     }
 
+    #[test]
+    fn typed_playwright_fixture_use_fact_credits_fixture_member() {
+        let mut graph = build_graph(&[
+            ("/src/spec.ts", true),
+            ("/src/fixtures.ts", false),
+            ("/src/admin-page.ts", false),
+        ]);
+        graph.modules[1].set_reachable(true);
+        graph.modules[1].exports = vec![make_export_with_members("test", vec![], Some(0))];
+        graph.modules[2].set_reachable(true);
+        graph.modules[2].exports = vec![make_export_with_members(
+            "AdminPage",
+            vec![make_member("assertGreeting", MemberKind::ClassMethod)],
+            Some(0),
+        )];
+
+        let resolved_modules = vec![ResolvedModule {
+            file_id: FileId(0),
+            path: PathBuf::from("/src/spec.ts"),
+            resolved_imports: vec![
+                ResolvedImport {
+                    info: ImportInfo {
+                        source: "./fixtures".to_string(),
+                        imported_name: ImportedName::Named("test".to_string()),
+                        local_name: "test".to_string(),
+                        is_type_only: false,
+                        from_style: false,
+                        span: Span::new(0, 10),
+                        source_span: Span::default(),
+                    },
+                    target: ResolveResult::InternalModule(FileId(1)),
+                },
+                ResolvedImport {
+                    info: ImportInfo {
+                        source: "./admin-page".to_string(),
+                        imported_name: ImportedName::Named("AdminPage".to_string()),
+                        local_name: "AdminPage".to_string(),
+                        is_type_only: false,
+                        from_style: false,
+                        span: Span::new(11, 20),
+                        source_span: Span::default(),
+                    },
+                    target: ResolveResult::InternalModule(FileId(2)),
+                },
+            ],
+            semantic_facts: vec![
+                SemanticFact::PlaywrightFixtureDefinition(PlaywrightFixtureDefinitionFact {
+                    test_name: "test".to_string(),
+                    fixture_name: "adminPage".to_string(),
+                    type_name: "AdminPage".to_string(),
+                }),
+                SemanticFact::PlaywrightFixtureUse(PlaywrightFixtureUseFact {
+                    test_name: "test".to_string(),
+                    fixture_name: "adminPage".to_string(),
+                    member: "assertGreeting".to_string(),
+                }),
+            ]
+            .into(),
+            ..Default::default()
+        }];
+
+        let mut accessed_members = FxHashMap::default();
+        propagate_playwright_fixture_accesses(&graph, &resolved_modules, &mut accessed_members);
+
+        let credited = accessed_members
+            .get(&ExportKey::new(FileId(2), "AdminPage"))
+            .expect("fixture target class should be credited");
+        assert!(credited.contains("assertGreeting"));
+    }
+
+    #[test]
+    fn typed_playwright_fixture_alias_fact_expands_fixture_targets() {
+        let mut graph = build_graph(&[
+            ("/src/spec.ts", true),
+            ("/src/fixtures.ts", false),
+            ("/src/wrapped-fixtures.ts", false),
+            ("/src/admin-page.ts", false),
+        ]);
+        graph.modules[1].set_reachable(true);
+        graph.modules[1].exports = vec![make_export_with_members("testPrimary", vec![], Some(2))];
+        graph.modules[2].set_reachable(true);
+        graph.modules[2].exports = vec![make_export_with_members("mergedTest", vec![], Some(0))];
+        graph.modules[3].set_reachable(true);
+        graph.modules[3].exports = vec![make_export_with_members(
+            "AdminPage",
+            vec![make_member("assertGreeting", MemberKind::ClassMethod)],
+            Some(1),
+        )];
+
+        let resolved_modules = vec![
+            ResolvedModule {
+                file_id: FileId(0),
+                path: PathBuf::from("/src/spec.ts"),
+                resolved_imports: vec![make_resolved_import(
+                    "./wrapped-fixtures",
+                    "mergedTest",
+                    "mergedTest",
+                    2,
+                )],
+                semantic_facts: vec![SemanticFact::PlaywrightFixtureUse(
+                    PlaywrightFixtureUseFact {
+                        test_name: "mergedTest".to_string(),
+                        fixture_name: "adminPage".to_string(),
+                        member: "assertGreeting".to_string(),
+                    },
+                )]
+                .into(),
+                ..Default::default()
+            },
+            ResolvedModule {
+                file_id: FileId(1),
+                path: PathBuf::from("/src/fixtures.ts"),
+                resolved_imports: vec![make_resolved_import(
+                    "./admin-page",
+                    "AdminPage",
+                    "AdminPage",
+                    3,
+                )],
+                exports: vec![make_export_info("testPrimary", None)],
+                semantic_facts: vec![SemanticFact::PlaywrightFixtureDefinition(
+                    PlaywrightFixtureDefinitionFact {
+                        test_name: "testPrimary".to_string(),
+                        fixture_name: "adminPage".to_string(),
+                        type_name: "AdminPage".to_string(),
+                    },
+                )]
+                .into(),
+                ..Default::default()
+            },
+            ResolvedModule {
+                file_id: FileId(2),
+                path: PathBuf::from("/src/wrapped-fixtures.ts"),
+                resolved_imports: vec![make_resolved_import(
+                    "./fixtures",
+                    "testPrimary",
+                    "testPrimary",
+                    1,
+                )],
+                exports: vec![make_export_info("mergedTest", None)],
+                semantic_facts: vec![SemanticFact::PlaywrightFixtureAlias(
+                    PlaywrightFixtureAliasFact {
+                        test_name: "mergedTest".to_string(),
+                        base_name: "testPrimary".to_string(),
+                    },
+                )]
+                .into(),
+                ..Default::default()
+            },
+        ];
+
+        let mut accessed_members = FxHashMap::default();
+        propagate_playwright_fixture_accesses(&graph, &resolved_modules, &mut accessed_members);
+
+        let credited = accessed_members
+            .get(&ExportKey::new(FileId(3), "AdminPage"))
+            .expect("aliased fixture target class should be credited");
+        assert!(credited.contains("assertGreeting"));
+    }
+
+    #[test]
+    fn typed_playwright_fixture_type_fact_expands_nested_fixture_targets() {
+        let mut graph = build_graph(&[
+            ("/src/spec.ts", true),
+            ("/src/fixtures.ts", false),
+            ("/src/pages.ts", false),
+            ("/src/admin-page.ts", false),
+        ]);
+        graph.modules[1].set_reachable(true);
+        graph.modules[1].exports = vec![make_export_with_members("test", vec![], Some(0))];
+        graph.modules[2].set_reachable(true);
+        graph.modules[2].exports = vec![make_export_with_members("Pages", vec![], Some(0))];
+        graph.modules[3].set_reachable(true);
+        graph.modules[3].exports = vec![make_export_with_members(
+            "AdminPage",
+            vec![make_member("assertGreeting", MemberKind::ClassMethod)],
+            Some(2),
+        )];
+
+        let resolved_modules = vec![
+            ResolvedModule {
+                file_id: FileId(0),
+                path: PathBuf::from("/src/spec.ts"),
+                resolved_imports: vec![
+                    make_resolved_import("./fixtures", "test", "test", 1),
+                    make_resolved_import("./pages", "Pages", "Pages", 2),
+                ],
+                semantic_facts: vec![
+                    SemanticFact::PlaywrightFixtureDefinition(PlaywrightFixtureDefinitionFact {
+                        test_name: "test".to_string(),
+                        fixture_name: "pages".to_string(),
+                        type_name: "Pages".to_string(),
+                    }),
+                    SemanticFact::PlaywrightFixtureUse(PlaywrightFixtureUseFact {
+                        test_name: "test".to_string(),
+                        fixture_name: "pages.adminPage".to_string(),
+                        member: "assertGreeting".to_string(),
+                    }),
+                ]
+                .into(),
+                ..Default::default()
+            },
+            ResolvedModule {
+                file_id: FileId(2),
+                path: PathBuf::from("/src/pages.ts"),
+                resolved_imports: vec![make_resolved_import(
+                    "./admin-page",
+                    "AdminPage",
+                    "AdminPage",
+                    3,
+                )],
+                exports: vec![make_export_info("Pages", None)],
+                semantic_facts: vec![SemanticFact::PlaywrightFixtureType(
+                    PlaywrightFixtureTypeFact {
+                        alias_name: "Pages".to_string(),
+                        fixture_name: "adminPage".to_string(),
+                        type_name: "AdminPage".to_string(),
+                    },
+                )]
+                .into(),
+                ..Default::default()
+            },
+        ];
+
+        let mut accessed_members = FxHashMap::default();
+        propagate_playwright_fixture_accesses(&graph, &resolved_modules, &mut accessed_members);
+
+        let credited = accessed_members
+            .get(&ExportKey::new(FileId(3), "AdminPage"))
+            .expect("nested fixture target class should be credited");
+        assert!(credited.contains("assertGreeting"));
+    }
+
+    #[test]
+    fn typed_instance_export_binding_fact_builds_target_map() {
+        let mut graph = build_graph(&[
+            ("/src/entry.ts", true),
+            ("/src/service.ts", false),
+            ("/src/stale-service.ts", false),
+        ]);
+        graph.modules[0].exports = vec![make_export_with_members("service", vec![], Some(0))];
+        graph.modules[1].set_reachable(true);
+        graph.modules[1].exports = vec![make_export_with_members("Service", vec![], Some(0))];
+        graph.modules[2].set_reachable(true);
+        graph.modules[2].exports = vec![make_export_with_members("StaleService", vec![], Some(0))];
+
+        let resolved_modules = vec![ResolvedModule {
+            file_id: FileId(0),
+            path: PathBuf::from("/src/entry.ts"),
+            resolved_imports: vec![
+                make_resolved_import("./service", "Service", "Service", 1),
+                make_resolved_import("./stale-service", "StaleService", "StaleService", 2),
+            ],
+            exports: vec![make_export_info("service", None)],
+            semantic_facts: vec![SemanticFact::InstanceExportBinding(
+                InstanceExportBindingFact {
+                    export_name: "service".to_string(),
+                    target_name: "Service".to_string(),
+                },
+            )]
+            .into(),
+            ..Default::default()
+        }];
+
+        let instance_targets = build_instance_export_targets(&graph, &resolved_modules);
+
+        assert_eq!(
+            instance_targets.get(&ExportKey::new(FileId(0), "service")),
+            Some(&vec![ExportKey::new(FileId(1), "Service")])
+        );
+    }
+
+    #[test]
+    fn typed_factory_call_fact_credits_class_member() {
+        let mut graph = build_graph(&[("/src/entry.ts", true), ("/src/my-class.ts", false)]);
+        graph.modules[1].set_reachable(true);
+        graph.modules[1].exports = vec![make_export_with_members(
+            "MyClass",
+            vec![
+                make_factory_member("getInstance"),
+                make_member("getData", MemberKind::ClassMethod),
+            ],
+            Some(0),
+        )];
+
+        let class_export = ExportInfo {
+            name: ExportName::Named("MyClass".to_string()),
+            local_name: Some("MyClass".to_string()),
+            is_type_only: false,
+            is_side_effect_used: false,
+            visibility: VisibilityTag::None,
+            expected_unused_reason: None,
+            span: Span::new(0, 10),
+            members: vec![
+                make_factory_member("getInstance"),
+                make_member("getData", MemberKind::ClassMethod),
+            ],
+            super_class: None,
+        };
+        let resolved_modules = vec![
+            ResolvedModule {
+                file_id: FileId(0),
+                path: PathBuf::from("/src/entry.ts"),
+                resolved_imports: vec![ResolvedImport {
+                    info: ImportInfo {
+                        source: "./my-class".to_string(),
+                        imported_name: ImportedName::Named("MyClass".to_string()),
+                        local_name: "MyClass".to_string(),
+                        is_type_only: false,
+                        from_style: false,
+                        span: Span::new(0, 10),
+                        source_span: Span::default(),
+                    },
+                    target: ResolveResult::InternalModule(FileId(1)),
+                }],
+                semantic_facts: vec![SemanticFact::FactoryCallMemberAccess(
+                    FactoryCallMemberAccessFact {
+                        callee_object: "MyClass".to_string(),
+                        callee_method: "getInstance".to_string(),
+                        member: "getData".to_string(),
+                    },
+                )]
+                .into(),
+                ..Default::default()
+            },
+            ResolvedModule {
+                file_id: FileId(1),
+                path: PathBuf::from("/src/my-class.ts"),
+                exports: vec![class_export],
+                ..Default::default()
+            },
+        ];
+
+        let mut accessed_members = FxHashMap::default();
+        propagate_factory_call_accesses(&graph, &resolved_modules, &mut accessed_members);
+
+        let credited = accessed_members
+            .get(&ExportKey::new(FileId(1), "MyClass"))
+            .expect("factory target class should be credited");
+        assert!(credited.contains("getData"));
+    }
+
+    #[test]
+    fn typed_fluent_chain_fact_credits_class_member() {
+        let mut graph = build_graph(&[("/src/entry.ts", true), ("/src/event-builder.ts", false)]);
+        graph.modules[1].set_reachable(true);
+        graph.modules[1].exports = vec![make_export_with_members(
+            "EventBuilder",
+            vec![
+                make_factory_member("create"),
+                make_self_member("setProcessId"),
+                make_self_member("setSubject"),
+                make_member("build", MemberKind::ClassMethod),
+            ],
+            Some(0),
+        )];
+
+        let class_export = ExportInfo {
+            name: ExportName::Named("EventBuilder".to_string()),
+            local_name: Some("EventBuilder".to_string()),
+            is_type_only: false,
+            is_side_effect_used: false,
+            visibility: VisibilityTag::None,
+            expected_unused_reason: None,
+            span: Span::new(0, 10),
+            members: vec![
+                make_factory_member("create"),
+                make_self_member("setProcessId"),
+                make_self_member("setSubject"),
+                make_member("build", MemberKind::ClassMethod),
+            ],
+            super_class: None,
+        };
+        let resolved_modules = vec![
+            ResolvedModule {
+                file_id: FileId(0),
+                path: PathBuf::from("/src/entry.ts"),
+                resolved_imports: vec![ResolvedImport {
+                    info: ImportInfo {
+                        source: "./event-builder".to_string(),
+                        imported_name: ImportedName::Named("EventBuilder".to_string()),
+                        local_name: "EventBuilder".to_string(),
+                        is_type_only: false,
+                        from_style: false,
+                        span: Span::new(0, 10),
+                        source_span: Span::default(),
+                    },
+                    target: ResolveResult::InternalModule(FileId(1)),
+                }],
+                semantic_facts: vec![SemanticFact::FluentChainMemberAccess(
+                    FluentChainMemberAccessFact {
+                        root_object: "EventBuilder".to_string(),
+                        root_method: "create".to_string(),
+                        chain: vec!["setProcessId".to_string(), "setSubject".to_string()],
+                        member: "build".to_string(),
+                    },
+                )]
+                .into(),
+                ..Default::default()
+            },
+            ResolvedModule {
+                file_id: FileId(1),
+                path: PathBuf::from("/src/event-builder.ts"),
+                exports: vec![class_export],
+                ..Default::default()
+            },
+        ];
+
+        let mut accessed_members = FxHashMap::default();
+        propagate_fluent_chain_accesses(&graph, &resolved_modules, &mut accessed_members);
+
+        let credited = accessed_members
+            .get(&ExportKey::new(FileId(1), "EventBuilder"))
+            .expect("fluent target class should be credited");
+        assert!(credited.contains("build"));
+    }
+
+    #[test]
+    fn typed_fluent_chain_new_fact_credits_class_member() {
+        let mut graph = build_graph(&[("/src/entry.ts", true), ("/src/option-builder.ts", false)]);
+        graph.modules[1].set_reachable(true);
+        graph.modules[1].exports = vec![make_export_with_members(
+            "OptionBuilder",
+            vec![
+                make_self_member("addDefault"),
+                make_self_member("addFromCli"),
+                make_member("build", MemberKind::ClassMethod),
+            ],
+            Some(0),
+        )];
+
+        let class_export = ExportInfo {
+            name: ExportName::Named("OptionBuilder".to_string()),
+            local_name: Some("OptionBuilder".to_string()),
+            is_type_only: false,
+            is_side_effect_used: false,
+            visibility: VisibilityTag::None,
+            expected_unused_reason: None,
+            span: Span::new(0, 10),
+            members: vec![
+                make_self_member("addDefault"),
+                make_self_member("addFromCli"),
+                make_member("build", MemberKind::ClassMethod),
+            ],
+            super_class: None,
+        };
+        let resolved_modules = vec![
+            ResolvedModule {
+                file_id: FileId(0),
+                path: PathBuf::from("/src/entry.ts"),
+                resolved_imports: vec![ResolvedImport {
+                    info: ImportInfo {
+                        source: "./option-builder".to_string(),
+                        imported_name: ImportedName::Named("OptionBuilder".to_string()),
+                        local_name: "OptionBuilder".to_string(),
+                        is_type_only: false,
+                        from_style: false,
+                        span: Span::new(0, 10),
+                        source_span: Span::default(),
+                    },
+                    target: ResolveResult::InternalModule(FileId(1)),
+                }],
+                semantic_facts: vec![SemanticFact::FluentChainNewMemberAccess(
+                    FluentChainNewMemberAccessFact {
+                        class_name: "OptionBuilder".to_string(),
+                        chain: vec!["addDefault".to_string(), "addFromCli".to_string()],
+                        member: "build".to_string(),
+                    },
+                )]
+                .into(),
+                ..Default::default()
+            },
+            ResolvedModule {
+                file_id: FileId(1),
+                path: PathBuf::from("/src/option-builder.ts"),
+                exports: vec![class_export],
+                ..Default::default()
+            },
+        ];
+
+        let mut accessed_members = FxHashMap::default();
+        propagate_fluent_chain_new_accesses(&graph, &resolved_modules, &mut accessed_members);
+
+        let credited = accessed_members
+            .get(&ExportKey::new(FileId(1), "OptionBuilder"))
+            .expect("fluent-new target class should be credited");
+        assert!(credited.contains("build"));
+    }
+
     fn make_module_with_class_heritage(
         file_id: u32,
         export_name: &str,
@@ -2796,9 +3238,10 @@ mod tests {
             dynamic_imports: vec![],
             dynamic_import_patterns: vec![],
             require_calls: vec![],
-            package_path_references: vec![],
+            package_path_references: Box::default(),
             member_accesses: vec![],
-            whole_object_uses: vec![],
+            semantic_facts: Box::default(),
+            whole_object_uses: Box::default(),
             has_cjs_exports: false,
             has_angular_component_template_url: false,
             content_hash: 0,
@@ -3262,7 +3705,7 @@ mod tests {
                 },
                 target: ResolveResult::InternalModule(FileId(1)),
             }],
-            whole_object_uses: vec!["Status".to_string()],
+            whole_object_uses: vec!["Status".to_string()].into(),
             ..Default::default()
         }];
 
@@ -4270,7 +4713,7 @@ mod tests {
                 },
                 target: ResolveResult::InternalModule(FileId(1)),
             }],
-            whole_object_uses: vec!["S".to_string()], // aliased local name
+            whole_object_uses: vec!["S".to_string()].into(), // aliased local name
             ..Default::default()
         }];
 

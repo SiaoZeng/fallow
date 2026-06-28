@@ -5,8 +5,9 @@ use ls_types::{
     Location, NumberOrString, Position, Range, Uri,
 };
 
-use fallow_core::duplicates::DuplicationReport;
-use fallow_core::results::AnalysisResults;
+use fallow_api::{
+    EditorAnalysisResults as AnalysisResults, EditorDuplicationReport as DuplicationReport,
+};
 
 use super::doc_link;
 
@@ -94,8 +95,8 @@ pub fn push_duplication_diagnostics(
 )]
 fn push_duplication_instance_diagnostic(
     map: &mut FxHashMap<Uri, Vec<Diagnostic>>,
-    group: &fallow_core::duplicates::CloneGroup,
-    instance: &fallow_core::duplicates::CloneInstance,
+    group: &fallow_api::editor_duplicates::CloneGroup,
+    instance: &fallow_api::editor_duplicates::CloneInstance,
 ) {
     let Some(inst_uri) = Uri::from_file_path(&instance.file) else {
         return;
@@ -145,8 +146,8 @@ fn push_duplication_instance_diagnostic(
     reason = "line/col numbers are bounded by source size"
 )]
 fn duplication_related_info(
-    group: &fallow_core::duplicates::CloneGroup,
-    instance: &fallow_core::duplicates::CloneInstance,
+    group: &fallow_api::editor_duplicates::CloneGroup,
+    instance: &fallow_api::editor_duplicates::CloneInstance,
 ) -> Vec<DiagnosticRelatedInformation> {
     group
         .instances
@@ -215,14 +216,16 @@ pub fn push_stale_suppression_diagnostics(
 mod tests {
     use std::path::PathBuf;
 
-    use fallow_core::duplicates::{CloneGroup, CloneInstance, DuplicationReport, DuplicationStats};
-    use fallow_core::results::{
+    use fallow_api::editor_duplicates::{
+        CloneGroup, CloneInstance, DuplicationReport, DuplicationStats,
+    };
+    use fallow_api::editor_results::{
         AnalysisResults, DuplicateExport, DuplicateExportFinding, DuplicateLocation, UnusedExport,
         UnusedExportFinding, UnusedTypeFinding,
     };
     use ls_types::{DiagnosticSeverity, NumberOrString, Uri};
 
-    use crate::diagnostics::build_diagnostics;
+    use crate::diagnostics::build_diagnostics_for_test;
 
     fn test_root() -> PathBuf {
         if cfg!(windows) {
@@ -282,7 +285,7 @@ mod tests {
             }));
 
         let duplication = empty_duplication();
-        let diags = build_diagnostics(&results, &duplication, &root);
+        let diags = build_diagnostics_for_test(&results, &duplication, &root);
 
         let uri_utils = Uri::from_file_path(&utils_path).unwrap();
         let uri_helpers = Uri::from_file_path(&helpers_path).unwrap();
@@ -350,7 +353,7 @@ mod tests {
             },
         };
 
-        let diags = build_diagnostics(&results, &duplication, &root);
+        let diags = build_diagnostics_for_test(&results, &duplication, &root);
 
         let uri_a = Uri::from_file_path(root.join("src/a.ts")).unwrap();
         let diags_a = &diags[&uri_a];
@@ -414,7 +417,7 @@ mod tests {
             },
         };
 
-        let diags = build_diagnostics(&results, &duplication, &root);
+        let diags = build_diagnostics_for_test(&results, &duplication, &root);
         let uri = Uri::from_file_path(root.join("src/only.ts")).unwrap();
         let d = &diags[&uri][0];
 
@@ -439,7 +442,7 @@ mod tests {
             }));
 
         let duplication = empty_duplication();
-        let diags = build_diagnostics(&results, &duplication, &root);
+        let diags = build_diagnostics_for_test(&results, &duplication, &root);
 
         let uri = Uri::from_file_path(&path).unwrap();
         let d = &diags[&uri][0];
@@ -476,16 +479,16 @@ mod tests {
             }));
         results
             .unused_files
-            .push(fallow_core::results::UnusedFileFinding::with_actions(
-                fallow_core::results::UnusedFile { path: path.clone() },
+            .push(fallow_api::editor_results::UnusedFileFinding::with_actions(
+                fallow_api::editor_results::UnusedFile { path: path.clone() },
             ));
         results.unused_enum_members.push(
-            fallow_core::results::UnusedEnumMemberFinding::with_actions(
-                fallow_core::results::UnusedMember {
+            fallow_api::editor_results::UnusedEnumMemberFinding::with_actions(
+                fallow_api::editor_results::UnusedMember {
                     path: path.clone(),
                     parent_name: "E".to_string(),
                     member_name: "A".to_string(),
-                    kind: fallow_core::extract::MemberKind::EnumMember,
+                    kind: fallow_api::editor_extract::MemberKind::EnumMember,
                     line: 3,
                     col: 0,
                 },
@@ -493,7 +496,7 @@ mod tests {
         );
 
         let duplication = empty_duplication();
-        let diags = build_diagnostics(&results, &duplication, &root);
+        let diags = build_diagnostics_for_test(&results, &duplication, &root);
 
         let uri = Uri::from_file_path(&path).unwrap();
         let file_diags = &diags[&uri];

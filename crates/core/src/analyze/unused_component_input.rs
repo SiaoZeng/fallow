@@ -11,13 +11,13 @@
 //! Usage is detected by over-crediting (every ambiguous shape credits toward
 //! "used", so only false negatives can result, never false positives). An input
 //! `foo` is USED if ANY hold:
-//! - an inline-template sentinel ref (`object == ANGULAR_TPL_SENTINEL &&
-//!   member == foo`); inline templates, host bindings, and `inputs:` /
-//!   `outputs:` metadata arrays all emit sentinel member accesses in the
-//!   component's own module;
+//! - a typed Angular template member fact for `foo`, with older cached
+//!   member accesses accepted only as a conservative parse-cache fallback; inline
+//!   templates, host bindings, and `inputs:` / `outputs:` metadata arrays all
+//!   emit this template member evidence in the component's own module;
 //! - the component has `has_angular_component_template_url` and the linked
 //!   external `.html` module (reached via the `SideEffect` import edge) has such
-//!   a sentinel member access for `foo`;
+//!   template member evidence for `foo`;
 //! - ANY `member_access` in this module with `member == foo` regardless of
 //!   object (credits `this.foo`, `changes.foo` / `changes['foo']` in
 //!   `ngOnChanges`, destructured reads); broad on purpose, to kill the
@@ -37,8 +37,7 @@ use std::path::Path;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use fallow_extract::{ANGULAR_THIS_SPREAD_SENTINEL, ANGULAR_TPL_SENTINEL};
-use fallow_types::extract::ModuleInfo;
+use fallow_types::extract::{ModuleInfo, SemanticFactView};
 
 use crate::discover::FileId;
 use crate::graph::{ModuleGraph, ModuleNode};
@@ -101,8 +100,8 @@ fn collect_module_unused_component_inputs(
         return;
     }
 
-    // Collect the linked external `templateUrl` module(s) (if any) so the
-    // sentinel member accesses in the `.html` file credit the input too.
+    // Collect linked external `templateUrl` module(s) so template evidence in
+    // the `.html` file credits the input too.
     let external_templates = external_template_modules(graph, modules_by_id, node.file_id);
     let used = input_usage_set(module, &external_templates);
 
@@ -134,8 +133,8 @@ fn component_abstains_inputs(module: &ModuleInfo) -> bool {
 }
 
 /// Build the set of input names that are USED by the component, unioning the
-/// component's own member accesses (template sentinel + any `this.foo`-style
-/// access) with the sentinel member accesses of every linked external template.
+/// component's ordinary member accesses (`this.foo`-style reads) with the
+/// template member evidence of the component and linked external templates.
 ///
 /// Over-credits by design: any `member_access` whose `member` matches an input
 /// counts as a use regardless of object, so destructures and `ngOnChanges`
@@ -145,19 +144,28 @@ fn input_usage_set<'a>(
     external_templates: &[&'a ModuleInfo],
 ) -> FxHashSet<&'a str> {
     let mut used: FxHashSet<&str> = FxHashSet::default();
-    for access in &component.member_accesses {
-        // Any member access naming the input (inline template sentinel,
-        // `this.foo`, `changes.foo`, a destructured read) credits it.
+    for access in SemanticFactView::new(&component.semantic_facts, &component.member_accesses)
+        .ordinary_member_accesses()
+    {
+        // Any ordinary member access naming the input (`this.foo`,
+        // `changes.foo`, a destructured read) credits it.
         used.insert(access.member.as_str());
     }
+    insert_angular_template_members(component, &mut used);
     for template in external_templates {
-        for access in &template.member_accesses {
-            if access.object == ANGULAR_TPL_SENTINEL {
-                used.insert(access.member.as_str());
-            }
-        }
+        insert_angular_template_members(template, &mut used);
     }
     used
+}
+
+pub(super) fn insert_angular_template_members<'a>(
+    module: &'a ModuleInfo,
+    out: &mut FxHashSet<&'a str>,
+) {
+    out.extend(
+        SemanticFactView::new(&module.semantic_facts, &module.member_accesses)
+            .angular_template_member_names(),
+    );
 }
 
 /// Whether the component declares an `extends` heritage clause anywhere in its
@@ -171,21 +179,17 @@ fn component_has_extends(module: &ModuleInfo) -> bool {
             .any(|h| h.super_class.is_some())
 }
 
-/// Whether the module spreads `this` into an object literal (`{ ...this }`),
-/// recorded by the extractor as an `ANGULAR_THIS_SPREAD_SENTINEL` member access.
+/// Whether the module spreads `this` into an object literal (`{ ...this }`).
 /// Every input/output is then consumed opaquely, so the whole component abstains.
 pub(super) fn component_spreads_this(module: &ModuleInfo) -> bool {
-    module
-        .member_accesses
-        .iter()
-        .any(|a| a.object == ANGULAR_THIS_SPREAD_SENTINEL)
+    SemanticFactView::new(&module.semantic_facts, &module.member_accesses).has_angular_this_spread()
 }
 
 /// The `.ts` modules reached from `from` by a `SideEffect`-shaped edge that hold
 /// an external Angular `templateUrl`. The component sets
 /// `has_angular_component_template_url`, and the external `.html` file is reached
 /// via a `SideEffect` import edge; we follow every outgoing edge and keep the
-/// targets whose module carries a template sentinel member access.
+/// targets whose module carries template member evidence.
 fn external_template_modules<'a>(
     graph: &ModuleGraph,
     modules_by_id: &FxHashMap<FileId, &'a ModuleInfo>,
@@ -202,12 +206,13 @@ fn external_template_modules<'a>(
         let Some(target_module) = modules_by_id.get(&target) else {
             continue;
         };
-        // The external template module carries sentinel-object member accesses
-        // (the `.html` scanner emits them). Keep any edge target that does.
-        if target_module
-            .member_accesses
-            .iter()
-            .any(|a| a.object == ANGULAR_TPL_SENTINEL)
+        // The external template module carries typed template facts. Older
+        // parse-cache payloads may still carry conservative member accesses.
+        if SemanticFactView::new(
+            &target_module.semantic_facts,
+            &target_module.member_accesses,
+        )
+        .has_angular_template_members()
         {
             out.push(*target_module);
         }
@@ -272,7 +277,10 @@ pub(super) fn is_js_reserved_word(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use fallow_types::discover::FileId;
-    use fallow_types::extract::{AngularInputMember, ClassHeritageInfo, MemberAccess};
+    use fallow_types::extract::{
+        AngularInputMember, AngularTemplateMemberAccessFact, AngularThisSpreadFact,
+        ClassHeritageInfo, MemberAccess, SemanticFact,
+    };
     use rustc_hash::FxHashSet;
 
     use super::*;
@@ -285,11 +293,14 @@ mod tests {
         }
     }
 
-    fn tpl_access(member: &str) -> MemberAccess {
-        MemberAccess {
-            object: ANGULAR_TPL_SENTINEL.to_string(),
+    fn tpl_fact(member: &str) -> SemanticFact {
+        SemanticFact::AngularTemplateMemberAccess(AngularTemplateMemberAccessFact {
             member: member.to_string(),
-        }
+        })
+    }
+
+    fn this_spread_fact() -> SemanticFact {
+        SemanticFact::AngularThisSpread(AngularThisSpreadFact)
     }
 
     fn this_access(member: &str) -> MemberAccess {
@@ -316,13 +327,27 @@ mod tests {
     fn template_credited_input_is_used() {
         let component = ModuleInfo {
             angular_inputs: vec![input("label", 10)],
-            member_accesses: vec![tpl_access("label")],
+            semantic_facts: vec![tpl_fact("label")].into(),
             ..empty_module()
         };
         let used = input_usage_set(&component, &[]);
         assert!(
             used.contains("label"),
             "an inline-template ref credits the input"
+        );
+    }
+
+    #[test]
+    fn typed_template_fact_credits_input() {
+        let component = ModuleInfo {
+            angular_inputs: vec![input("label", 10)],
+            semantic_facts: vec![tpl_fact("label")].into(),
+            ..empty_module()
+        };
+        let used = input_usage_set(&component, &[]);
+        assert!(
+            used.contains("label"),
+            "a typed Angular template fact credits the input"
         );
     }
 
@@ -349,13 +374,13 @@ mod tests {
         };
         let external = ModuleInfo {
             file_id: FileId(2),
-            member_accesses: vec![tpl_access("title")],
+            semantic_facts: vec![tpl_fact("title")].into(),
             ..empty_module()
         };
         let used = input_usage_set(&component, &[&external]);
         assert!(
             used.contains("title"),
-            "a sentinel ref in the linked external template credits the input"
+            "a typed fact in the linked external template credits the input"
         );
     }
 
@@ -386,6 +411,19 @@ mod tests {
         assert!(
             !component_has_extends(&component),
             "a component with no heritage `extends` does not abstain"
+        );
+    }
+
+    #[test]
+    fn typed_this_spread_fact_abstains_component() {
+        let component = ModuleInfo {
+            angular_inputs: vec![input("label", 10)],
+            semantic_facts: vec![this_spread_fact()].into(),
+            ..empty_module()
+        };
+        assert!(
+            component_spreads_this(&component),
+            "a typed Angular this-spread fact abstains the whole component"
         );
     }
 

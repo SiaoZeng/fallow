@@ -18,20 +18,21 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
+use fallow_api::DuplicationGrouping;
 use fallow_config::{OutputFormat, RulesConfig, Severity};
-use fallow_core::duplicates::DuplicationReport;
-use fallow_core::results::AnalysisResults;
-use fallow_core::trace::{CloneTrace, DependencyTrace, ExportTrace, FileTrace, PipelineTimings};
+use fallow_engine::duplicates::DuplicationReport;
+use fallow_engine::trace::{CloneTrace, DependencyTrace, ExportTrace, FileTrace, PipelineTimings};
+use fallow_types::results::AnalysisResults;
 
 use crate::report::sink::outln;
 
-pub use grouping::OwnershipResolver;
-pub use human::health::{render_health_score, render_health_trend};
 #[allow(
     unused_imports,
     reason = "used by binary crate modules (combined.rs, audit.rs)"
 )]
-pub use json::strip_root_prefix;
+pub use fallow_output::strip_root_prefix;
+pub use grouping::OwnershipResolver;
+pub use human::health::{render_health_score, render_health_trend};
 
 /// Shared context for all report dispatch functions.
 ///
@@ -148,6 +149,7 @@ pub fn elide_common_prefix<'a>(base: &str, target: &'a str) -> &'a str {
 }
 
 /// Compute a SARIF-compatible relative URI from an absolute path and project root.
+#[cfg(test)]
 fn relative_uri(path: &Path, root: &Path) -> String {
     normalize_uri(&relative_path(path, root).display().to_string())
 }
@@ -158,10 +160,7 @@ fn relative_uri(path: &Path, root: &Path) -> String {
 /// SARIF validation warnings (e.g., Next.js dynamic routes like `[slug]`).
 #[must_use]
 pub fn normalize_uri(path_str: &str) -> String {
-    path_str
-        .replace('\\', "/")
-        .replace('[', "%5B")
-        .replace(']', "%5D")
+    fallow_output::normalize_uri(path_str)
 }
 
 /// Severity level for human-readable output.
@@ -251,8 +250,8 @@ fn print_results_ci_comment(
     ctx: &ReportContext<'_>,
     output: OutputFormat,
 ) -> ExitCode {
-    let issues = codeclimate::build_codeclimate(results, ctx.root, ctx.rules);
-    let value = codeclimate::issues_to_value(&issues);
+    let issues = codeclimate::api_codeclimate_issues(results, ctx.root, ctx.rules);
+    let value = fallow_output::codeclimate_issues_to_value(&issues);
     print_ci_comment_format("dead-code", &value, output).unwrap_or_else(|| {
         eprintln!("Error: badge format is only supported for the health command");
         ExitCode::from(2)
@@ -362,8 +361,8 @@ fn print_duplication_ci_comment(
     root: &Path,
     output: OutputFormat,
 ) -> ExitCode {
-    let issues = codeclimate::build_duplication_codeclimate(report, root);
-    let value = codeclimate::issues_to_value(&issues);
+    let issues = codeclimate::api_duplication_codeclimate_issues(report, root);
+    let value = fallow_output::codeclimate_issues_to_value(&issues);
     print_ci_comment_format("dupes", &value, output).unwrap_or_else(|| {
         eprintln!("Error: badge format is only supported for the health command");
         ExitCode::from(2)
@@ -374,7 +373,7 @@ fn print_duplication_ci_comment(
 #[must_use]
 fn print_grouped_duplication_report(
     report: &DuplicationReport,
-    grouping: &dupes_grouping::DuplicationGrouping,
+    grouping: &DuplicationGrouping,
     ctx: &ReportContext<'_>,
     output: OutputFormat,
     resolver: &OwnershipResolver,
@@ -449,7 +448,7 @@ fn print_ci_comment_format(
     Some(exit)
 }
 
-fn warn_dupes_grouping_unsupported(grouping: &dupes_grouping::DuplicationGrouping, format: &str) {
+fn warn_dupes_grouping_unsupported(grouping: &DuplicationGrouping, format: &str) {
     eprintln!(
         "note: --group-by {} is not supported for {format} duplication output, falling back to \
          ungrouped output (use --format json for the full grouped envelope)",
@@ -475,8 +474,8 @@ fn warn_dupes_grouping_unsupported(grouping: &dupes_grouping::DuplicationGroupin
 ///   richer grouped envelope.
 #[must_use]
 pub fn print_health_report(
-    report: &crate::health_types::HealthReport,
-    grouping: Option<&crate::health_types::HealthGrouping>,
+    report: &fallow_output::HealthReport,
+    grouping: Option<&fallow_output::HealthGrouping>,
     group_resolver: Option<&grouping::OwnershipResolver>,
     ctx: &ReportContext<'_>,
     output: OutputFormat,
@@ -529,8 +528,8 @@ pub fn print_health_report(
 
 /// Render the human-format health report, including the per-group summary block.
 fn print_health_human_report(
-    report: &crate::health_types::HealthReport,
-    grouping: Option<&crate::health_types::HealthGrouping>,
+    report: &fallow_output::HealthReport,
+    grouping: Option<&fallow_output::HealthGrouping>,
     ctx: &ReportContext<'_>,
 ) {
     if ctx.summary {
@@ -553,19 +552,19 @@ fn print_health_human_report(
 
 /// Render the CI comment / review fallback arms for health results.
 fn print_health_ci_comment(
-    report: &crate::health_types::HealthReport,
+    report: &fallow_output::HealthReport,
     root: &Path,
     output: OutputFormat,
 ) -> ExitCode {
-    let issues = codeclimate::build_health_codeclimate(report, root);
-    let value = codeclimate::issues_to_value(&issues);
+    let issues = codeclimate::api_health_codeclimate_issues(report, root);
+    let value = fallow_output::codeclimate_issues_to_value(&issues);
     print_ci_comment_format("health", &value, output).unwrap_or_else(|| {
         eprintln!("Error: badge format is only supported for the health command");
         ExitCode::from(2)
     })
 }
 
-fn warn_grouping_unsupported(grouping: Option<&crate::health_types::HealthGrouping>, format: &str) {
+fn warn_grouping_unsupported(grouping: Option<&fallow_output::HealthGrouping>, format: &str) {
     if let Some(g) = grouping {
         eprintln!(
             "note: --group-by {} is not supported for {format} output, falling back to \
@@ -579,7 +578,7 @@ fn warn_grouping_unsupported(grouping: Option<&crate::health_types::HealthGroupi
 ///
 /// Only emits output in human format to avoid corrupting structured JSON/SARIF output.
 pub fn print_cross_reference_findings(
-    cross_ref: &fallow_core::cross_reference::CrossReferenceResult,
+    cross_ref: &fallow_engine::cross_reference::CrossReferenceResult,
     root: &Path,
     quiet: bool,
     output: OutputFormat,
@@ -622,7 +621,7 @@ pub fn print_clone_trace(trace: &CloneTrace, root: &Path, format: OutputFormat) 
 /// Print impact-closure trace results. JSON only emits the structured
 /// closure; human renders a short summary.
 pub fn print_impact_closure_trace(
-    trace: &fallow_core::trace::ImpactClosureTrace,
+    trace: &fallow_engine::trace::ImpactClosureTrace,
     format: OutputFormat,
 ) {
     match format {
@@ -659,10 +658,7 @@ pub fn print_performance(timings: &PipelineTimings, format: OutputFormat) {
 
 /// Print health pipeline performance timings.
 /// In JSON mode, outputs to stderr to avoid polluting the JSON analysis output on stdout.
-pub fn print_health_performance(
-    timings: &crate::health_types::HealthTimings,
-    format: OutputFormat,
-) {
+pub fn print_health_performance(timings: &fallow_output::HealthTimings, format: OutputFormat) {
     match format {
         OutputFormat::Json => match serde_json::to_string_pretty(timings) {
             Ok(json) => eprintln!("{json}"),
@@ -676,49 +672,32 @@ pub fn print_health_performance(
     unused_imports,
     reason = "target-dependent: used in lib, unused in bin"
 )]
-pub use codeclimate::build_codeclimate;
+pub use fallow_api::build_compact_lines;
 #[allow(
     unused_imports,
     reason = "target-dependent: used in lib, unused in bin"
 )]
-pub use codeclimate::build_duplication_codeclimate;
+pub use fallow_api::build_duplication_markdown;
 #[allow(
     unused_imports,
     reason = "target-dependent: used in lib, unused in bin"
 )]
-pub use codeclimate::build_health_codeclimate;
+pub use fallow_api::build_health_markdown;
 #[allow(
     unused_imports,
     reason = "target-dependent: used in lib, unused in bin"
 )]
-pub use codeclimate::issues_to_value as codeclimate_issues_to_value;
-#[allow(
-    unused_imports,
-    reason = "target-dependent: used in lib, unused in bin"
-)]
-pub use compact::build_compact_lines;
+pub use fallow_api::build_markdown;
 #[allow(
     clippy::redundant_pub_crate,
     reason = "pub(crate) deliberately limits visibility, report is pub but these are internal"
 )]
 pub(crate) use json::SCHEMA_VERSION;
-pub use json::build_baseline_deltas_json;
-pub use json::build_check_json_payload_with_config_fixable;
 #[allow(
-    unused_imports,
-    reason = "target-dependent: used in lib, unused in bin"
+    clippy::redundant_pub_crate,
+    reason = "target-dependent: report is public in lib, private in bin, but this adapter remains crate-internal"
 )]
-pub use json::build_duplication_json;
-#[allow(
-    unused_imports,
-    reason = "target-dependent: used in lib, unused in bin"
-)]
-pub use json::build_grouped_duplication_json;
-#[allow(
-    unused_imports,
-    reason = "target-dependent: used in lib, unused in bin"
-)]
-pub use json::build_health_json;
+pub(crate) use json::api_check_json_payload_with_config_fixable;
 #[allow(
     unused_imports,
     reason = "target-dependent: used in bin audit.rs, unused in lib"
@@ -729,35 +708,28 @@ pub use json::build_health_json;
 )]
 pub(crate) use json::harmonize_multi_kind_suppress_line_actions;
 #[allow(
-    unused_imports,
-    reason = "target-dependent: used in lib, unused in bin"
+    clippy::redundant_pub_crate,
+    reason = "target-dependent: report is public in lib, private in bin, but these adapters remain crate-internal"
 )]
-pub use json::{build_json, build_json_with_config_fixable};
+pub(crate) use json::{build_baseline_deltas_output, check_json_extras};
 #[allow(
     unused_imports,
     reason = "target-dependent: used in lib, unused in bin"
 )]
-pub use markdown::build_duplication_markdown;
+#[allow(
+    clippy::redundant_pub_crate,
+    reason = "target-dependent: report is public in lib, private in bin, but this adapter remains crate-internal"
+)]
+pub(crate) use sarif::api_health_sarif_document;
 #[allow(
     unused_imports,
     reason = "target-dependent: used in lib, unused in bin"
 )]
-pub use markdown::build_health_markdown;
 #[allow(
-    unused_imports,
-    reason = "target-dependent: used in lib, unused in bin"
+    clippy::redundant_pub_crate,
+    reason = "target-dependent: report is public in lib, private in bin, but this adapter remains crate-internal"
 )]
-pub use markdown::build_markdown;
-#[allow(
-    unused_imports,
-    reason = "target-dependent: used in lib, unused in bin"
-)]
-pub use sarif::build_health_sarif;
-#[allow(
-    unused_imports,
-    reason = "target-dependent: used in lib, unused in bin"
-)]
-pub use sarif::build_sarif;
+pub(crate) use sarif::api_sarif_document;
 
 #[cfg(test)]
 mod tests {

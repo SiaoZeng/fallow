@@ -4,43 +4,13 @@
 //! and rule means, consumed by the `_meta` object in JSON output and by
 //! SARIF `fullDescription` / `helpUri` fields.
 
-use std::collections::BTreeMap;
 use std::process::ExitCode;
 
 use colored::Colorize;
 use fallow_config::OutputFormat;
-use fallow_types::envelope::{Meta, MetaRule};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 const DOCS_BASE: &str = "https://docs.fallow.tools";
-
-/// Docs URL for the dead-code (check) command.
-pub const CHECK_DOCS: &str = "https://docs.fallow.tools/cli/dead-code";
-
-/// Docs URL for the health command.
-pub const HEALTH_DOCS: &str = "https://docs.fallow.tools/cli/health";
-
-/// Docs URL for the dupes command.
-pub const DUPES_DOCS: &str = "https://docs.fallow.tools/cli/dupes";
-
-/// Docs URL for the runtime coverage setup command's agent-readable JSON.
-pub const COVERAGE_SETUP_DOCS: &str = "https://docs.fallow.tools/cli/coverage#agent-readable-json";
-
-/// Docs URL for `fallow coverage analyze --format json --explain`.
-pub const COVERAGE_ANALYZE_DOCS: &str = "https://docs.fallow.tools/cli/coverage#analyze";
-
-/// Docs URL for the security command.
-pub const SECURITY_DOCS: &str = "https://docs.fallow.tools/cli/security";
-
-/// `_meta` description for the per-finding `actions[]` array shared across
-/// `check`, `health`, and `dupes` JSON output.
-const ACTIONS_FIELD_DEFINITION: &str = "Per-finding fix and suppression suggestions. Each entry carries a `type` discriminant (kebab-case) plus a per-action `auto_fixable` bool. Consumers dispatch on `type` to choose the remediation and filter on `auto_fixable` of each individual entry.";
-
-/// `_meta` description for the per-action `auto_fixable` bool. Calls out the
-/// per-finding (not per-action-type) evaluation rule and the currently active
-/// per-instance flips so agents know to branch on the field value of EACH
-/// finding's action, not on the action `type` alone.
-const ACTIONS_AUTO_FIXABLE_FIELD_DEFINITION: &str = "Evaluated PER FINDING, not per action type. The same `type` may carry `auto_fixable: true` on one finding and `auto_fixable: false` on another when per-instance guards in the `fallow fix` applier discriminate. Filter on this bool of each individual action, not on `type` alone. Current per-instance flips: (1) `remove-catalog-entry` is `true` only when the finding's `hardcoded_consumers` array is empty (else fallow fix skips the entry to avoid breaking `pnpm install`); (2) the primary dependency action flips between `remove-dependency` (`auto_fixable: true`) and `move-dependency` (`auto_fixable: false`) based on `used_in_workspaces`; (3) `add-to-config` for `ignoreExports` is `true` when fallow fix can safely apply the action, which means EITHER a fallow config file already exists OR no config exists and the working directory is NOT inside a monorepo subpackage (the applier then creates `.fallowrc.json` using `fallow init`'s framework-aware scaffolding and layers the new rules on top); `false` inside a monorepo subpackage with no workspace-root config because the applier refuses to fragment per-package configs; (4) `update-catalog-reference` is always `false` today (catalog-switching applier not yet wired). All `suppress-line` and `suppress-file` actions are uniformly `false`.";
 
 /// Rule definition for SARIF `fullDescription` and JSON `_meta`.
 pub struct RuleDef {
@@ -233,6 +203,14 @@ pub const CHECK_RULES: &[RuleDef] = &[
         name: "Stale Suppressions",
         short: "Suppression comment or tag no longer matches any issue",
         full: "A fallow-ignore-next-line, fallow-ignore-file, or @expected-unused suppression that no longer matches any active issue. The underlying problem was fixed but the suppression was left behind. Remove it to keep the codebase clean.",
+        docs_path: "explanations/dead-code#stale-suppressions",
+    },
+    RuleDef {
+        id: "fallow/missing-suppression-reason",
+        category: "Suppressions",
+        name: "Missing Suppression Reason",
+        short: "Suppression comment omits a required reason",
+        full: "A fallow-ignore-next-line or fallow-ignore-file suppression omits the explanatory reason required by the requireSuppressionReason rule. Add a short reason after the suppression token, or remove the suppression if the issue is no longer intentional.",
         docs_path: "explanations/dead-code#stale-suppressions",
     },
     RuleDef {
@@ -541,6 +519,9 @@ fn dead_code_alias_id(normalized: &str) -> Option<&'static str> {
         "boundary-calls" | "boundary-call-violations" => Some("fallow/boundary-call-violation"),
         "policy-violation" | "policy-violations" => Some("fallow/policy-violation"),
         "stale-suppressions" => Some("fallow/stale-suppression"),
+        "missing-suppression-reason" | "missing-suppression-reasons" => {
+            Some("fallow/missing-suppression-reason")
+        }
         _ => None,
     }
 }
@@ -757,6 +738,10 @@ fn architecture_rule_guide(id: &str) -> Option<RuleGuide> {
             example: "// fallow-ignore-next-line unused-export remains above an export that is now used.",
             how_to_fix: "Remove the suppression. If a different issue is still intentional, replace it with a current, specific suppression.",
         },
+        "fallow/missing-suppression-reason" => RuleGuide {
+            example: "// fallow-ignore-next-line unused-export appears without the required explanatory reason.",
+            how_to_fix: "Add a concise reason after the suppression token, or remove the suppression if the issue is no longer intentional.",
+        },
         _ => return None,
     })
 }
@@ -876,7 +861,7 @@ pub fn run_explain(issue_type: &str, output: OutputFormat) -> ExitCode {
     let guide = rule_guide(rule);
     match output {
         OutputFormat::Json => {
-            let envelope = crate::output_envelope::ExplainOutput {
+            let envelope = fallow_output::ExplainOutput {
                 id: rule.id.to_string(),
                 name: rule.name.to_string(),
                 summary: rule.short.to_string(),
@@ -885,8 +870,10 @@ pub fn run_explain(issue_type: &str, output: OutputFormat) -> ExitCode {
                 how_to_fix: guide.how_to_fix.to_string(),
                 docs: rule_docs_url(rule),
             };
-            match crate::output_envelope::serialize_root_output(
-                crate::output_envelope::FallowOutput::Explain(envelope),
+            match fallow_output::serialize_explain_json_output(
+                envelope,
+                crate::output_runtime::current_root_envelope_mode(),
+                crate::output_runtime::telemetry_analysis_run_id().as_deref(),
             ) {
                 Ok(value) => crate::report::emit_json(&value, "explain"),
                 Err(e) => {
@@ -1269,562 +1256,51 @@ pub const SECURITY_RULES: &[RuleDef] = &[
     ),
 ];
 
-/// Build the `_meta` object for `fallow dead-code --format json --explain`.
-#[must_use]
-pub fn check_meta() -> Value {
-    let rules: Value = CHECK_RULES
-        .iter()
-        .map(|r| {
-            (
-                r.id.replace("fallow/", ""),
-                json!({
-                    "name": r.name,
-                    "description": r.full,
-                    "docs": rule_docs_url(r)
-                }),
-            )
-        })
-        .collect::<serde_json::Map<String, Value>>()
-        .into();
-
-    json!({
-        "docs": CHECK_DOCS,
-        "rules": rules,
-        "field_definitions": {
-            "actions[]": ACTIONS_FIELD_DEFINITION,
-            "actions[].auto_fixable": ACTIONS_AUTO_FIXABLE_FIELD_DEFINITION
-        }
-    })
-}
-
-/// Build the sectioned `_meta` object for bare `fallow --format json --explain`.
-#[must_use]
-pub fn combined_meta(include_check: bool, include_dupes: bool, include_health: bool) -> Value {
-    let mut sections = serde_json::Map::new();
-    if include_check {
-        sections.insert("check".to_string(), check_meta());
-    }
-    if include_dupes {
-        sections.insert("dupes".to_string(), dupes_meta());
-    }
-    if include_health {
-        sections.insert("health".to_string(), health_meta());
-    }
-    Value::Object(sections)
-}
-
-/// Build the `_meta` object for `fallow health --format json --explain`.
-#[must_use]
-pub fn health_meta() -> Value {
-    json!({
-        "docs": HEALTH_DOCS,
-        "field_definitions": {
-            "actions[]": ACTIONS_FIELD_DEFINITION,
-            "actions[].auto_fixable": ACTIONS_AUTO_FIXABLE_FIELD_DEFINITION
-        },
-        "metrics": health_metrics()
-    })
-}
-
-fn health_metrics() -> Value {
-    let mut metrics = serde_json::Map::new();
-    for section in [
-        health_size_complexity_metrics(),
-        health_quality_metrics(),
-        health_coupling_metrics(),
-        health_render_fan_in_metrics(),
-        health_churn_metrics(),
-        health_refactoring_rank_metrics(),
-        health_refactoring_confidence_metrics(),
-        health_risk_metrics(),
-        health_contributor_metrics(),
-        health_ownership_metrics(),
-        health_runtime_verdict_metrics(),
-        health_runtime_observation_metrics(),
-        health_runtime_production_metrics(),
-    ] {
-        let Value::Object(section) = section else {
-            continue;
-        };
-        metrics.extend(section);
-    }
-    Value::Object(metrics)
-}
-
-fn health_size_complexity_metrics() -> Value {
-    json!({
-            "cyclomatic": {
-                "name": "Cyclomatic Complexity",
-                "description": "McCabe cyclomatic complexity: 1 + number of decision points (if/else, switch cases, loops, ternary, logical operators). Measures the number of independent paths through a function.",
-                "range": "[1, \u{221e})",
-                "interpretation": "lower is better; default threshold: 20"
-            },
-            "cognitive": {
-                "name": "Cognitive Complexity",
-                "description": "SonarSource cognitive complexity: penalizes nesting depth and non-linear control flow (breaks, continues, early returns). Measures how hard a function is to understand when reading top-to-bottom.",
-                "range": "[0, \u{221e})",
-                "interpretation": "lower is better; default threshold: 15"
-            },
-            "line_count": {
-                "name": "Function Line Count",
-                "description": "Number of lines in the function body.",
-                "range": "[1, \u{221e})",
-                "interpretation": "context-dependent; long functions may need splitting"
-            },
-            "lines": {
-                "name": "File Line Count",
-                "description": "Total lines of code in the file (from line offsets). Provides scale context for other metrics: a file with 0.4 complexity density at 80 LOC is different from 0.4 density at 800 LOC.",
-                "range": "[1, \u{221e})",
-                "interpretation": "context-dependent; large files may benefit from splitting even if individual functions are small"
-            }
-    })
-}
-
-fn health_quality_metrics() -> Value {
-    json!({
-            "maintainability_index": {
-                "name": "Maintainability Index",
-                "description": "Composite score: 100 - (complexity_density \u{00d7} 30 \u{00d7} dampening) - (dead_code_ratio \u{00d7} 20) - min(ln(fan_out+1) \u{00d7} 4, 15), where dampening = min(lines/50, 1.0). Clamped to [0, 100]. Higher is better.",
-                "range": "[0, 100]",
-                "interpretation": "higher is better; <40 poor, 40\u{2013}70 moderate, >70 good"
-            },
-            "complexity_density": {
-                "name": "Complexity Density",
-                "description": "Total cyclomatic complexity divided by lines of code. Measures how densely complex the code is per line.",
-                "range": "[0, \u{221e})",
-                "interpretation": "lower is better; >1.0 indicates very dense complexity"
-            },
-            "dead_code_ratio": {
-                "name": "Dead Code Ratio",
-                "description": "Fraction of value exports (excluding type-only exports like interfaces and type aliases) with zero references across the project.",
-                "range": "[0, 1]",
-                "interpretation": "lower is better; 0 = all exports are used"
-            }
-    })
-}
-
-fn health_coupling_metrics() -> Value {
-    json!({
-            "fan_in": {
-                "name": "Fan-in (Importers)",
-                "description": "Number of files that import this file. High fan-in means high blast radius \u{2014} changes to this file affect many dependents.",
-                "range": "[0, \u{221e})",
-                "interpretation": "context-dependent; high fan-in files need careful review before changes"
-            },
-            "fan_out": {
-                "name": "Fan-out (Imports)",
-                "description": "Number of files this file directly imports. High fan-out indicates high coupling and change propagation risk.",
-                "range": "[0, \u{221e})",
-                "interpretation": "lower is better; MI penalty caps at ~40 imports"
-            },
-    })
-}
-
-fn health_render_fan_in_metrics() -> Value {
-    json!({
-            "max_render_fan_in": {
-                "name": "Render Fan-in (Blast Radius)",
-                "description": "DESCRIPTIVE, NOT A RULE. The component-graph analogue of module fan-in: where module fan-in counts importing MODULES, render fan-in counts distinct render LOCATIONS of a React/Preact component (a shared <Button> is rendered in far more places than it is imported). The headline `max_render_fan_in` is the highest DISTINCT-PARENTS count across components (the honest edit-ripple count); each top component also reports `render_sites` as secondary \u{201c}incl. repeats\u{201d} context (one parent rendering a child five times is five sites but one distinct parent). Test / spec / story / fixture files are excluded (a test rendering <Page> 146 times is not blast radius). Undercount-safe: a child rendered via a JSX spread / dynamic / member-expression tag is not resolved, so a high-fan-in component can only be undersold. Computed only on React/Preact projects; absent otherwise.",
-                "range": "[0, \u{221e})",
-                "interpretation": "context-dependent; a high distinct-parents component edit-ripples to many render locations. Descriptive only, never a gate or finding"
-            }
-    })
-}
-
-fn health_churn_metrics() -> Value {
-    json!({
-            "score": {
-                "name": "Hotspot Score",
-                "description": "normalized_churn \u{00d7} normalized_complexity \u{00d7} 100, where normalization is against the project maximum. Identifies files that are both complex AND frequently changing.",
-                "range": "[0, 100]",
-                "interpretation": "higher = riskier; prioritize refactoring high-score files"
-            },
-            "weighted_commits": {
-                "name": "Weighted Commits",
-                "description": "Recency-weighted commit count using exponential decay with 90-day half-life. Recent commits contribute more than older ones.",
-                "range": "[0, \u{221e})",
-                "interpretation": "higher = more recent churn activity"
-            },
-            "trend": {
-                "name": "Churn Trend",
-                "description": "Compares recent vs older commit frequency within the analysis window. accelerating = recent > 1.5\u{00d7} older, cooling = recent < 0.67\u{00d7} older, stable = in between.",
-                "values": ["accelerating", "stable", "cooling"],
-                "interpretation": "accelerating files need attention; cooling files are stabilizing"
-            }
-    })
-}
-
-fn health_refactoring_rank_metrics() -> Value {
-    json!({
-            "priority": {
-                "name": "Refactoring Priority",
-                "description": "Weighted score: complexity density (30%), hotspot boost (25%), dead code ratio (20%), fan-in (15%), fan-out (10%). Fan-in and fan-out normalization uses adaptive percentile-based thresholds (p95 of the project distribution). Does not use the maintainability index to avoid double-counting.",
-                "range": "[0, 100]",
-                "interpretation": "higher = more urgent to refactor"
-            },
-            "efficiency": {
-                "name": "Efficiency Score",
-                "description": "priority / effort_numeric (Low=1, Medium=2, High=3). Surfaces quick wins: high-priority, low-effort targets rank first. Default sort order.",
-                "range": "[0, 100] \u{2014} effective max depends on effort: Low=100, Medium=50, High\u{2248}33",
-                "interpretation": "higher = better quick-win value; targets are sorted by efficiency descending"
-            },
-            "effort": {
-                "name": "Effort Estimate",
-                "description": "Heuristic effort estimate based on file size, function count, and fan-in. Thresholds adapt to the project\u{2019}s distribution (percentile-based). Low: small file, few functions, low fan-in. High: large file, high fan-in, or many functions with high density. Medium: everything else.",
-                "values": ["low", "medium", "high"],
-                "interpretation": "low = quick win, high = needs planning and coordination"
-            },
-    })
-}
-
-fn health_refactoring_confidence_metrics() -> Value {
-    json!({
-            "confidence": {
-                "name": "Confidence Level",
-                "description": "Reliability of the recommendation based on data source. High: deterministic graph/AST analysis (dead code, circular deps, complexity). Medium: heuristic thresholds (fan-in/fan-out coupling). Low: depends on git history quality (churn-based recommendations).",
-                "values": ["high", "medium", "low"],
-                "interpretation": "high = act on it, medium = verify context, low = treat as a signal, not a directive"
-            },
-            "health_score": {
-                "name": "Health Score",
-                "description": "Project-level aggregate score computed from vital signs: dead code, complexity, maintainability, hotspots, unused dependencies, and circular dependencies. Penalties subtracted from 100. Missing metrics (from pipelines that didn't run) don't penalize. Use --score to compute the score; add --hotspots, or --targets with --score, when the score should include the churn-backed hotspot penalty.",
-                "range": "[0, 100]",
-                "interpretation": "higher is better; A (85\u{2013}100), B (70\u{2013}84), C (55\u{2013}69), D (40\u{2013}54), F (0\u{2013}39)"
-            }
-    })
-}
-
-fn health_risk_metrics() -> Value {
-    json!({
-            "crap_max": {
-                "name": "Untested Complexity Risk (CRAP)",
-                "description": "Change Risk Anti-Patterns score (Savoia & Evans, 2007). Formula: CC\u{00b2} \u{00d7} (1 - cov/100)\u{00b3} + CC. Default model (static_estimated): estimates per-function coverage from export references \u{2014} directly test-referenced exports get 85%, indirectly test-reachable functions get 40%, untested files get 0%. Provide --coverage <path> with Istanbul-format coverage-final.json (from Jest, Vitest, c8, nyc) for exact per-function CRAP scores.",
-                "range": "[1, \u{221e})",
-                "interpretation": "lower is better; >=30 is high-risk (CC >= 5 without test path)"
-            },
-    })
-}
-
-fn health_contributor_metrics() -> Value {
-    json!({
-            "bus_factor": {
-                "name": "Bus Factor",
-                "description": "Avelino truck factor: the minimum number of distinct contributors who together account for at least 50% of recency-weighted commits to this file in the analysis window. Bot authors are excluded.",
-                "range": "[1, \u{221e})",
-                "interpretation": "lower is higher knowledge-loss risk; 1 means a single contributor covers most of the recent history"
-            },
-            "contributor_count": {
-                "name": "Contributor Count",
-                "description": "Number of distinct authors who touched this file in the analysis window after bot-pattern filtering.",
-                "range": "[0, \u{221e})",
-                "interpretation": "higher generally indicates broader knowledge spread; pair with bus_factor for context"
-            },
-            "share": {
-                "name": "Contributor Share",
-                "description": "Recency-weighted share of total weighted commits attributed to a single contributor. Rounded to three decimals.",
-                "range": "[0, 1]",
-                "interpretation": "share close to 1.0 indicates dominance and pairs with low bus_factor"
-            },
-    })
-}
-
-fn health_ownership_metrics() -> Value {
-    json!({
-            "stale_days": {
-                "name": "Stale Days",
-                "description": "Days since this contributor last touched the file. Computed at analysis time.",
-                "range": "[0, \u{221e})",
-                "interpretation": "high stale_days on the top contributor often correlates with ownership drift"
-            },
-            "drift": {
-                "name": "Ownership Drift",
-                "description": "True when the file's original author (earliest first commit in the window) differs from the current top contributor, the file is at least 30 days old, and the original author's recency-weighted share is below 10%.",
-                "values": [true, false],
-                "interpretation": "true means the original author is no longer maintaining; route reviews to the current top contributor"
-            },
-            "unowned": {
-                "name": "Unowned (Tristate)",
-                "description": "true = a CODEOWNERS file exists but no rule matches this file; false = a rule matches; null = no CODEOWNERS file was discovered for the repository (cannot determine).",
-                "values": [true, false, null],
-                "interpretation": "true on a hotspot is a review-bottleneck risk; null means the signal is unavailable, not absent"
-            }
-    })
-}
-
-fn health_runtime_verdict_metrics() -> Value {
-    json!({
-            "runtime_coverage_verdict": {
-                "name": "Runtime Coverage Verdict",
-                "description": "Overall verdict across all runtime-coverage findings. `clean` = nothing cold; `cold-code-detected` = one or more tracked functions had zero invocations; `hot-path-touched` = a function modified in the current change set is on the hot path (requires `--diff-file` or `--changed-since` to fire; without a change scope the verdict cannot promote); `license-expired-grace` = analysis ran but the license is in its post-expiry grace window; `unknown` = verdict could not be computed (degenerate input).",
-                "values": ["clean", "hot-path-touched", "cold-code-detected", "license-expired-grace", "unknown"],
-                "interpretation": "`cold-code-detected` is the primary actionable signal in standalone analysis; `hot-path-touched` is promoted to primary in PR context (when a change scope is supplied) so reviewers see the diff-tied signal first. `signals[]` carries the full unprioritized set."
-            },
-    })
-}
-
-fn health_runtime_observation_metrics() -> Value {
-    json!({
-            "runtime_coverage_state": {
-                "name": "Runtime Coverage State",
-                "description": "Per-function observation: `called` = V8 saw at least one invocation; `never-called` = V8 tracked the function but it never ran; `coverage-unavailable` = the function was not in the V8 tracking set (e.g., lazy-parsed, worker thread, dynamic code); `unknown` = forward-compat sentinel for newer sidecar states.",
-                "values": ["called", "never-called", "coverage-unavailable", "unknown"],
-                "interpretation": "`never-called` in combination with static `unused` is the highest-confidence delete signal"
-            },
-            "runtime_coverage_confidence": {
-                "name": "Runtime Coverage Confidence",
-                "description": "Confidence in a runtime-coverage finding. `high` = tracked by V8 with a statistically meaningful observation volume; `medium` = either low observation volume or indirect evidence; `low` = minimal data; `unknown` = insufficient information to classify.",
-                "values": ["high", "medium", "low", "unknown"],
-                "interpretation": "high = act on it; medium = verify context; low = treat as a signal only"
-            }
-    })
-}
-
-fn health_runtime_production_metrics() -> Value {
-    json!({
-            "production_invocations": {
-                "name": "Production Invocations",
-                "description": "Observed invocation count for the function over the collected coverage window. For `coverage-unavailable` findings this is `0` and semantically means `null` (not tracked). Absolute counts are not directly comparable across services without normalizing by trace_count.",
-                "range": "[0, \u{221e})",
-                "interpretation": "0 + tracked = cold path; 0 + untracked = unknown; high + never-called cannot occur by definition"
-            },
-            "percent_dead_in_production": {
-                "name": "Percent Dead in Production",
-                "description": "Fraction of tracked functions with zero observed invocations, multiplied by 100. Computed before any `--top` truncation so the summary total is stable regardless of display limits.",
-                "range": "[0, 100]",
-                "interpretation": "lower is better; values above ~10% on a long-running service indicate a large cleanup opportunity"
-            }
-    })
-}
-
-/// Build the `_meta` object for `fallow dupes --format json --explain`.
-#[must_use]
-pub fn dupes_meta() -> Value {
-    json!({
-        "docs": DUPES_DOCS,
-        "field_definitions": {
-            "actions[]": ACTIONS_FIELD_DEFINITION,
-            "actions[].auto_fixable": ACTIONS_AUTO_FIXABLE_FIELD_DEFINITION
-        },
-        "metrics": {
-            "duplication_percentage": {
-                "name": "Duplication Percentage",
-                "description": "Fraction of total source tokens that appear in at least one clone group. Computed over the full analyzed file set.",
-                "range": "[0, 100]",
-                "interpretation": "lower is better"
-            },
-            "token_count": {
-                "name": "Token Count",
-                "description": "Number of normalized source tokens in the clone group. Tokens are language-aware (keywords, identifiers, operators, punctuation). Higher token count = larger duplicate.",
-                "range": "[1, \u{221e})",
-                "interpretation": "larger clones have higher refactoring value"
-            },
-            "line_count": {
-                "name": "Line Count",
-                "description": "Number of source lines spanned by the clone instance. Approximation of clone size for human readability.",
-                "range": "[1, \u{221e})",
-                "interpretation": "larger clones are more impactful to deduplicate"
-            },
-            "clone_groups": {
-                "name": "Clone Groups",
-                "description": "A set of code fragments with identical or near-identical normalized token sequences. Each group has 2+ instances across different locations.",
-                "interpretation": "each group is a single refactoring opportunity"
-            },
-            "clone_groups_below_min_occurrences": {
-                "name": "Clone Groups Below minOccurrences",
-                "description": "Number of clone groups detected but hidden by the `duplicates.minOccurrences` filter. Always 0 (or absent) when the filter is at its default of 2. Pre-filter group count = `clone_groups + clone_groups_below_min_occurrences`.",
-                "range": "[0, \u{221e})",
-                "interpretation": "high values suggest noisy pair-only duplication; lower `minOccurrences` to inspect"
-            },
-            "clone_families": {
-                "name": "Clone Families",
-                "description": "Groups of clone groups that share the same set of files. Indicates systematic duplication patterns (e.g., mirrored directory structures).",
-                "interpretation": "families suggest extract-module refactoring opportunities"
-            }
-        }
-    })
-}
-
 /// Build the `_meta` object for `fallow security --format json --explain`.
 #[must_use]
-pub fn security_meta() -> Meta {
-    let rules = SECURITY_RULES
-        .iter()
-        .map(|rule| {
-            (
-                rule.id.to_string(),
-                MetaRule {
-                    name: Some(rule.name.to_string()),
-                    description: Some(rule.full.to_string()),
-                    docs: Some(rule_docs_url(rule)),
-                },
-            )
-        })
-        .collect();
-
-    Meta {
-        docs: Some(SECURITY_DOCS.to_string()),
-        telemetry: None,
-        field_definitions: BTreeMap::from([
-            (
-                "version".to_string(),
-                "fallow CLI version that produced this output.".to_string(),
-            ),
-            (
-                "elapsed_ms".to_string(),
-                "Wall-clock milliseconds spent producing the security report.".to_string(),
-            ),
-            (
-                "config".to_string(),
-                "Privacy-safe config context relevant to security candidate generation."
-                    .to_string(),
-            ),
-            (
-                "config.rules.*.configured".to_string(),
-                "Severity from resolved config before the security command forced default-off rules on."
-                    .to_string(),
-            ),
-            (
-                "config.rules.*.effective".to_string(),
-                "Severity used for this security command run.".to_string(),
-            ),
-            (
-                "config.categories_include".to_string(),
-                "Configured security category include list. null means unset, [] means explicitly empty."
-                    .to_string(),
-            ),
-            (
-                "config.categories_exclude".to_string(),
-                "Configured security category exclude list. null means unset, [] means explicitly empty."
-                    .to_string(),
-            ),
-            (
-                "security_findings[]".to_string(),
-                "Unverified security candidates for downstream human or agent verification."
-                    .to_string(),
-            ),
-            (
-                "summary.security_findings".to_string(),
-                "Number of security candidates after all filters, gates, and scopes.".to_string(),
-            ),
-            (
-                "summary.by_severity".to_string(),
-                "Fixed high, medium, and low severity counts for summary JSON.".to_string(),
-            ),
-            (
-                "summary.by_category".to_string(),
-                "Candidate counts by catalogue category, or by kind for uncategorized findings."
-                    .to_string(),
-            ),
-            (
-                "summary.by_reachability".to_string(),
-                "Fixed reachability and source-backed ranking-signal counts for summary JSON."
-                    .to_string(),
-            ),
-            (
-                "summary.by_runtime_state".to_string(),
-                "Fixed production-runtime coverage state counts for summary JSON.".to_string(),
-            ),
-            (
-                "unresolved_edge_files".to_string(),
-                "Number of client files whose import cone contains dynamic edges the graph could not follow."
-                    .to_string(),
-            ),
-            (
-                "unresolved_callee_sites".to_string(),
-                "Number of sink-shaped nodes whose callee could not be flattened to a static path."
-                    .to_string(),
-            ),
-        ]),
-        metrics: BTreeMap::new(),
-        rules,
-    }
+pub fn security_meta() -> fallow_types::envelope::Meta {
+    fallow_output::security_meta(SECURITY_RULES.iter().map(|rule| {
+        fallow_output::SecurityRuleMeta {
+            id: rule.id,
+            name: rule.name,
+            description: rule.full,
+            docs_path: rule.docs_path,
+        }
+    }))
 }
 
 /// Build the `_meta` object for `fallow coverage setup --json --explain`.
 #[must_use]
 pub fn coverage_setup_meta() -> Value {
-    json!({
-        "docs_url": COVERAGE_SETUP_DOCS,
-        "field_definitions": {
-            "schema_version": "Coverage setup JSON contract version. Stays at \"1\" for additive opt-in fields such as _meta.",
-            "framework_detected": "Primary detected runtime framework for compatibility with single-app consumers. In workspaces this mirrors the first emitted runtime member; unknown means no runtime member was detected.",
-            "package_manager": "Detected package manager used for install and run commands, or null when no package manager signal was found.",
-            "runtime_targets": "Union of runtime targets across emitted members.",
-            "members[]": "Per-runtime-workspace setup recipes. Pure aggregator roots and build-only libraries are omitted.",
-            "members[].name": "Workspace package name from package.json, or the root directory name when package.json has no name.",
-            "members[].path": "Workspace path relative to the command root. The root package is represented as \".\".",
-            "members[].framework_detected": "Runtime framework detected for that member.",
-            "members[].package_manager": "Package manager detected for that member, or inherited from the workspace root when no member-specific signal exists.",
-            "members[].runtime_targets": "Runtime targets produced by that member.",
-            "members[].files_to_edit": "Files in that member that should receive runtime beacon setup code.",
-            "members[].snippets": "Copy-paste setup snippets for that member, with paths relative to the command root.",
-            "members[].dockerfile_snippet": "Environment snippet for file-system capture in that member's containerized Node runtime, or null when not applicable.",
-            "members[].warnings": "Actionable setup caveats discovered for that member.",
-            "config_written": "Always null for --json because JSON setup is side-effect-free and never writes configuration.",
-            "files_to_edit": "Compatibility copy of the primary member's files, with workspace prefixes when the primary member is not the root.",
-            "snippets": "Compatibility copy of the primary member's snippets, with workspace prefixes when the primary member is not the root.",
-            "dockerfile_snippet": "Environment snippet for file-system capture in containerized Node runtimes, or null when not applicable.",
-            "commands": "Package-manager commands needed to install the runtime beacon and sidecar packages.",
-            "next_steps": "Ordered setup workflow after applying the emitted snippets.",
-            "warnings": "Actionable setup caveats discovered while building the recipe."
-        },
-        "enums": {
-            "framework_detected": ["nextjs", "nestjs", "nuxt", "sveltekit", "astro", "remix", "vite", "plain_node", "unknown"],
-            "runtime_targets": ["node", "browser"],
-            "package_manager": ["npm", "pnpm", "yarn", "bun", null]
-        },
-        "warnings": {
-            "No runtime workspace members were detected": "The root appears to be a workspace, but no runtime-bearing package was found. The payload emits install commands only.",
-            "No local coverage artifact was detected yet": "Run the application with runtime coverage collection enabled, then re-run setup or health with the produced capture path.",
-            "Package manager was not detected": "No packageManager field or known lockfile was found. Commands fall back to npm.",
-            "Framework was not detected": "No known framework dependency or runtime script was found. Treat the recipe as a generic Node setup and adjust the entry path as needed."
-        }
-    })
+    fallow_output::coverage_setup_meta()
 }
 
 /// Build the `_meta` object for `fallow coverage analyze --format json --explain`.
 #[must_use]
 pub fn coverage_analyze_meta() -> Value {
-    json!({
-        "docs_url": COVERAGE_ANALYZE_DOCS,
-        "field_definitions": {
-            "schema_version": "Standalone coverage analyze envelope version. \"1\" for the current shape.",
-            "version": "fallow CLI version that produced this output.",
-            "elapsed_ms": "Wall-clock milliseconds spent producing the report.",
-            "runtime_coverage": "Same RuntimeCoverageReport block emitted by `fallow health --runtime-coverage`.",
-            "runtime_coverage.summary.data_source": "Which evidence source produced the report. local = on-disk artifact via --runtime-coverage <path>; cloud = explicit pull via --cloud / --runtime-coverage-cloud / FALLOW_RUNTIME_COVERAGE_SOURCE=cloud.",
-            "runtime_coverage.summary.last_received_at": "ISO-8601 timestamp of the newest runtime payload included in the report. Null for local artifacts that do not carry receipt metadata.",
-            "runtime_coverage.summary.capture_quality": "Capture-window telemetry derived from the runtime evidence. lazy_parse_warning trips when more than 30% of tracked functions are V8-untracked, which usually indicates a short observation window.",
-            "runtime_coverage.findings[].id": "Per-finding SUPPRESSION key (fallow:prod:<hash>). Hashes file + function + the current line, so it changes when the function moves. Use it to suppress one finding at its current location.",
-            "runtime_coverage.findings[].stable_id": "Cross-surface JOIN key (fallow:fn:<hash>) from fallow_cov_protocol::function_identity_id, hashing file + name + start_line. The same function shares ONE value across findings, hot paths, blast-radius, and importance entries (the per-finding id uses a per-surface salt and differs), and across V8/Istanbul/oxc producers (columns are excluded from the hash). Like id, it changes when the function's file, name, or start line changes: it is a cross-surface/cross-producer join key, NOT a line-move-immune one. Omitted from the JSON entirely (not emitted as null) when the producing surface or an un-migrated cloud supplied no FunctionIdentity. New baselines key on this when present to align with the cross-surface join key; the grace-window reader accepts the legacy id too.",
-            "runtime_coverage._matching": "Function-identity fallback order when joining runtime evidence to local static analysis: (1) exact stable_id match (fallow:fn:<hash>) when both sides carry one; (2) exact (path, name, start_line); (3) fuzzy nearest candidate within a line tolerance. Baseline suppression accepts BOTH the stable_id and the legacy fallow:prod: id during the grace window, so baselines written before this version keep suppressing.",
-            "runtime_coverage.findings[].evidence.static_status": "used = the function is reachable in the AST module graph; unused = it is dead by static analysis.",
-            "runtime_coverage.findings[].evidence.test_coverage": "covered = the local test suite hits the function; not_covered otherwise.",
-            "runtime_coverage.findings[].evidence.v8_tracking": "tracked = V8 observed the function during the capture window; untracked otherwise.",
-            "runtime_coverage.findings[].actions[].type": "Suggested follow-up identifier. delete-cold-code is emitted on safe_to_delete; review-runtime on review_required.",
-            "runtime_coverage.blast_radius[]": "First-class blast-radius entries with stable fallow:blast IDs, static caller count, traffic-weighted caller reach, optional cloud deploy touch count, and low/medium/high risk band.",
-            "runtime_coverage.importance[]": "First-class production-importance entries with stable fallow:importance IDs, invocations, cyclomatic complexity, owner count, 0-100 importance score, and templated reason.",
-            "runtime_coverage.warnings[].code": "Stable warning identifier. cloud_functions_unmatched flags entries dropped because no AST/static counterpart was found locally."
-        },
-        "enums": {
-            "data_source": ["local", "cloud"],
-            "report_verdict": ["clean", "hot-path-touched", "cold-code-detected", "license-expired-grace", "unknown"],
-            "finding_verdict": ["safe_to_delete", "review_required", "coverage_unavailable", "low_traffic", "active", "unknown"],
-            "static_status": ["used", "unused"],
-            "test_coverage": ["covered", "not_covered"],
-            "v8_tracking": ["tracked", "untracked"],
-            "action_type": ["delete-cold-code", "review-runtime"]
-        },
-        "warnings": {
-            "no_runtime_data": "Cloud returned an empty runtime window. Either the period is too narrow or no traces have been ingested yet.",
-            "cloud_functions_unmatched": "One or more cloud-side functions could not be matched against the local AST/static index and were dropped from findings. Common causes: stale runtime data after a rename/move, file path mismatch between deploy and repo, or analysis run on the wrong commit."
-        }
-    })
+    fallow_output::coverage_analyze_meta()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn meta_value(meta: fallow_types::envelope::Meta) -> Value {
+        serde_json::to_value(meta).expect("metadata should serialize")
+    }
+
+    fn check_meta() -> Value {
+        meta_value(fallow_output::check_meta())
+    }
+
+    fn health_meta() -> Value {
+        meta_value(fallow_output::health_meta())
+    }
+
+    fn dupes_meta() -> Value {
+        meta_value(fallow_output::dupes_meta())
+    }
 
     #[test]
     fn rule_by_id_finds_check_rule() {
@@ -1862,6 +1338,19 @@ mod tests {
         let url = rule_docs_url(rule);
         assert!(url.starts_with("https://docs.fallow.tools/"));
         assert!(url.contains("unused-exports"));
+    }
+
+    #[test]
+    fn result_sarif_rule_ids_have_explain_metadata() {
+        for contract in fallow_output::issue_output_contracts() {
+            for rule_id in contract.sarif_rule_ids {
+                assert!(
+                    rule_by_id(&rule_id).is_some(),
+                    "result metadata code {} has SARIF rule id {rule_id} without RuleDef",
+                    contract.code
+                );
+            }
+        }
     }
 
     #[test]
@@ -1952,11 +1441,11 @@ mod tests {
             let defs = meta["field_definitions"].as_object().unwrap();
             assert_eq!(
                 defs["actions[]"].as_str().unwrap(),
-                ACTIONS_FIELD_DEFINITION,
+                fallow_output::ACTIONS_FIELD_DEFINITION,
             );
             assert_eq!(
                 defs["actions[].auto_fixable"].as_str().unwrap(),
-                ACTIONS_AUTO_FIXABLE_FIELD_DEFINITION,
+                fallow_output::ACTIONS_AUTO_FIXABLE_FIELD_DEFINITION,
             );
         }
     }
@@ -2002,7 +1491,7 @@ mod tests {
     #[test]
     fn coverage_setup_meta_has_docs_fields_enums_and_warnings() {
         let meta = coverage_setup_meta();
-        assert_eq!(meta["docs_url"], COVERAGE_SETUP_DOCS);
+        assert_eq!(meta["docs_url"], fallow_output::COVERAGE_SETUP_DOCS);
         assert!(
             meta["field_definitions"]
                 .as_object()
@@ -2050,7 +1539,7 @@ mod tests {
     #[test]
     fn coverage_analyze_meta_documents_data_source_and_action_vocabulary() {
         let meta = coverage_analyze_meta();
-        assert_eq!(meta["docs_url"], COVERAGE_ANALYZE_DOCS);
+        assert_eq!(meta["docs_url"], fallow_output::COVERAGE_ANALYZE_DOCS);
         let fields = meta["field_definitions"].as_object().unwrap();
         assert!(fields.contains_key("runtime_coverage.summary.data_source"));
         assert!(fields.contains_key("runtime_coverage.summary.last_received_at"));
@@ -2319,38 +1808,38 @@ mod tests {
 
     #[test]
     fn check_docs_url_valid() {
-        assert!(CHECK_DOCS.starts_with("https://"));
-        assert!(CHECK_DOCS.contains("dead-code"));
+        assert!(fallow_output::CHECK_DOCS.starts_with("https://"));
+        assert!(fallow_output::CHECK_DOCS.contains("dead-code"));
     }
 
     #[test]
     fn health_docs_url_valid() {
-        assert!(HEALTH_DOCS.starts_with("https://"));
-        assert!(HEALTH_DOCS.contains("health"));
+        assert!(fallow_output::HEALTH_DOCS.starts_with("https://"));
+        assert!(fallow_output::HEALTH_DOCS.contains("health"));
     }
 
     #[test]
     fn dupes_docs_url_valid() {
-        assert!(DUPES_DOCS.starts_with("https://"));
-        assert!(DUPES_DOCS.contains("dupes"));
+        assert!(fallow_output::DUPES_DOCS.starts_with("https://"));
+        assert!(fallow_output::DUPES_DOCS.contains("dupes"));
     }
 
     #[test]
     fn check_meta_docs_url_matches_constant() {
         let meta = check_meta();
-        assert_eq!(meta["docs"].as_str().unwrap(), CHECK_DOCS);
+        assert_eq!(meta["docs"].as_str().unwrap(), fallow_output::CHECK_DOCS);
     }
 
     #[test]
     fn health_meta_docs_url_matches_constant() {
         let meta = health_meta();
-        assert_eq!(meta["docs"].as_str().unwrap(), HEALTH_DOCS);
+        assert_eq!(meta["docs"].as_str().unwrap(), fallow_output::HEALTH_DOCS);
     }
 
     #[test]
     fn dupes_meta_docs_url_matches_constant() {
         let meta = dupes_meta();
-        assert_eq!(meta["docs"].as_str().unwrap(), DUPES_DOCS);
+        assert_eq!(meta["docs"].as_str().unwrap(), fallow_output::DUPES_DOCS);
     }
 
     #[test]
@@ -2399,7 +1888,7 @@ mod tests {
 
     #[test]
     fn check_rules_count() {
-        assert_eq!(CHECK_RULES.len(), 44);
+        assert_eq!(CHECK_RULES.len(), 45);
     }
 
     #[test]

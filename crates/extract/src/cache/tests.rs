@@ -7,6 +7,7 @@ use oxc_span::Span;
 use crate::*;
 use fallow_types::discover::FileId;
 use fallow_types::extract::{SkippedSecurityCalleeExpressionKind, SkippedSecurityCalleeReason};
+use fallow_types::source_fingerprint::SourceFingerprint;
 
 use super::*;
 
@@ -33,7 +34,8 @@ fn cache_roundtrip_preserves_unresolved_callee_diagnostics() {
     assert_eq!(module.security_sinks_skipped, 1);
     assert_eq!(module.security_unresolved_callee_sites.len(), 1);
 
-    let cached = module_to_cached(&module, 10, 20);
+    let cached = module_to_cached_from_parts(&module, 10, 20);
+    assert!(cached.semantic_facts.is_none());
     let restored = cached_to_module(&cached, FileId(7));
     let diagnostic = restored
         .security_unresolved_callee_sites
@@ -63,7 +65,7 @@ fn cache_roundtrip_preserves_react_structural_ir() {
     assert_eq!(module.hook_uses.len(), 1);
     assert_eq!(module.render_edges.len(), 1);
 
-    let cached = module_to_cached(&module, 10, 20);
+    let cached = module_to_cached_from_parts(&module, 10, 20);
     let restored = cached_to_module(&cached, FileId(7));
 
     assert_eq!(restored.component_functions.len(), 1);
@@ -85,7 +87,7 @@ fn cache_omits_empty_exported_factory_returns_but_roundtrips_non_empty() {
         "export const value = 1;",
     );
     assert!(empty.exported_factory_returns.is_empty());
-    let cached_empty = module_to_cached(&empty, 10, 20);
+    let cached_empty = module_to_cached_from_parts(&empty, 10, 20);
     assert!(cached_empty.exported_factory_returns.is_none());
 
     let module = parse_from_content(
@@ -94,7 +96,7 @@ fn cache_omits_empty_exported_factory_returns_but_roundtrips_non_empty() {
         "class RESTApi {}\nexport function useApi() { return new RESTApi(); }",
     );
     assert_eq!(module.exported_factory_returns.len(), 1);
-    let cached = module_to_cached(&module, 10, 20);
+    let cached = module_to_cached_from_parts(&module, 10, 20);
     assert!(cached.exported_factory_returns.is_some());
     let restored = cached_to_module(&cached, FileId(8));
 
@@ -109,7 +111,7 @@ fn cache_store_insert_and_get() {
     let mut store = CacheStore::new();
     let module = CachedModule {
         content_hash: 42,
-        mtime_secs: 0,
+        mtime_ns: 0,
         file_size: 0,
         last_access_secs: 0,
         exports: vec![],
@@ -117,9 +119,10 @@ fn cache_store_insert_and_get() {
         re_exports: vec![],
         dynamic_imports: vec![],
         require_calls: vec![],
-        package_path_references: vec![],
+        package_path_references: Box::default(),
         member_accesses: vec![],
-        whole_object_uses: vec![],
+        semantic_facts: None,
+        whole_object_uses: Box::default(),
         dynamic_import_patterns: vec![],
         has_cjs_exports: false,
         has_angular_component_template_url: false,
@@ -192,7 +195,7 @@ fn cache_store_hash_mismatch_returns_none() {
     let mut store = CacheStore::new();
     let module = CachedModule {
         content_hash: 42,
-        mtime_secs: 0,
+        mtime_ns: 0,
         file_size: 0,
         last_access_secs: 0,
         exports: vec![],
@@ -200,9 +203,10 @@ fn cache_store_hash_mismatch_returns_none() {
         re_exports: vec![],
         dynamic_imports: vec![],
         require_calls: vec![],
-        package_path_references: vec![],
+        package_path_references: Box::default(),
         member_accesses: vec![],
-        whole_object_uses: vec![],
+        semantic_facts: None,
+        whole_object_uses: Box::default(),
         dynamic_import_patterns: vec![],
         has_cjs_exports: false,
         has_angular_component_template_url: false,
@@ -283,7 +287,7 @@ fn cache_store_overwrite_entry() {
     let mut store = CacheStore::new();
     let m1 = CachedModule {
         content_hash: 1,
-        mtime_secs: 0,
+        mtime_ns: 0,
         file_size: 0,
         last_access_secs: 0,
         exports: vec![],
@@ -291,9 +295,10 @@ fn cache_store_overwrite_entry() {
         re_exports: vec![],
         dynamic_imports: vec![],
         require_calls: vec![],
-        package_path_references: vec![],
+        package_path_references: Box::default(),
         member_accesses: vec![],
-        whole_object_uses: vec![],
+        semantic_facts: None,
+        whole_object_uses: Box::default(),
         dynamic_import_patterns: vec![],
         has_cjs_exports: false,
         has_angular_component_template_url: false,
@@ -357,7 +362,7 @@ fn cache_store_overwrite_entry() {
     };
     let m2 = CachedModule {
         content_hash: 2,
-        mtime_secs: 0,
+        mtime_ns: 0,
         file_size: 0,
         last_access_secs: 0,
         exports: vec![],
@@ -365,9 +370,10 @@ fn cache_store_overwrite_entry() {
         re_exports: vec![],
         dynamic_imports: vec![],
         require_calls: vec![],
-        package_path_references: vec![],
+        package_path_references: Box::default(),
         member_accesses: vec![],
-        whole_object_uses: vec![],
+        semantic_facts: None,
+        whole_object_uses: Box::default(),
         dynamic_import_patterns: vec![],
         has_cjs_exports: false,
         has_angular_component_template_url: false,
@@ -459,9 +465,10 @@ fn module_to_cached_roundtrip_named_export() {
         re_exports: vec![],
         dynamic_imports: vec![],
         require_calls: vec![],
-        package_path_references: vec![],
+        package_path_references: Box::default(),
         member_accesses: vec![],
-        whole_object_uses: vec![],
+        semantic_facts: Box::default(),
+        whole_object_uses: Box::default(),
         dynamic_import_patterns: vec![],
         has_cjs_exports: false,
         has_angular_component_template_url: false,
@@ -527,7 +534,8 @@ fn module_to_cached_roundtrip_named_export() {
         has_dynamic_dispatch: false,
     };
 
-    let cached = module_to_cached(&module, 0, 0);
+    let cached = module_to_cached_from_parts(&module, 0, 0);
+    assert!(cached.semantic_facts.is_none());
     let restored = cached_to_module(&cached, FileId(0));
 
     assert_eq!(
@@ -572,9 +580,10 @@ fn module_to_cached_roundtrip_side_effect_used_export() {
         re_exports: vec![],
         dynamic_imports: vec![],
         require_calls: vec![],
-        package_path_references: vec![],
+        package_path_references: Box::default(),
         member_accesses: vec![],
-        whole_object_uses: vec![],
+        semantic_facts: Box::default(),
+        whole_object_uses: Box::default(),
         dynamic_import_patterns: vec![],
         has_cjs_exports: false,
         has_angular_component_template_url: false,
@@ -640,7 +649,8 @@ fn module_to_cached_roundtrip_side_effect_used_export() {
         has_dynamic_dispatch: false,
     };
 
-    let cached = module_to_cached(&module, 0, 0);
+    let cached = module_to_cached_from_parts(&module, 0, 0);
+    assert!(cached.semantic_facts.is_none());
     let restored = cached_to_module(&cached, FileId(0));
 
     assert_eq!(restored.exports.len(), 1);
@@ -670,9 +680,10 @@ fn module_to_cached_roundtrip_default_export() {
         re_exports: vec![],
         dynamic_imports: vec![],
         require_calls: vec![],
-        package_path_references: vec![],
+        package_path_references: Box::default(),
         member_accesses: vec![],
-        whole_object_uses: vec![],
+        semantic_facts: Box::default(),
+        whole_object_uses: Box::default(),
         dynamic_import_patterns: vec![],
         has_cjs_exports: false,
         has_angular_component_template_url: false,
@@ -738,7 +749,8 @@ fn module_to_cached_roundtrip_default_export() {
         has_dynamic_dispatch: false,
     };
 
-    let cached = module_to_cached(&module, 0, 0);
+    let cached = module_to_cached_from_parts(&module, 0, 0);
+    assert!(cached.semantic_facts.is_none());
     let restored = cached_to_module(&cached, FileId(0));
 
     assert_eq!(restored.exports[0].name, ExportName::Default);
@@ -794,9 +806,10 @@ fn module_to_cached_roundtrip_imports() {
         re_exports: vec![],
         dynamic_imports: vec![],
         require_calls: vec![],
-        package_path_references: vec![],
+        package_path_references: Box::default(),
         member_accesses: vec![],
-        whole_object_uses: vec![],
+        semantic_facts: Box::default(),
+        whole_object_uses: Box::default(),
         dynamic_import_patterns: vec![],
         has_cjs_exports: false,
         has_angular_component_template_url: false,
@@ -862,7 +875,7 @@ fn module_to_cached_roundtrip_imports() {
         has_dynamic_dispatch: false,
     };
 
-    let cached = module_to_cached(&module, 0, 0);
+    let cached = module_to_cached_from_parts(&module, 0, 0);
     let restored = cached_to_module(&cached, FileId(0));
 
     assert_eq!(restored.imports.len(), 4);
@@ -898,9 +911,10 @@ fn module_to_cached_roundtrip_re_exports() {
         }],
         dynamic_imports: vec![],
         require_calls: vec![],
-        package_path_references: vec![],
+        package_path_references: Box::default(),
         member_accesses: vec![],
-        whole_object_uses: vec![],
+        semantic_facts: Box::default(),
+        whole_object_uses: Box::default(),
         dynamic_import_patterns: vec![],
         has_cjs_exports: false,
         has_angular_component_template_url: false,
@@ -966,7 +980,7 @@ fn module_to_cached_roundtrip_re_exports() {
         has_dynamic_dispatch: false,
     };
 
-    let cached = module_to_cached(&module, 0, 0);
+    let cached = module_to_cached_from_parts(&module, 0, 0);
     let restored = cached_to_module(&cached, FileId(0));
 
     assert_eq!(restored.re_exports.len(), 1);
@@ -1001,12 +1015,57 @@ fn module_to_cached_roundtrip_dynamic_imports() {
             local_name: None,
             source_span: oxc_span::Span::default(),
         }],
-        package_path_references: vec![],
+        package_path_references: Box::default(),
         member_accesses: vec![MemberAccess {
             object: "Status".to_string(),
             member: "Active".to_string(),
         }],
-        whole_object_uses: vec![],
+        semantic_facts: vec![
+            SemanticFact::AngularTemplateMemberAccess(AngularTemplateMemberAccessFact {
+                member: "title".to_string(),
+            }),
+            SemanticFact::FactoryCallMemberAccess(FactoryCallMemberAccessFact {
+                callee_object: "MyClass".to_string(),
+                callee_method: "getInstance".to_string(),
+                member: "getData".to_string(),
+            }),
+            SemanticFact::FluentChainMemberAccess(FluentChainMemberAccessFact {
+                root_object: "EventBuilder".to_string(),
+                root_method: "create".to_string(),
+                chain: vec!["setProcessId".to_string(), "setSubject".to_string()],
+                member: "build".to_string(),
+            }),
+            SemanticFact::FluentChainNewMemberAccess(FluentChainNewMemberAccessFact {
+                class_name: "OptionBuilder".to_string(),
+                chain: vec!["addDefault".to_string(), "addFromCli".to_string()],
+                member: "build".to_string(),
+            }),
+            SemanticFact::PlaywrightFixtureUse(PlaywrightFixtureUseFact {
+                test_name: "test".to_string(),
+                fixture_name: "adminPage".to_string(),
+                member: "assertGreeting".to_string(),
+            }),
+            SemanticFact::PlaywrightFixtureDefinition(PlaywrightFixtureDefinitionFact {
+                test_name: "test".to_string(),
+                fixture_name: "adminPage".to_string(),
+                type_name: "AdminPage".to_string(),
+            }),
+            SemanticFact::PlaywrightFixtureAlias(PlaywrightFixtureAliasFact {
+                test_name: "mergedTest".to_string(),
+                base_name: "test".to_string(),
+            }),
+            SemanticFact::PlaywrightFixtureType(PlaywrightFixtureTypeFact {
+                alias_name: "Pages".to_string(),
+                fixture_name: "adminPage".to_string(),
+                type_name: "AdminPage".to_string(),
+            }),
+            SemanticFact::InstanceExportBinding(InstanceExportBindingFact {
+                export_name: "service".to_string(),
+                target_name: "Service".to_string(),
+            }),
+        ]
+        .into(),
+        whole_object_uses: Box::default(),
         dynamic_import_patterns: vec![],
         has_cjs_exports: true,
         has_angular_component_template_url: false,
@@ -1072,7 +1131,8 @@ fn module_to_cached_roundtrip_dynamic_imports() {
         has_dynamic_dispatch: false,
     };
 
-    let cached = module_to_cached(&module, 0, 0);
+    let cached = module_to_cached_from_parts(&module, 0, 0);
+    assert!(cached.semantic_facts.is_some());
     let restored = cached_to_module(&cached, FileId(0));
 
     assert_eq!(restored.dynamic_imports.len(), 1);
@@ -1086,6 +1146,53 @@ fn module_to_cached_roundtrip_dynamic_imports() {
     assert_eq!(restored.member_accesses.len(), 1);
     assert_eq!(restored.member_accesses[0].object, "Status");
     assert_eq!(restored.member_accesses[0].member, "Active");
+    assert_eq!(
+        restored.semantic_facts.as_ref(),
+        &[
+            SemanticFact::AngularTemplateMemberAccess(AngularTemplateMemberAccessFact {
+                member: "title".to_string(),
+            }),
+            SemanticFact::FactoryCallMemberAccess(FactoryCallMemberAccessFact {
+                callee_object: "MyClass".to_string(),
+                callee_method: "getInstance".to_string(),
+                member: "getData".to_string(),
+            }),
+            SemanticFact::FluentChainMemberAccess(FluentChainMemberAccessFact {
+                root_object: "EventBuilder".to_string(),
+                root_method: "create".to_string(),
+                chain: vec!["setProcessId".to_string(), "setSubject".to_string()],
+                member: "build".to_string(),
+            }),
+            SemanticFact::FluentChainNewMemberAccess(FluentChainNewMemberAccessFact {
+                class_name: "OptionBuilder".to_string(),
+                chain: vec!["addDefault".to_string(), "addFromCli".to_string()],
+                member: "build".to_string(),
+            }),
+            SemanticFact::PlaywrightFixtureUse(PlaywrightFixtureUseFact {
+                test_name: "test".to_string(),
+                fixture_name: "adminPage".to_string(),
+                member: "assertGreeting".to_string(),
+            }),
+            SemanticFact::PlaywrightFixtureDefinition(PlaywrightFixtureDefinitionFact {
+                test_name: "test".to_string(),
+                fixture_name: "adminPage".to_string(),
+                type_name: "AdminPage".to_string(),
+            }),
+            SemanticFact::PlaywrightFixtureAlias(PlaywrightFixtureAliasFact {
+                test_name: "mergedTest".to_string(),
+                base_name: "test".to_string(),
+            }),
+            SemanticFact::PlaywrightFixtureType(PlaywrightFixtureTypeFact {
+                alias_name: "Pages".to_string(),
+                fixture_name: "adminPage".to_string(),
+                type_name: "AdminPage".to_string(),
+            }),
+            SemanticFact::InstanceExportBinding(InstanceExportBindingFact {
+                export_name: "service".to_string(),
+                target_name: "Service".to_string(),
+            }),
+        ][..]
+    );
     assert!(restored.has_cjs_exports);
 }
 
@@ -1140,9 +1247,10 @@ fn module_to_cached_roundtrip_members() {
         re_exports: vec![],
         dynamic_imports: vec![],
         require_calls: vec![],
-        package_path_references: vec![],
+        package_path_references: Box::default(),
         member_accesses: vec![],
-        whole_object_uses: vec![],
+        semantic_facts: Box::default(),
+        whole_object_uses: Box::default(),
         dynamic_import_patterns: vec![],
         has_cjs_exports: false,
         has_angular_component_template_url: false,
@@ -1208,7 +1316,7 @@ fn module_to_cached_roundtrip_members() {
         has_dynamic_dispatch: false,
     };
 
-    let cached = module_to_cached(&module, 0, 0);
+    let cached = module_to_cached_from_parts(&module, 0, 0);
     let restored = cached_to_module(&cached, FileId(0));
 
     assert_eq!(restored.exports[0].members.len(), 3);
@@ -1243,7 +1351,7 @@ fn cache_save_and_load_roundtrip() {
     let mut store = CacheStore::new();
     let module = CachedModule {
         content_hash: 42,
-        mtime_secs: 0,
+        mtime_ns: 0,
         file_size: 0,
         last_access_secs: 0,
         exports: vec![],
@@ -1251,9 +1359,10 @@ fn cache_save_and_load_roundtrip() {
         re_exports: vec![],
         dynamic_imports: vec![],
         require_calls: vec![],
-        package_path_references: vec![],
+        package_path_references: Box::default(),
         member_accesses: vec![],
-        whole_object_uses: vec![],
+        semantic_facts: None,
+        whole_object_uses: Box::default(),
         dynamic_import_patterns: vec![],
         has_cjs_exports: false,
         has_angular_component_template_url: false,
@@ -1337,7 +1446,7 @@ fn cache_version_mismatch_returns_none() {
     let mut store = CacheStore::new();
     let module = CachedModule {
         content_hash: 42,
-        mtime_secs: 0,
+        mtime_ns: 0,
         file_size: 0,
         last_access_secs: 0,
         exports: vec![],
@@ -1345,9 +1454,10 @@ fn cache_version_mismatch_returns_none() {
         re_exports: vec![],
         dynamic_imports: vec![],
         require_calls: vec![],
-        package_path_references: vec![],
+        package_path_references: Box::default(),
         member_accesses: vec![],
-        whole_object_uses: vec![],
+        semantic_facts: None,
+        whole_object_uses: Box::default(),
         dynamic_import_patterns: vec![],
         has_cjs_exports: false,
         has_angular_component_template_url: false,
@@ -1443,9 +1553,10 @@ fn module_to_cached_roundtrip_type_only_import() {
         re_exports: vec![],
         dynamic_imports: vec![],
         require_calls: vec![],
-        package_path_references: vec![],
+        package_path_references: Box::default(),
         member_accesses: vec![],
-        whole_object_uses: vec![],
+        semantic_facts: Box::default(),
+        whole_object_uses: Box::default(),
         dynamic_import_patterns: vec![],
         has_cjs_exports: false,
         has_angular_component_template_url: false,
@@ -1511,7 +1622,7 @@ fn module_to_cached_roundtrip_type_only_import() {
         has_dynamic_dispatch: false,
     };
 
-    let cached = module_to_cached(&module, 0, 0);
+    let cached = module_to_cached_from_parts(&module, 0, 0);
     let restored = cached_to_module(&cached, FileId(0));
 
     assert!(restored.imports[0].is_type_only);
@@ -1524,7 +1635,7 @@ fn get_by_path_only_returns_entry_regardless_of_hash() {
     let mut store = CacheStore::new();
     let module = CachedModule {
         content_hash: 42,
-        mtime_secs: 0,
+        mtime_ns: 0,
         file_size: 0,
         last_access_secs: 0,
         exports: vec![],
@@ -1532,9 +1643,10 @@ fn get_by_path_only_returns_entry_regardless_of_hash() {
         re_exports: vec![],
         dynamic_imports: vec![],
         require_calls: vec![],
-        package_path_references: vec![],
+        package_path_references: Box::default(),
         member_accesses: vec![],
-        whole_object_uses: vec![],
+        semantic_facts: None,
+        whole_object_uses: Box::default(),
         dynamic_import_patterns: vec![],
         has_cjs_exports: false,
         has_angular_component_template_url: false,
@@ -1621,7 +1733,7 @@ fn retain_paths_removes_stale_entries() {
     let mut store = CacheStore::new();
     let m = || CachedModule {
         content_hash: 1,
-        mtime_secs: 0,
+        mtime_ns: 0,
         file_size: 0,
         last_access_secs: 0,
         exports: vec![],
@@ -1629,9 +1741,10 @@ fn retain_paths_removes_stale_entries() {
         re_exports: vec![],
         dynamic_imports: vec![],
         require_calls: vec![],
-        package_path_references: vec![],
+        package_path_references: Box::default(),
         member_accesses: vec![],
-        whole_object_uses: vec![],
+        semantic_facts: None,
+        whole_object_uses: Box::default(),
         dynamic_import_patterns: vec![],
         has_cjs_exports: false,
         has_angular_component_template_url: false,
@@ -1712,11 +1825,12 @@ fn retain_paths_removes_stale_entries() {
         },
     ];
 
-    store.retain_paths(&files);
+    assert!(store.retain_paths(&files));
     assert_eq!(store.len(), 2);
     assert!(store.get_by_path_only(Path::new("/project/a.ts")).is_some());
     assert!(store.get_by_path_only(Path::new("/project/b.ts")).is_none());
     assert!(store.get_by_path_only(Path::new("/project/c.ts")).is_some());
+    assert!(!store.retain_paths(&files));
 }
 
 #[test]
@@ -1724,7 +1838,7 @@ fn retain_paths_with_empty_files_clears_cache() {
     let mut store = CacheStore::new();
     let m = CachedModule {
         content_hash: 1,
-        mtime_secs: 0,
+        mtime_ns: 0,
         file_size: 0,
         last_access_secs: 0,
         exports: vec![],
@@ -1732,9 +1846,10 @@ fn retain_paths_with_empty_files_clears_cache() {
         re_exports: vec![],
         dynamic_imports: vec![],
         require_calls: vec![],
-        package_path_references: vec![],
+        package_path_references: Box::default(),
         member_accesses: vec![],
-        whole_object_uses: vec![],
+        semantic_facts: None,
+        whole_object_uses: Box::default(),
         dynamic_import_patterns: vec![],
         has_cjs_exports: false,
         has_angular_component_template_url: false,
@@ -1799,8 +1914,9 @@ fn retain_paths_with_empty_files_clears_cache() {
     store.insert(Path::new("a.ts"), m);
     assert_eq!(store.len(), 1);
 
-    store.retain_paths(&[]);
+    assert!(store.retain_paths(&[]));
     assert!(store.is_empty());
+    assert!(!store.retain_paths(&[]));
 }
 
 #[test]
@@ -1808,7 +1924,7 @@ fn get_by_metadata_returns_entry_on_match() {
     let mut store = CacheStore::new();
     let module = CachedModule {
         content_hash: 42,
-        mtime_secs: 1000,
+        mtime_ns: 1000,
         file_size: 500,
         last_access_secs: 0,
         exports: vec![],
@@ -1816,9 +1932,10 @@ fn get_by_metadata_returns_entry_on_match() {
         re_exports: vec![],
         dynamic_imports: vec![],
         require_calls: vec![],
-        package_path_references: vec![],
+        package_path_references: Box::default(),
         member_accesses: vec![],
-        whole_object_uses: vec![],
+        semantic_facts: None,
+        whole_object_uses: Box::default(),
         dynamic_import_patterns: vec![],
         has_cjs_exports: false,
         has_angular_component_template_url: false,
@@ -1882,7 +1999,7 @@ fn get_by_metadata_returns_entry_on_match() {
     };
     store.insert(Path::new("test.ts"), module);
 
-    let result = store.get_by_metadata(Path::new("test.ts"), 1000, 500);
+    let result = store.get_by_metadata(Path::new("test.ts"), SourceFingerprint::new(1000, 500));
     assert!(result.is_some());
     assert_eq!(result.unwrap().content_hash, 42);
 }
@@ -1892,7 +2009,7 @@ fn get_by_metadata_returns_none_on_mtime_mismatch() {
     let mut store = CacheStore::new();
     let module = CachedModule {
         content_hash: 42,
-        mtime_secs: 1000,
+        mtime_ns: 1000,
         file_size: 500,
         last_access_secs: 0,
         exports: vec![],
@@ -1900,9 +2017,10 @@ fn get_by_metadata_returns_none_on_mtime_mismatch() {
         re_exports: vec![],
         dynamic_imports: vec![],
         require_calls: vec![],
-        package_path_references: vec![],
+        package_path_references: Box::default(),
         member_accesses: vec![],
-        whole_object_uses: vec![],
+        semantic_facts: None,
+        whole_object_uses: Box::default(),
         dynamic_import_patterns: vec![],
         has_cjs_exports: false,
         has_angular_component_template_url: false,
@@ -1968,7 +2086,7 @@ fn get_by_metadata_returns_none_on_mtime_mismatch() {
 
     assert!(
         store
-            .get_by_metadata(Path::new("test.ts"), 2000, 500)
+            .get_by_metadata(Path::new("test.ts"), SourceFingerprint::new(2000, 500))
             .is_none()
     );
 }
@@ -1978,7 +2096,7 @@ fn get_by_metadata_returns_none_on_size_mismatch() {
     let mut store = CacheStore::new();
     let module = CachedModule {
         content_hash: 42,
-        mtime_secs: 1000,
+        mtime_ns: 1000,
         file_size: 500,
         last_access_secs: 0,
         exports: vec![],
@@ -1986,9 +2104,10 @@ fn get_by_metadata_returns_none_on_size_mismatch() {
         re_exports: vec![],
         dynamic_imports: vec![],
         require_calls: vec![],
-        package_path_references: vec![],
+        package_path_references: Box::default(),
         member_accesses: vec![],
-        whole_object_uses: vec![],
+        semantic_facts: None,
+        whole_object_uses: Box::default(),
         dynamic_import_patterns: vec![],
         has_cjs_exports: false,
         has_angular_component_template_url: false,
@@ -2054,7 +2173,7 @@ fn get_by_metadata_returns_none_on_size_mismatch() {
 
     assert!(
         store
-            .get_by_metadata(Path::new("test.ts"), 1000, 999)
+            .get_by_metadata(Path::new("test.ts"), SourceFingerprint::new(1000, 999))
             .is_none()
     );
 }
@@ -2064,7 +2183,7 @@ fn get_by_metadata_returns_none_for_zero_mtime() {
     let mut store = CacheStore::new();
     let module = CachedModule {
         content_hash: 42,
-        mtime_secs: 0,
+        mtime_ns: 0,
         file_size: 500,
         last_access_secs: 0,
         exports: vec![],
@@ -2072,9 +2191,10 @@ fn get_by_metadata_returns_none_for_zero_mtime() {
         re_exports: vec![],
         dynamic_imports: vec![],
         require_calls: vec![],
-        package_path_references: vec![],
+        package_path_references: Box::default(),
         member_accesses: vec![],
-        whole_object_uses: vec![],
+        semantic_facts: None,
+        whole_object_uses: Box::default(),
         dynamic_import_patterns: vec![],
         has_cjs_exports: false,
         has_angular_component_template_url: false,
@@ -2140,7 +2260,7 @@ fn get_by_metadata_returns_none_for_zero_mtime() {
 
     assert!(
         store
-            .get_by_metadata(Path::new("test.ts"), 0, 500)
+            .get_by_metadata(Path::new("test.ts"), SourceFingerprint::new(0, 500))
             .is_none()
     );
 }
@@ -2150,7 +2270,10 @@ fn get_by_metadata_returns_none_for_missing_file() {
     let store = CacheStore::new();
     assert!(
         store
-            .get_by_metadata(Path::new("nonexistent.ts"), 1000, 500)
+            .get_by_metadata(
+                Path::new("nonexistent.ts"),
+                SourceFingerprint::new(1000, 500)
+            )
             .is_none()
     );
 }
@@ -2164,9 +2287,10 @@ fn module_to_cached_stores_mtime_and_size() {
         re_exports: vec![],
         dynamic_imports: vec![],
         require_calls: vec![],
-        package_path_references: vec![],
+        package_path_references: Box::default(),
         member_accesses: vec![],
-        whole_object_uses: vec![],
+        semantic_facts: Box::default(),
+        whole_object_uses: Box::default(),
         dynamic_import_patterns: vec![],
         has_cjs_exports: false,
         has_angular_component_template_url: false,
@@ -2232,8 +2356,8 @@ fn module_to_cached_stores_mtime_and_size() {
         has_dynamic_dispatch: false,
     };
 
-    let cached = module_to_cached(&module, 12345, 6789);
-    assert_eq!(cached.mtime_secs, 12345);
+    let cached = module_to_cached_from_parts(&module, 12345, 6789);
+    assert_eq!(cached.mtime_ns, 12345);
     assert_eq!(cached.file_size, 6789);
     assert_eq!(cached.content_hash, 42);
 }
@@ -2247,9 +2371,10 @@ fn module_to_cached_roundtrip_line_offsets() {
         re_exports: vec![],
         dynamic_imports: vec![],
         require_calls: vec![],
-        package_path_references: vec![],
+        package_path_references: Box::default(),
         member_accesses: vec![],
-        whole_object_uses: vec![],
+        semantic_facts: Box::default(),
+        whole_object_uses: Box::default(),
         dynamic_import_patterns: vec![],
         has_cjs_exports: false,
         has_angular_component_template_url: false,
@@ -2314,15 +2439,15 @@ fn module_to_cached_roundtrip_line_offsets() {
         has_dynamic_component_render: false,
         has_dynamic_dispatch: false,
     };
-    let cached = module_to_cached(&module, 0, 0);
+    let cached = module_to_cached_from_parts(&module, 0, 0);
     let restored = cached_to_module(&cached, FileId(0));
     assert_eq!(restored.line_offsets, vec![0, 15, 30, 45]);
 }
 
 #[test]
-#[allow(
+#[expect(
     clippy::too_many_lines,
-    reason = "roundtrip fixture enumerates cache fields"
+    reason = "exhaustive ModuleInfo round-trip fixture literal"
 )]
 fn module_to_cached_roundtrip_suppressions_with_kinds() {
     use crate::suppress::{IssueKind, Suppression};
@@ -2334,9 +2459,10 @@ fn module_to_cached_roundtrip_suppressions_with_kinds() {
         re_exports: vec![],
         dynamic_imports: vec![],
         require_calls: vec![],
-        package_path_references: vec![],
+        package_path_references: Box::default(),
         member_accesses: vec![],
-        whole_object_uses: vec![],
+        semantic_facts: Box::default(),
+        whole_object_uses: Box::default(),
         dynamic_import_patterns: vec![],
         has_cjs_exports: false,
         has_angular_component_template_url: false,
@@ -2407,7 +2533,7 @@ fn module_to_cached_roundtrip_suppressions_with_kinds() {
         has_dynamic_dispatch: false,
     };
 
-    let cached = module_to_cached(&module, 0, 0);
+    let cached = module_to_cached_from_parts(&module, 0, 0);
     let restored = cached_to_module(&cached, FileId(0));
 
     assert_eq!(restored.suppressions.len(), 4);
@@ -2432,6 +2558,10 @@ fn module_to_cached_roundtrip_suppressions_with_kinds() {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "roundtrip fixture enumerates cache fields"
+)]
 fn module_to_cached_roundtrip_unknown_suppression_kinds() {
     use fallow_types::suppress::UnknownSuppressionKind;
 
@@ -2442,9 +2572,10 @@ fn module_to_cached_roundtrip_unknown_suppression_kinds() {
         re_exports: vec![],
         dynamic_imports: vec![],
         require_calls: vec![],
-        package_path_references: vec![],
+        package_path_references: Box::default(),
         member_accesses: vec![],
-        whole_object_uses: vec![],
+        semantic_facts: Box::default(),
+        whole_object_uses: Box::default(),
         dynamic_import_patterns: vec![],
         has_cjs_exports: false,
         has_angular_component_template_url: false,
@@ -2523,7 +2654,7 @@ fn module_to_cached_roundtrip_unknown_suppression_kinds() {
         has_dynamic_dispatch: false,
     };
 
-    let cached = module_to_cached(&module, 0, 0);
+    let cached = module_to_cached_from_parts(&module, 0, 0);
     let restored = cached_to_module(&cached, FileId(0));
 
     assert_eq!(restored.unknown_suppression_kinds.len(), 2);
@@ -2557,9 +2688,10 @@ fn module_to_cached_roundtrip_visibility() {
         re_exports: vec![],
         dynamic_imports: vec![],
         require_calls: vec![],
-        package_path_references: vec![],
+        package_path_references: Box::default(),
         member_accesses: vec![],
-        whole_object_uses: vec![],
+        semantic_facts: Box::default(),
+        whole_object_uses: Box::default(),
         dynamic_import_patterns: vec![],
         has_cjs_exports: false,
         has_angular_component_template_url: false,
@@ -2625,7 +2757,7 @@ fn module_to_cached_roundtrip_visibility() {
         has_dynamic_dispatch: false,
     };
 
-    let cached = module_to_cached(&module, 0, 0);
+    let cached = module_to_cached_from_parts(&module, 0, 0);
     let restored = cached_to_module(&cached, FileId(0));
 
     assert_eq!(restored.exports[0].visibility, VisibilityTag::Public);
@@ -2650,9 +2782,10 @@ fn module_to_cached_roundtrip_visibility_internal() {
         re_exports: vec![],
         dynamic_imports: vec![],
         require_calls: vec![],
-        package_path_references: vec![],
+        package_path_references: Box::default(),
         member_accesses: vec![],
-        whole_object_uses: vec![],
+        semantic_facts: Box::default(),
+        whole_object_uses: Box::default(),
         dynamic_import_patterns: vec![],
         has_cjs_exports: false,
         has_angular_component_template_url: false,
@@ -2718,7 +2851,7 @@ fn module_to_cached_roundtrip_visibility_internal() {
         has_dynamic_dispatch: false,
     };
 
-    let cached = module_to_cached(&module, 0, 0);
+    let cached = module_to_cached_from_parts(&module, 0, 0);
     assert_eq!(cached.exports[0].visibility, 2);
     let restored = cached_to_module(&cached, FileId(0));
     assert_eq!(restored.exports[0].visibility, VisibilityTag::Internal);
@@ -2743,9 +2876,10 @@ fn module_to_cached_roundtrip_visibility_beta() {
         re_exports: vec![],
         dynamic_imports: vec![],
         require_calls: vec![],
-        package_path_references: vec![],
+        package_path_references: Box::default(),
         member_accesses: vec![],
-        whole_object_uses: vec![],
+        semantic_facts: Box::default(),
+        whole_object_uses: Box::default(),
         dynamic_import_patterns: vec![],
         has_cjs_exports: false,
         has_angular_component_template_url: false,
@@ -2811,7 +2945,7 @@ fn module_to_cached_roundtrip_visibility_beta() {
         has_dynamic_dispatch: false,
     };
 
-    let cached = module_to_cached(&module, 0, 0);
+    let cached = module_to_cached_from_parts(&module, 0, 0);
     assert_eq!(cached.exports[0].visibility, 3);
     let restored = cached_to_module(&cached, FileId(0));
     assert_eq!(restored.exports[0].visibility, VisibilityTag::Beta);
@@ -2836,9 +2970,10 @@ fn module_to_cached_roundtrip_visibility_alpha() {
         re_exports: vec![],
         dynamic_imports: vec![],
         require_calls: vec![],
-        package_path_references: vec![],
+        package_path_references: Box::default(),
         member_accesses: vec![],
-        whole_object_uses: vec![],
+        semantic_facts: Box::default(),
+        whole_object_uses: Box::default(),
         dynamic_import_patterns: vec![],
         has_cjs_exports: false,
         has_angular_component_template_url: false,
@@ -2904,7 +3039,7 @@ fn module_to_cached_roundtrip_visibility_alpha() {
         has_dynamic_dispatch: false,
     };
 
-    let cached = module_to_cached(&module, 0, 0);
+    let cached = module_to_cached_from_parts(&module, 0, 0);
     assert_eq!(cached.exports[0].visibility, 4);
     let restored = cached_to_module(&cached, FileId(0));
     assert_eq!(restored.exports[0].visibility, VisibilityTag::Alpha);
@@ -2919,9 +3054,10 @@ fn module_to_cached_roundtrip_dynamic_import_patterns() {
         re_exports: vec![],
         dynamic_imports: vec![],
         require_calls: vec![],
-        package_path_references: vec![],
+        package_path_references: Box::default(),
         member_accesses: vec![],
-        whole_object_uses: vec![],
+        semantic_facts: Box::default(),
+        whole_object_uses: Box::default(),
         dynamic_import_patterns: vec![
             crate::DynamicImportPattern {
                 prefix: "./components/".to_string(),
@@ -2998,7 +3134,7 @@ fn module_to_cached_roundtrip_dynamic_import_patterns() {
         has_dynamic_dispatch: false,
     };
 
-    let cached = module_to_cached(&module, 0, 0);
+    let cached = module_to_cached_from_parts(&module, 0, 0);
     let restored = cached_to_module(&cached, FileId(0));
 
     assert_eq!(restored.dynamic_import_patterns.len(), 2);
@@ -3022,9 +3158,10 @@ fn module_to_cached_roundtrip_unused_import_bindings() {
         re_exports: vec![],
         dynamic_imports: vec![],
         require_calls: vec![],
-        package_path_references: vec![],
+        package_path_references: Box::default(),
         member_accesses: vec![],
-        whole_object_uses: vec!["Status".to_string()],
+        semantic_facts: Box::default(),
+        whole_object_uses: vec!["Status".to_string()].into(),
         dynamic_import_patterns: vec![],
         has_cjs_exports: false,
         has_angular_component_template_url: false,
@@ -3090,7 +3227,7 @@ fn module_to_cached_roundtrip_unused_import_bindings() {
         has_dynamic_dispatch: false,
     };
 
-    let cached = module_to_cached(&module, 0, 0);
+    let cached = module_to_cached_from_parts(&module, 0, 0);
     let restored = cached_to_module(&cached, FileId(0));
 
     assert_eq!(restored.unused_import_bindings.len(), 2);
@@ -3122,9 +3259,10 @@ fn module_to_cached_roundtrip_complexity() {
         re_exports: vec![],
         dynamic_imports: vec![],
         require_calls: vec![],
-        package_path_references: vec![],
+        package_path_references: Box::default(),
         member_accesses: vec![],
-        whole_object_uses: vec![],
+        semantic_facts: Box::default(),
+        whole_object_uses: Box::default(),
         dynamic_import_patterns: vec![],
         has_cjs_exports: false,
         has_angular_component_template_url: false,
@@ -3219,7 +3357,7 @@ fn module_to_cached_roundtrip_complexity() {
         has_dynamic_dispatch: false,
     };
 
-    let cached = module_to_cached(&module, 0, 0);
+    let cached = module_to_cached_from_parts(&module, 0, 0);
     let restored = cached_to_module(&cached, FileId(0));
 
     assert_eq!(restored.complexity.len(), 2);
@@ -3247,9 +3385,10 @@ fn module_to_cached_roundtrip_require_with_destructured() {
             local_name: None,
             source_span: oxc_span::Span::default(),
         }],
-        package_path_references: vec![],
+        package_path_references: Box::default(),
         member_accesses: vec![],
-        whole_object_uses: vec![],
+        semantic_facts: Box::default(),
+        whole_object_uses: Box::default(),
         dynamic_import_patterns: vec![],
         has_cjs_exports: false,
         has_angular_component_template_url: false,
@@ -3315,7 +3454,7 @@ fn module_to_cached_roundtrip_require_with_destructured() {
         has_dynamic_dispatch: false,
     };
 
-    let cached = module_to_cached(&module, 0, 0);
+    let cached = module_to_cached_from_parts(&module, 0, 0);
     let restored = cached_to_module(&cached, FileId(0));
 
     assert_eq!(restored.require_calls.len(), 1);
@@ -3342,9 +3481,10 @@ fn module_to_cached_roundtrip_dynamic_import_with_local() {
             is_speculative: false,
         }],
         require_calls: vec![],
-        package_path_references: vec![],
+        package_path_references: Box::default(),
         member_accesses: vec![],
-        whole_object_uses: vec![],
+        semantic_facts: Box::default(),
+        whole_object_uses: Box::default(),
         dynamic_import_patterns: vec![],
         has_cjs_exports: false,
         has_angular_component_template_url: false,
@@ -3410,7 +3550,7 @@ fn module_to_cached_roundtrip_dynamic_import_with_local() {
         has_dynamic_dispatch: false,
     };
 
-    let cached = module_to_cached(&module, 0, 0);
+    let cached = module_to_cached_from_parts(&module, 0, 0);
     let restored = cached_to_module(&cached, FileId(0));
 
     assert_eq!(
@@ -3436,9 +3576,10 @@ fn module_to_cached_roundtrip_source_span() {
         re_exports: vec![],
         dynamic_imports: vec![],
         require_calls: vec![],
-        package_path_references: vec![],
+        package_path_references: Box::default(),
         member_accesses: vec![],
-        whole_object_uses: vec![],
+        semantic_facts: Box::default(),
+        whole_object_uses: Box::default(),
         dynamic_import_patterns: vec![],
         has_cjs_exports: false,
         has_angular_component_template_url: false,
@@ -3504,7 +3645,7 @@ fn module_to_cached_roundtrip_source_span() {
         has_dynamic_dispatch: false,
     };
 
-    let cached = module_to_cached(&module, 0, 0);
+    let cached = module_to_cached_from_parts(&module, 0, 0);
     let restored = cached_to_module(&cached, FileId(0));
 
     assert_eq!(restored.imports[0].source_span.start, 25);
@@ -3538,9 +3679,10 @@ fn module_to_cached_roundtrip_member_decorators() {
         re_exports: vec![],
         dynamic_imports: vec![],
         require_calls: vec![],
-        package_path_references: vec![],
+        package_path_references: Box::default(),
         member_accesses: vec![],
-        whole_object_uses: vec![],
+        semantic_facts: Box::default(),
+        whole_object_uses: Box::default(),
         dynamic_import_patterns: vec![],
         has_cjs_exports: false,
         has_angular_component_template_url: false,
@@ -3606,7 +3748,7 @@ fn module_to_cached_roundtrip_member_decorators() {
         has_dynamic_dispatch: false,
     };
 
-    let cached = module_to_cached(&module, 0, 0);
+    let cached = module_to_cached_from_parts(&module, 0, 0);
     let restored = cached_to_module(&cached, FileId(0));
 
     assert!(restored.exports[0].members[0].has_decorator);
@@ -3621,7 +3763,7 @@ fn synthetic_module(content_hash: u64, last_access_secs: u64, payload_kb: usize)
     let payload = "a".repeat(payload_kb * 1024);
     CachedModule {
         content_hash,
-        mtime_secs: 0,
+        mtime_ns: 0,
         file_size: 0,
         last_access_secs,
         exports: vec![],
@@ -3629,9 +3771,10 @@ fn synthetic_module(content_hash: u64, last_access_secs: u64, payload_kb: usize)
         re_exports: vec![],
         dynamic_imports: vec![],
         require_calls: vec![],
-        package_path_references: vec![],
+        package_path_references: Box::default(),
         member_accesses: vec![],
-        whole_object_uses: vec![payload],
+        semantic_facts: None,
+        whole_object_uses: vec![payload].into(),
         dynamic_import_patterns: vec![],
         has_cjs_exports: false,
         has_angular_component_template_url: false,

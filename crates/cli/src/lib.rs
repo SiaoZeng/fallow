@@ -71,7 +71,7 @@ mod base_worktree;
     unused_imports,
     reason = "shared CLI library compiles bin-oriented support modules for reuse"
 )]
-mod baseline;
+use fallow_engine::baseline;
 #[allow(
     dead_code,
     unused_imports,
@@ -85,7 +85,7 @@ mod cache_notice;
 )]
 mod check;
 /// CODEOWNERS file parser and ownership lookup.
-pub mod codeowners;
+pub use fallow_engine::codeowners;
 #[allow(
     dead_code,
     unused_imports,
@@ -100,7 +100,7 @@ mod combined;
 mod dupes;
 
 /// Structured error output for CLI and JSON formats.
-pub mod error;
+pub use fallow_engine::error;
 
 #[allow(
     dead_code,
@@ -125,17 +125,12 @@ pub mod explain;
 )]
 mod health;
 /// Health / complexity analysis report types.
-pub mod health_types;
 #[allow(
     dead_code,
     unused_imports,
     reason = "shared CLI library compiles bin-oriented support modules for reuse"
 )]
 mod license;
-/// Typed wrapper envelopes for duplication findings emitted by
-/// `fallow dupes --format json`. Lives here (rather than in `fallow-types`)
-/// because the bare findings live in `fallow-core` and `crates/cli/src/report/dupes_grouping.rs`.
-pub mod output_dupes;
 #[allow(
     dead_code,
     unused_imports,
@@ -143,13 +138,10 @@ pub mod output_dupes;
 )]
 mod telemetry;
 
-/// Typed envelope structs for the JSON output contract. Live here rather
-/// than in `fallow-types` because the body fields reach into `fallow-core`
-/// and into this crate's own `health_types`.
+/// Test-only coverage for the JSON output contract aliases.
+#[cfg(test)]
 pub mod output_envelope;
-
-/// Programmatic Rust API reused by the NAPI bindings.
-pub mod programmatic;
+pub(crate) mod output_runtime;
 
 /// Cross-platform path classification helpers (POSIX-style root + Windows
 /// drive prefix detection that `Path::is_absolute()` misclassifies).
@@ -206,8 +198,8 @@ mod task_matrix;
     unused_imports,
     reason = "shared CLI library compiles bin-oriented support modules for reuse"
 )]
-mod validate;
-mod vital_signs;
+use fallow_engine::validate;
+use fallow_engine::vital_signs;
 
 pub use runtime_support::{AnalysisKind, GroupBy};
 pub(crate) use runtime_support::{

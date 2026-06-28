@@ -164,11 +164,8 @@ fn run_inner(args: &UploadStaticFindingsArgs, root: &Path) -> Result<(), UploadE
     enforce_clean_worktree(args, root)?;
 
     let config = load_resolved_config(root)?;
-    #[expect(
-        deprecated,
-        reason = "ADR-008 deprecates fallow_core::analyze* externally; the CLI still uses the workspace path dependency"
-    )]
-    let results = fallow_core::analyze(&config)
+    let results = fallow_engine::analyze(&config)
+        .map(|analysis| analysis.results)
         .map_err(|err| UploadError::Validation(format!("analysis failed: {err}")))?;
     let findings = collect_findings(&config, &results);
 
@@ -531,7 +528,7 @@ fn display_endpoint_url(override_endpoint: Option<&str>, project_id: &str) -> St
     format!("{base}/v1/coverage/{project_id}/static-findings")
 }
 
-/// A minimal view over [`fallow_core::results::AnalysisResults`] that exposes
+/// A minimal view over [`fallow_engine::results::AnalysisResults`] that exposes
 /// only the two finding categories this command maps. Defined as a trait so
 /// the mapping in [`collect_findings`] can be unit-tested against an in-memory
 /// stub without constructing a full `AnalysisResults`.
@@ -543,7 +540,7 @@ trait AnalysisLike {
     fn unused_exports(&self) -> Vec<(&Path, String, u32)>;
 }
 
-impl AnalysisLike for fallow_core::results::AnalysisResults {
+impl AnalysisLike for fallow_engine::results::AnalysisResults {
     fn unused_files(&self) -> Vec<&Path> {
         self.unused_files
             .iter()

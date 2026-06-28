@@ -468,6 +468,7 @@ pub fn cached_to_module_opts(
         require_calls: cached_require_calls_to_module(&cached.require_calls),
         package_path_references: cached.package_path_references.clone(),
         member_accesses: cached.member_accesses.clone(),
+        semantic_facts: cached.semantic_facts.clone().unwrap_or_default(),
         whole_object_uses: cached.whole_object_uses.clone(),
         has_cjs_exports: cached.has_cjs_exports,
         has_angular_component_template_url: cached.has_angular_component_template_url,
@@ -549,19 +550,18 @@ pub fn cached_to_module_opts(
 
 /// Convert a [`ModuleInfo`](crate::ModuleInfo) to a [`CachedModule`] for storage.
 ///
-/// `mtime_secs` and `file_size` come from `std::fs::metadata()` at parse time
-/// and enable fast cache validation on subsequent runs (skip file read when
-/// mtime+size match).
+/// The [`SourceFingerprint`](fallow_types::source_fingerprint::SourceFingerprint)
+/// comes from `std::fs::metadata()` at parse time and enables fast cache
+/// validation on subsequent runs.
 #[must_use]
 pub fn module_to_cached(
     module: &crate::ModuleInfo,
-    mtime_secs: u64,
-    file_size: u64,
+    fingerprint: fallow_types::source_fingerprint::SourceFingerprint,
 ) -> CachedModule {
     CachedModule {
         content_hash: module.content_hash,
-        mtime_secs,
-        file_size,
+        mtime_ns: fingerprint.mtime_ns,
+        file_size: fingerprint.file_size,
         last_access_secs: current_unix_seconds(),
         exports: module_exports_to_cached(&module.exports),
         imports: module_imports_to_cached(&module.imports),
@@ -570,6 +570,7 @@ pub fn module_to_cached(
         require_calls: module_require_calls_to_cached(&module.require_calls),
         package_path_references: module.package_path_references.clone(),
         member_accesses: module.member_accesses.clone(),
+        semantic_facts: (!module.semantic_facts.is_empty()).then(|| module.semantic_facts.clone()),
         whole_object_uses: module.whole_object_uses.clone(),
         dynamic_import_patterns: module_dynamic_patterns_to_cached(&module.dynamic_import_patterns),
         has_cjs_exports: module.has_cjs_exports,
@@ -639,4 +640,21 @@ pub fn module_to_cached(
         svelte_listened_events: module.svelte_listened_events.clone(),
         has_dynamic_dispatch: module.has_dynamic_dispatch,
     }
+}
+
+/// Convert a module to a cache entry from explicit source-fingerprint parts.
+///
+/// Kept for tests that need literal invalidation inputs without filesystem
+/// metadata.
+#[cfg(test)]
+#[must_use]
+pub fn module_to_cached_from_parts(
+    module: &crate::ModuleInfo,
+    mtime_ns: u64,
+    file_size: u64,
+) -> CachedModule {
+    module_to_cached(
+        module,
+        fallow_types::source_fingerprint::SourceFingerprint::new(mtime_ns, file_size),
+    )
 }

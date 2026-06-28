@@ -138,11 +138,11 @@ fn emit_reconcile_result(
     plan: &ReconcilePlan,
     applied: &ApplyResult,
 ) -> ExitCode {
-    let envelope_struct = crate::output_envelope::ReviewReconcileOutput {
-        schema: crate::output_envelope::ReviewReconcileSchema::V1,
+    let envelope_struct = fallow_output::ReviewReconcileOutput {
+        schema: fallow_output::ReviewReconcileSchema::V1,
         provider: match provider {
-            CiProvider::Github => crate::output_envelope::ReviewProvider::Github,
-            CiProvider::Gitlab => crate::output_envelope::ReviewProvider::Gitlab,
+            CiProvider::Github => fallow_output::ReviewProvider::Github,
+            CiProvider::Gitlab => fallow_output::ReviewProvider::Gitlab,
         },
         target: target.map(str::to_owned),
         dry_run: opts.dry_run,
@@ -161,8 +161,10 @@ fn emit_reconcile_result(
         failed_fingerprints: applied.failed_fingerprints.iter().cloned().collect(),
         unapplied_fingerprints: applied.unapplied_fingerprints.iter().cloned().collect(),
     };
-    match crate::output_envelope::serialize_root_output(
-        crate::output_envelope::FallowOutput::ReviewReconcile(envelope_struct),
+    match fallow_output::serialize_review_reconcile_json_output(
+        envelope_struct,
+        crate::output_runtime::current_root_envelope_mode(),
+        crate::output_runtime::telemetry_analysis_run_id().as_deref(),
     ) {
         Ok(value) => crate::report::emit_json(&value, "review reconcile"),
         Err(e) => emit_error(

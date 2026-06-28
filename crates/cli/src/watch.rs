@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use colored::Colorize;
 use fallow_config::OutputFormat;
+use fallow_engine::discover;
 use ignore::Match;
 use notify::{RecommendedWatcher, Watcher};
 use rustc_hash::FxHashSet;
@@ -42,7 +43,7 @@ type LoadConfigFn = fn(
 fn is_relevant_source(path: &Path) -> bool {
     path.extension()
         .and_then(|s| s.to_str())
-        .is_some_and(|ext| fallow_core::discover::SOURCE_EXTENSIONS.contains(&ext))
+        .is_some_and(|ext| discover::SOURCE_EXTENSIONS.contains(&ext))
 }
 
 fn is_relevant_config(path: &Path) -> bool {
@@ -65,15 +66,14 @@ fn has_disallowed_hidden_dir(relative: &Path) -> bool {
     relative.parent().is_some_and(|parent| {
         parent.components().any(|component| {
             let name = component.as_os_str();
-            name.to_string_lossy().starts_with('.')
-                && !fallow_core::discover::is_allowed_hidden_dir(name)
+            name.to_string_lossy().starts_with('.') && !discover::is_allowed_hidden_dir(name)
         })
     })
 }
 
 fn build_production_glob_set() -> Option<globset::GlobSet> {
     let mut builder = globset::GlobSetBuilder::new();
-    for pattern in fallow_core::discover::PRODUCTION_EXCLUDE_PATTERNS {
+    for pattern in discover::PRODUCTION_EXCLUDE_PATTERNS {
         if let Ok(glob) = globset::GlobBuilder::new(pattern)
             .literal_separator(true)
             .build()
@@ -295,12 +295,8 @@ fn print_waiting(opts: &WatchOptions<'_>) {
 
 fn analyze_and_report(config: &fallow_config::ResolvedConfig, opts: &WatchOptions<'_>) -> ExitCode {
     let start = Instant::now();
-    #[expect(
-        deprecated,
-        reason = "ADR-008 deprecates fallow_core::analyze externally; the CLI still uses the workspace path dependency"
-    )]
-    let results = match fallow_core::analyze(config) {
-        Ok(r) => r,
+    let results = match fallow_engine::analyze(config) {
+        Ok(analysis) => analysis.results,
         Err(e) => {
             eprintln!("Analysis error: {e}");
             return ExitCode::from(2);

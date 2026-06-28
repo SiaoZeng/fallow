@@ -25,30 +25,30 @@ mod audit_decision_surface;
 mod audit_focus;
 mod audit_walkthrough;
 mod base_worktree;
-mod baseline;
+use fallow_engine::baseline;
 mod cache_notice;
 mod check;
 mod ci;
 mod ci_template;
-mod codeowners;
+use fallow_engine::codeowners;
 mod combined;
 mod config;
 mod coverage;
 mod dupes;
-mod error;
+use fallow_engine::error;
 mod explain;
 mod fix;
 mod flags;
 mod health;
-mod health_types;
 mod impact;
 mod init;
 mod inspect;
 mod license;
 mod list;
 mod migrate;
-mod output_dupes;
+#[cfg(test)]
 mod output_envelope;
+mod output_runtime;
 mod path_util;
 mod rayon_pool;
 mod regression;
@@ -62,8 +62,8 @@ mod task_matrix;
 mod telemetry;
 mod trace_chain;
 mod update_check;
-mod validate;
-mod vital_signs;
+use fallow_engine::validate;
+use fallow_engine::vital_signs;
 mod watch;
 
 use check::{CheckOptions, IssueFilters, TraceOptions};
@@ -976,7 +976,7 @@ enum Command {
         /// Use --min-severity critical to ignore moderate/high findings in CI.
         /// Composes with --min-score (the run fails if either gate trips).
         #[arg(long, value_name = "LEVEL", value_enum)]
-        min_severity: Option<crate::health_types::FindingSeverity>,
+        min_severity: Option<HealthSeverityCli>,
 
         /// Print the score and findings but never fail CI (always exit 0).
         /// Advisory mode for surfacing health in logs without blocking.
@@ -1328,7 +1328,7 @@ enum Command {
         /// `--diff-file <path>`, or `--diff-stdin`. There is deliberately no `all`
         /// mode (gating on the full backlog is the anti-feature this gate avoids).
         #[arg(long, value_name = "MODE")]
-        gate: Option<security::SecurityGateMode>,
+        gate: Option<security::SecurityGateArg>,
         /// Include the agent-facing attack-surface inventory in JSON output.
         #[arg(long)]
         surface: bool,
@@ -2058,11 +2058,30 @@ pub enum EffortFilter {
 
 impl EffortFilter {
     /// Convert to the corresponding `EffortEstimate` for comparison.
-    const fn to_estimate(self) -> health_types::EffortEstimate {
+    const fn to_estimate(self) -> fallow_output::EffortEstimate {
         match self {
-            Self::Low => health_types::EffortEstimate::Low,
-            Self::Medium => health_types::EffortEstimate::Medium,
-            Self::High => health_types::EffortEstimate::High,
+            Self::Low => fallow_output::EffortEstimate::Low,
+            Self::Medium => fallow_output::EffortEstimate::Medium,
+            Self::High => fallow_output::EffortEstimate::High,
+        }
+    }
+}
+
+/// CLI parser for the health severity gate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum HealthSeverityCli {
+    Moderate,
+    High,
+    Critical,
+}
+
+impl HealthSeverityCli {
+    /// Convert to the typed health output severity.
+    const fn to_health_severity(self) -> fallow_output::FindingSeverity {
+        match self {
+            Self::Moderate => fallow_output::FindingSeverity::Moderate,
+            Self::High => fallow_output::FindingSeverity::High,
+            Self::Critical => fallow_output::FindingSeverity::Critical,
         }
     }
 }
@@ -2641,8 +2660,8 @@ fn signal_test_helper() -> ExitCode {
 }
 
 fn install_spawn_hooks() {
-    fallow_core::churn::set_spawn_hook(signal::scoped_child::output);
-    fallow_core::changed_files::set_spawn_hook(signal::scoped_child::output);
+    fallow_engine::churn::set_spawn_hook(signal::scoped_child::output);
+    fallow_engine::changed_files::set_spawn_hook(signal::scoped_child::output);
 }
 
 fn install_signal_handlers() {
@@ -2822,7 +2841,7 @@ fn parse_cli_args() -> Result<(Cli, FormatConfig), ExitCode> {
     {
         *brief = true;
     }
-    output_envelope::set_legacy_envelope(cli.legacy_envelope);
+    output_runtime::set_legacy_envelope(cli.legacy_envelope);
     runtime_support::set_max_file_size_override(cli.max_file_size);
 
     if let Some(workspaces) = cli.workspace.as_ref()
@@ -3049,7 +3068,7 @@ fn start_telemetry_run(cli: &Cli, fmt: &FormatConfig) -> TelemetryRun {
         start: std::time::Instant::now(),
         context: telemetry_context_for_command(cli, cli.command.as_ref(), fmt.output),
     };
-    output_envelope::set_telemetry_analysis_run_id(
+    output_runtime::set_telemetry_analysis_run_id(
         matches!(fmt.output, fallow_config::OutputFormat::Json)
             .then(telemetry::new_analysis_run_id),
     );
@@ -3860,7 +3879,7 @@ fn dispatch_trace_command(
         target: symbol,
         callers,
         callees,
-        depth: depth.unwrap_or(fallow_core::trace_chain::DEFAULT_TRACE_DEPTH),
+        depth: depth.unwrap_or(fallow_engine::trace_chain::DEFAULT_TRACE_DEPTH),
     })
 }
 
@@ -3877,6 +3896,7 @@ fn dispatch_security_command(command: Command, dispatch: &DispatchContext<'_>) -
         unreachable!("security dispatcher only handles security commands");
     };
 
+    let gate = gate.map(security::SecurityGateArg::into_mode);
     let cli = dispatch.cli;
     let (output, _quiet, fail_on_issues) = dispatch.ci_defaults();
     let derived_flags = SecurityDerivedFlagState {
@@ -4268,40 +4288,38 @@ fn dispatch_health_command(command: Command, dispatch: &DispatchContext<'_>) -> 
 
     let ownership = ownership || ownership_emails.is_some();
     let hotspots = hotspots || ownership;
-    dispatch_health(
-        dispatch,
-        HealthDispatchArgs {
-            max_cyclomatic,
-            max_cognitive,
-            max_crap,
-            top,
-            sort,
-            complexity,
-            complexity_breakdown,
-            file_scores,
-            coverage_gaps,
-            hotspots,
-            ownership,
-            ownership_emails: ownership_emails.map(EmailModeArg::to_config),
-            targets,
-            css,
-            effort,
-            score,
-            min_score,
-            min_severity,
-            report_only,
-            since: since.as_deref(),
-            min_commits,
-            save_snapshot: save_snapshot.as_ref(),
-            trend,
-            coverage: coverage.as_deref(),
-            coverage_root: coverage_root.as_deref(),
-            runtime_coverage: runtime_coverage.as_deref(),
-            min_invocations_hot,
-            min_observation_volume,
-            low_traffic_threshold,
-        },
-    )
+    let args = HealthDispatchArgs {
+        max_cyclomatic,
+        max_cognitive,
+        max_crap,
+        top,
+        sort,
+        complexity,
+        complexity_breakdown,
+        file_scores,
+        coverage_gaps,
+        hotspots,
+        ownership,
+        ownership_emails: ownership_emails.map(EmailModeArg::to_config),
+        targets,
+        css,
+        effort,
+        score,
+        min_score,
+        min_severity: min_severity.map(HealthSeverityCli::to_health_severity),
+        report_only,
+        since: since.as_deref(),
+        min_commits,
+        save_snapshot: save_snapshot.as_ref(),
+        trend,
+        coverage: coverage.as_deref(),
+        coverage_root: coverage_root.as_deref(),
+        runtime_coverage: runtime_coverage.as_deref(),
+        min_invocations_hot,
+        min_observation_volume,
+        low_traffic_threshold,
+    };
+    dispatch_health(dispatch, &args)
 }
 
 fn dispatch_setup_hooks_command(command: &Command, dispatch: &DispatchContext<'_>) -> ExitCode {
@@ -5450,7 +5468,7 @@ struct HealthDispatchArgs<'a> {
     effort: Option<EffortFilter>,
     score: bool,
     min_score: Option<f64>,
-    min_severity: Option<health_types::FindingSeverity>,
+    min_severity: Option<fallow_output::FindingSeverity>,
     report_only: bool,
     since: Option<&'a str>,
     min_commits: Option<u32>,
@@ -5526,7 +5544,7 @@ fn path_from_env(name: &str) -> Option<PathBuf> {
 fn validate_health_report_only_gate(
     report_only: bool,
     min_score: Option<f64>,
-    min_severity: Option<health_types::FindingSeverity>,
+    min_severity: Option<fallow_output::FindingSeverity>,
     output: fallow_config::OutputFormat,
 ) -> Result<(), ExitCode> {
     if report_only && (min_score.is_some() || min_severity.is_some()) {
@@ -5548,7 +5566,7 @@ fn resolve_runtime_coverage_options(
     min_observation_volume: Option<u32>,
     low_traffic_threshold: Option<f64>,
     output: fallow_config::OutputFormat,
-) -> Result<Option<health::RuntimeCoverageOptions>, ExitCode> {
+) -> Result<Option<fallow_engine::RuntimeCoverageOptions>, ExitCode> {
     let Some(path) = runtime_coverage else {
         return Ok(None);
     };
@@ -5563,7 +5581,7 @@ fn resolve_runtime_coverage_options(
     .map(Some)
 }
 
-fn dispatch_health(dispatch: &DispatchContext<'_>, args: HealthDispatchArgs<'_>) -> ExitCode {
+fn dispatch_health(dispatch: &DispatchContext<'_>, args: &HealthDispatchArgs<'_>) -> ExitCode {
     let cli = dispatch.cli;
     let root = dispatch.root;
     let (output, _quiet, _fail_on_issues) = dispatch.ci_defaults();
@@ -5575,20 +5593,6 @@ fn dispatch_health(dispatch: &DispatchContext<'_>, args: HealthDispatchArgs<'_>)
     ) {
         return code;
     }
-    let targets = args.targets || args.effort.is_some();
-    let sections = effective_health_sections(&EffectiveHealthSectionInput {
-        output,
-        complexity: args.complexity,
-        file_scores: args.file_scores,
-        coverage_gaps: args.coverage_gaps,
-        hotspots: args.hotspots,
-        targets,
-        css: args.css,
-        score: args.score,
-        min_score: args.min_score,
-        save_snapshot: args.save_snapshot,
-        trend: args.trend,
-    });
     let runtime_coverage = match resolve_runtime_coverage_options(
         args.runtime_coverage,
         args.min_invocations_hot,
@@ -5608,42 +5612,62 @@ fn dispatch_health(dispatch: &DispatchContext<'_>, args: HealthDispatchArgs<'_>)
             Ok(inputs) => inputs,
             Err(code) => return code,
         };
-    let ownership = args.ownership;
-    run_health_dispatch(
-        dispatch,
-        args,
-        ResolvedHealthDispatch {
-            sections: &sections,
-            runtime_coverage,
-            production,
-            coverage_inputs: &coverage_inputs,
-            ownership,
+    let run = fallow_engine::derive_health_run_options(fallow_engine::HealthRunOptionsInput {
+        output,
+        thresholds: fallow_engine::HealthThresholdOverrides {
+            max_cyclomatic: args.max_cyclomatic,
+            max_cognitive: args.max_cognitive,
+            max_crap: args.max_crap,
         },
-    )
+        top: args.top,
+        sort: args.sort.clone().into(),
+        complexity: args.complexity,
+        file_scores: args.file_scores,
+        coverage_gaps: args.coverage_gaps,
+        hotspots: args.hotspots,
+        ownership: args.ownership,
+        ownership_emails: args.ownership_emails,
+        targets: args.targets,
+        css: args.css,
+        effort: args.effort.map(EffortFilter::to_estimate),
+        score: args.score,
+        gates: fallow_engine::HealthGateOptions {
+            min_score: args.min_score,
+            min_severity: args.min_severity,
+            report_only: args.report_only,
+        },
+        snapshot_requested: args.save_snapshot.is_some(),
+        trend: args.trend,
+        since: args.since,
+        min_commits: args.min_commits,
+        coverage_inputs: fallow_engine::HealthCoverageInputs {
+            coverage: coverage_inputs.coverage.as_deref(),
+            coverage_root: coverage_inputs.coverage_root.as_deref(),
+        },
+        runtime_coverage,
+    });
+    run_health_dispatch(dispatch, args, ResolvedHealthDispatch { run, production })
 }
 
 /// Resolved inputs threaded from `dispatch_health` into the `HealthOptions`
-/// builder. Borrows the section flags and coverage inputs; owns the resolved
-/// runtime-coverage options.
+/// builder. Owns the normalized engine run contract and resolved production
+/// mode.
 struct ResolvedHealthDispatch<'a> {
-    sections: &'a EffectiveHealthSections,
-    runtime_coverage: Option<health::RuntimeCoverageOptions>,
+    run: fallow_engine::HealthRunOptions<'a>,
     production: bool,
-    coverage_inputs: &'a ResolvedHealthCoverageInputs,
-    ownership: bool,
 }
 
 /// Build `HealthOptions` from the parsed args plus the resolved dispatch inputs,
-/// then run the health analysis. Consumes `args` to move out its non-`Copy`
-/// fields (`sort`, `ownership_emails`) into `HealthOptions`.
+/// then run the health analysis.
 fn run_health_dispatch(
     dispatch: &DispatchContext<'_>,
-    args: HealthDispatchArgs<'_>,
+    args: &HealthDispatchArgs<'_>,
     resolved: ResolvedHealthDispatch<'_>,
 ) -> ExitCode {
     let cli = dispatch.cli;
     let (output, quiet, _fail_on_issues) = dispatch.ci_defaults();
-    let sections = resolved.sections;
+    let run = resolved.run;
+    let sections = run.sections;
     let production = resolved.production;
     health::run_health(&HealthOptions {
         root: dispatch.root,
@@ -5652,11 +5676,9 @@ fn run_health_dispatch(
         no_cache: cli.no_cache,
         threads: dispatch.threads,
         quiet,
-        max_cyclomatic: args.max_cyclomatic,
-        max_cognitive: args.max_cognitive,
-        max_crap: args.max_crap,
-        top: args.top,
-        sort: args.sort,
+        thresholds: run.thresholds,
+        top: run.top,
+        sort: run.sort,
         production,
         production_override: Some(production),
         changed_since: cli.changed_since.as_deref(),
@@ -5667,109 +5689,35 @@ fn run_health_dispatch(
         baseline: cli.baseline.as_deref(),
         save_baseline: cli.save_baseline.as_deref(),
         complexity: sections.complexity,
-        complexity_breakdown: args.complexity_breakdown,
         file_scores: sections.file_scores,
         coverage_gaps: sections.coverage_gaps,
         config_activates_coverage_gaps: !sections.any_section,
         hotspots: sections.hotspots,
-        ownership: resolved.ownership && sections.hotspots,
-        ownership_emails: args.ownership_emails,
+        ownership: run.ownership,
+        ownership_emails: run.ownership_emails,
         targets: sections.targets,
         css: sections.css,
         force_full: sections.force_full,
         score_only_output: sections.score_only_output,
         enforce_coverage_gap_gate: true,
-        effort: args.effort.map(EffortFilter::to_estimate),
+        effort: run.effort,
         score: sections.score,
-        min_score: args.min_score,
-        min_severity: args.min_severity,
-        report_only: args.report_only,
-        since: args.since,
-        min_commits: args.min_commits,
+        gates: run.gates,
+        since: run.since,
+        min_commits: run.min_commits,
         explain: cli.explain,
         summary: cli.summary,
         save_snapshot: args
             .save_snapshot
             .map(|opt| PathBuf::from(opt.as_deref().unwrap_or_default())),
         trend: args.trend,
-        group_by: cli.group_by,
-        coverage: resolved.coverage_inputs.coverage.as_deref(),
-        coverage_root: resolved.coverage_inputs.coverage_root.as_deref(),
+        coverage_inputs: run.coverage_inputs,
         performance: cli.performance,
-        runtime_coverage: resolved.runtime_coverage,
+        runtime_coverage: run.runtime_coverage,
         churn_file: cli.churn_file.as_deref(),
+        complexity_breakdown: args.complexity_breakdown,
+        group_by: cli.group_by.map(Into::into),
     })
-}
-
-struct EffectiveHealthSectionInput<'a> {
-    output: fallow_config::OutputFormat,
-    complexity: bool,
-    file_scores: bool,
-    coverage_gaps: bool,
-    hotspots: bool,
-    targets: bool,
-    css: bool,
-    score: bool,
-    min_score: Option<f64>,
-    save_snapshot: Option<&'a Option<String>>,
-    trend: bool,
-}
-
-struct EffectiveHealthSections {
-    any_section: bool,
-    complexity: bool,
-    file_scores: bool,
-    coverage_gaps: bool,
-    hotspots: bool,
-    targets: bool,
-    css: bool,
-    score: bool,
-    force_full: bool,
-    score_only_output: bool,
-}
-
-fn effective_health_sections(input: &EffectiveHealthSectionInput<'_>) -> EffectiveHealthSections {
-    let score = input.score
-        || input.min_score.is_some()
-        || input.trend
-        || matches!(input.output, fallow_config::OutputFormat::Badge);
-    let snapshot_requested = input.save_snapshot.is_some();
-    let any_section = input.complexity
-        || input.file_scores
-        || input.coverage_gaps
-        || input.hotspots
-        || input.targets
-        || score;
-    let eff_score = if any_section { score } else { true } || snapshot_requested;
-    let force_full = snapshot_requested || eff_score;
-    EffectiveHealthSections {
-        any_section,
-        complexity: if any_section { input.complexity } else { true },
-        file_scores: if any_section { input.file_scores } else { true } || force_full,
-        coverage_gaps: if any_section {
-            input.coverage_gaps
-        } else {
-            false
-        },
-        hotspots: if any_section { input.hotspots } else { true }
-            || snapshot_requested
-            || input.trend,
-        targets: if any_section { input.targets } else { true },
-        css: input.css,
-        score: eff_score,
-        force_full,
-        score_only_output: is_health_score_only_output(input, score),
-    }
-}
-
-fn is_health_score_only_output(input: &EffectiveHealthSectionInput<'_>, score: bool) -> bool {
-    score
-        && !input.complexity
-        && !input.file_scores
-        && !input.coverage_gaps
-        && !input.hotspots
-        && !input.targets
-        && !input.trend
 }
 
 #[cfg(test)]
@@ -6088,7 +6036,7 @@ mod tests {
             })
             .collect();
         let programmatic_flags: std::collections::BTreeSet<String> =
-            fallow_cli::programmatic::COMMON_ANALYSIS_OPTION_FLAGS
+            fallow_api::COMMON_ANALYSIS_OPTION_FLAGS
                 .iter()
                 .map(|flag| (*flag).to_owned())
                 .collect();

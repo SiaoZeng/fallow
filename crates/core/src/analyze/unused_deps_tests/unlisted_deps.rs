@@ -100,7 +100,8 @@ fn builtin_modules_not_reported_as_unlisted() {
         resolved_dynamic_imports: vec![],
         resolved_dynamic_patterns: vec![],
         member_accesses: vec![],
-        whole_object_uses: vec![],
+        semantic_facts: Box::default(),
+        whole_object_uses: Box::default(),
         has_cjs_exports: false,
         has_angular_component_template_url: false,
         unused_import_bindings: FxHashSet::default(),
@@ -161,7 +162,8 @@ fn virtual_modules_not_reported_as_unlisted() {
         resolved_dynamic_imports: vec![],
         resolved_dynamic_patterns: vec![],
         member_accesses: vec![],
-        whole_object_uses: vec![],
+        semantic_facts: Box::default(),
+        whole_object_uses: Box::default(),
         has_cjs_exports: false,
         has_angular_component_template_url: false,
         unused_import_bindings: FxHashSet::default(),
@@ -301,7 +303,10 @@ fn peer_dep_not_reported_as_unlisted() {
 }
 
 #[test]
-#[allow(clippy::too_many_lines, reason = "fixture enumerates several modules")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "multi-file dependency fixture keeps the scenario local to the test"
+)]
 fn unlisted_dep_detected_across_multiple_files() {
     let files = vec![
         DiscoveredFile {
@@ -346,7 +351,8 @@ fn unlisted_dep_detected_across_multiple_files() {
             resolved_dynamic_imports: vec![],
             resolved_dynamic_patterns: vec![],
             member_accesses: vec![],
-            whole_object_uses: vec![],
+            semantic_facts: Box::default(),
+            whole_object_uses: Box::default(),
             has_cjs_exports: false,
             has_angular_component_template_url: false,
             unused_import_bindings: FxHashSet::default(),
@@ -375,7 +381,8 @@ fn unlisted_dep_detected_across_multiple_files() {
             resolved_dynamic_imports: vec![],
             resolved_dynamic_patterns: vec![],
             member_accesses: vec![],
-            whole_object_uses: vec![],
+            semantic_facts: Box::default(),
+            whole_object_uses: Box::default(),
             has_cjs_exports: false,
             has_angular_component_template_url: false,
             unused_import_bindings: FxHashSet::default(),
@@ -440,7 +447,8 @@ fn dynamic_import_unlisted_dep_has_import_site() {
         }],
         resolved_dynamic_patterns: vec![],
         member_accesses: vec![],
-        whole_object_uses: vec![],
+        semantic_facts: Box::default(),
+        whole_object_uses: Box::default(),
         has_cjs_exports: false,
         has_angular_component_template_url: false,
         unused_import_bindings: FxHashSet::default(),
@@ -643,7 +651,7 @@ fn at_types_without_bare_package_suppresses_regardless_of_import_style() {
 
     assert!(
         !unlisted.iter().any(|d| d.package_name == "geojson"),
-        "@types/geojson listed , geojson should not be flagged regardless of import style"
+        "@types/geojson listed — geojson should not be flagged regardless of import style"
     );
 }
 
@@ -666,7 +674,7 @@ fn no_at_types_still_flags_unlisted() {
 
     assert!(
         unlisted.iter().any(|d| d.package_name == "axios"),
-        "no @types/axios listed , axios should be flagged as unlisted"
+        "no @types/axios listed — axios should be flagged as unlisted"
     );
 }
 
@@ -919,7 +927,8 @@ fn workspace_import_case(
         resolved_dynamic_imports: vec![],
         resolved_dynamic_patterns: vec![],
         member_accesses: vec![],
-        whole_object_uses: vec![],
+        semantic_facts: Box::default(),
+        whole_object_uses: Box::default(),
         has_cjs_exports: false,
         has_angular_component_template_url: false,
         unused_import_bindings: FxHashSet::default(),

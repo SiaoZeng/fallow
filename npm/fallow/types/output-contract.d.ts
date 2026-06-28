@@ -119,6 +119,9 @@ export type SchemaVersion = 7
  * a bare string (e.g. `"2.74.0"`).
  */
 export type ToolVersion = string
+/**
+ * Audit command singleton carried by [`AuditOutput`].
+ */
 export type AuditCommand = "audit"
 /**
  * Verdict for the audit command.
@@ -450,7 +453,8 @@ export type UntestedFileActionType = ("add-tests" | "suppress-file")
  */
 export type UntestedExportActionType = ("add-test-import" | "suppress-file")
 /**
- * Churn trend indicator based on comparing recent vs older halves of the analysis period.
+ * Churn trend indicator based on comparing recent vs older halves of the
+ * analysis period.
  */
 export type ChurnTrend = ("accelerating" | "stable" | "cooling")
 export type ContributorIdentifierFormat = ("raw" | "handle" | "anonymized" | "hash")
@@ -851,7 +855,7 @@ duplication?: (DupesReportPayload | null)
 complexity?: (HealthReport | null)
 /**
  * Read-only follow-up commands computed from this run's findings. See
- * [`CheckOutput::next_steps`] for the contract.
+ * `CheckOutput::next_steps` for the contract.
  */
 next_steps?: NextStep[]
 }
@@ -3611,7 +3615,7 @@ reason: string
 }
 /**
  * Wire-shape payload for `fallow dupes --format json` (the body that
- * flattens into [`crate::output_envelope::DupesOutput`] and is also
+ * flattens into the `DupesOutput` envelope and is also
  * emitted under the `dupes` / `duplication` key inside the combined and
  * audit envelopes).
  *
@@ -3627,8 +3631,8 @@ export interface DupesReportPayload {
 clone_groups: CloneGroupFinding[]
 /**
  * Clone families, each wrapped with typed actions. Inner `groups`
- * inside each [`CloneFamilyFinding`] are themselves wrapped as
- * [`CloneGroupFinding`] entries carrying their own `actions[]` (and
+ * inside each `CloneFamilyFinding` are themselves wrapped as
+ * `CloneGroupFinding` entries carrying their own `actions[]` (and
  * optional audit-mode `introduced` flag), so JSON-Schema strict
  * consumers and TS consumers reading `clone_families[].groups[]` see
  * the same shape as the top-level `clone_groups[]` array (preserves
@@ -3718,8 +3722,8 @@ end_col: number
 fragment: string
 }
 /**
- * Per-action wire shape attached to each [`CloneGroupFinding`] and
- * [`AttributedCloneGroupFinding`]. Mirrors the action types previously
+ * Per-action wire shape attached to each `CloneGroupFinding` and
+ * `AttributedCloneGroupFinding`. Mirrors the action types previously
  * emitted by `inject_dupes_actions::build_clone_group_actions` in
  * `crates/cli/src/report/json.rs`: `extract-shared` plus `suppress-line`.
  */
@@ -3748,7 +3752,7 @@ comment?: (string | null)
  * Unlike most `*Finding` wrappers this one is NOT `#[serde(flatten)]` over
  * the bare [`CloneFamily`], because the family's nested
  * `groups: Vec<CloneGroup>` field needs to carry the typed
- * [`CloneGroupFinding`] wrapper too (so every nested clone group gets its
+ * `CloneGroupFinding` wrapper too (so every nested clone group gets its
  * own `actions[]` array, matching the legacy post-pass behavior; see issue
  * #393 regression test). The wire shape stays byte-identical to the
  * previous post-pass output. No `introduced` field because `fallow audit`
@@ -3756,7 +3760,7 @@ comment?: (string | null)
  */
 export interface CloneFamilyFinding {
 /**
- * The files involved in this family (sorted for stable output).
+ * The files involved in this family.
  */
 files: string[]
 /**
@@ -3779,7 +3783,7 @@ total_duplicated_tokens: number
 suggestions: RefactoringSuggestion[]
 /**
  * Suggested next steps: an `extract-shared` primary, one
- * `apply-suggestion` per [`RefactoringSuggestion`] on the family, and
+ * `apply-suggestion` per `RefactoringSuggestion` on the family, and
  * a trailing `suppress-line`. Always emitted (possibly empty for
  * forward-compat).
  */
@@ -3800,10 +3804,10 @@ description: string
 estimated_savings: number
 }
 /**
- * Per-action wire shape attached to each [`CloneFamilyFinding`]. Mirrors
+ * Per-action wire shape attached to each `CloneFamilyFinding`. Mirrors
  * the action types previously emitted by
  * `build_clone_family_actions`: `extract-shared`, one `apply-suggestion`
- * per [`RefactoringSuggestion`] on the family, and a trailing
+ * per `RefactoringSuggestion` on the family, and a trailing
  * `suppress-line`.
  */
 export interface CloneFamilyAction {
@@ -3912,7 +3916,7 @@ export interface HealthReport {
 /**
  * Functions and synthetic template entries exceeding complexity
  * thresholds, sorted by the --sort criteria. Each entry wraps its
- * inner [`ComplexityViolation`] payload (flattened on the wire) with
+ * inner `ComplexityViolation` payload (flattened on the wire) with
  * the typed `actions` list and an optional audit-mode `introduced`
  * flag.
  */
@@ -3957,7 +3961,7 @@ prop_drilling_chains?: PropDrillingChainFinding[]
 /**
  * Hotspot entries combining git churn with complexity. Only present when
  * --hotspots is used. Sorted by score descending (highest risk first).
- * Each entry wraps its inner [`HotspotEntry`] payload (flattened on the
+ * Each entry wraps its inner `HotspotEntry` payload (flattened on the
  * wire) with a typed `actions` list.
  */
 hotspots?: HotspotFinding[]
@@ -3982,7 +3986,7 @@ large_functions?: LargeFunctionEntry[]
 /**
  * Ranked refactoring recommendations. Only present when --targets is used.
  * Sorted by efficiency (priority/effort) descending. Each entry wraps
- * its inner [`RefactoringTarget`] payload (flattened on the wire) with
+ * its inner `RefactoringTarget` payload (flattened on the wire) with
  * a typed `actions` list.
  */
 targets?: RefactoringTargetFinding[]
@@ -4189,7 +4193,7 @@ max_crap: number
  * `comment` plus `placement`, and the coverage-leaning actions
  * (`add-tests`, `increase-coverage`) carry only `note`.
  *
- * [`ComplexityViolation`]: ../../fallow-cli/src/health_types/scores.rs
+ * [`ComplexityViolation`]: ../../fallow-output/src/health_scores.rs
  */
 export interface HealthFindingAction {
 type: HealthFindingActionType
@@ -4287,7 +4291,7 @@ cognitive: number
 crap?: (number | null)
 }
 /**
- * Project-wide vital signs , a fixed set of metrics for trend tracking.
+ * Project-wide vital signs: a fixed set of metrics for trend tracking.
  *
  * Metrics are `Option` when the data source was not available in the current run
  * (e.g., `duplication_pct` is `None` unless the duplication pipeline was run,
@@ -4328,7 +4332,7 @@ hotspot_count?: (number | null)
  */
 hotspot_top_pct_count?: (number | null)
 /**
- * Average maintainability index across all scored files (0–100).
+ * Average maintainability index across all scored files (0-100).
  */
 maintainability_avg?: (number | null)
 /**
@@ -4616,7 +4620,7 @@ path: string
 value_export_count: number
 /**
  * Suggested next steps: an `add-tests` primary and a `suppress-file`
- * secondary. Always emitted (possibly empty for forward-compat).
+ * secondary. Always emitted for the current wire contract.
  */
 actions: UntestedFileAction[]
 }
@@ -4630,7 +4634,7 @@ actions: UntestedFileAction[]
  * struct shape; the field that is populated (`note` for `add-tests`,
  * `comment` for `suppress-file`) depends on the `kind`.
  *
- * [`UntestedFile`]: ../../fallow-cli/src/health_types/coverage.rs
+ * [`UntestedFile`]: ../../fallow-output/src/health_coverage_gaps.rs
  */
 export interface UntestedFileAction {
 type: UntestedFileActionType
@@ -4693,7 +4697,7 @@ actions: UntestedExportAction[]
  * `add-test-import` reflects that a test-reachable reference chain, not
  * just any test coverage, is what closes the gap.
  *
- * [`UntestedExport`]: ../../fallow-cli/src/health_types/coverage.rs
+ * [`UntestedExport`]: ../../fallow-output/src/health_coverage_gaps.rs
  */
 export interface UntestedExportAction {
 type: UntestedExportActionType
@@ -4784,7 +4788,7 @@ commits: number
  * `ownership-drift`) are appended only when `--ownership` is active AND
  * the corresponding signal fires for the hotspot.
  *
- * [`HotspotEntry`]: ../../fallow-cli/src/health_types/scores.rs
+ * [`HotspotEntry`]: ../../fallow-output/src/health_scores.rs
  */
 export interface HotspotAction {
 type: HotspotActionType
@@ -4870,6 +4874,27 @@ watermark?: (RuntimeCoverageWatermark | null)
  * Non-fatal merge or coverage diagnostics. Omitted when empty.
  */
 warnings?: RuntimeCoverageMessage[]
+/**
+ * Whether an autonomous agent may act on this report (fallow-rs/fallow-cloud#316,
+ * mirrors the cloud runtime-context contract). `false` when the capture
+ * carries no usable runtime evidence (no tracked functions); then
+ * `actionability_verdict` is `insufficient_evidence` and
+ * `actionability_reason` explains. F4: a non-action floor, never a gate on a
+ * positive verdict.
+ */
+actionable: boolean
+/**
+ * Why the report is non-actionable; `null` when `actionable` is true.
+ */
+actionability_reason?: (string | null)
+/**
+ * First-class non-action verdict (`insufficient_evidence`) when not
+ * actionable; `null` otherwise. Mirrors the cloud runtime-context `verdict`;
+ * named distinctly from the report-context `verdict` above to avoid a
+ * collision.
+ */
+actionability_verdict?: (string | null)
+provenance: RuntimeCoverageProvenance
 }
 /**
  * Summary block mirroring `fallow_cov_protocol::Summary` (0.3 shape).
@@ -4910,7 +4935,7 @@ coverage_percent: number
 trace_count: number
 /**
  * Days of observation covered by the supplied dump (Phase 2 local analysis
- * emits 0 , set by the beacon/cloud in Phase 3+).
+ * emits 0, set by the beacon/cloud in Phase 3+).
  */
 period_days: number
 /**
@@ -5005,6 +5030,13 @@ evidence: RuntimeCoverageEvidence
  * Suggested actions for this finding. Omitted when empty.
  */
 actions?: RuntimeCoverageAction[]
+/**
+ * The discriminator inputs that produced this verdict (#321), emitted so an
+ * agent can reproduce it and see the confidence cap. `None` for findings
+ * not built from the merge pipeline (e.g. baseline round-trips). Omitted
+ * from JSON when absent.
+ */
+discriminators?: (RuntimeCoverageDiscriminators | null)
 }
 /**
  * Supporting evidence for a finding (mirrors `fallow_cov_protocol::Evidence`).
@@ -5056,6 +5088,48 @@ description: string
  * Whether fallow can apply this action automatically.
  */
 auto_fixable: boolean
+}
+/**
+ * Discriminator inputs that PRODUCED a finding's verdict (fallow-rs/fallow-cloud#321),
+ * emitted alongside the verdict so an agent can reproduce it and see the
+ * minimum-observation confidence cap instead of re-deriving them from scratch.
+ * F4: these make the EXISTING Fallow-owned discriminators legible; they are not
+ * a new or external signal and gate nothing. Pairs with `evidence.static_status`
+ * (the static half of the discriminator set).
+ */
+export interface RuntimeCoverageDiscriminators {
+/**
+ * Three-state runtime tracking: `called` (invocations > 0), `never_called`
+ * (V8 tracked it, invocations == 0), or `untracked` (V8 never saw it). The
+ * ONLY signal that can issue a deletion verdict.
+ */
+tracking_state: string
+/**
+ * `invocations / trace_count` for this function; `null` when untracked (no
+ * invocation count). The per-function value behind the low-traffic split.
+ */
+invocation_ratio?: (number | null)
+/**
+ * Active/low_traffic split ratio in effect (CLI default 0.001). A tracked
+ * function whose `invocation_ratio` is below this reads `low_traffic`, else
+ * `active`.
+ */
+low_traffic_threshold: number
+/**
+ * Total observed invocations across all functions (the `invocation_ratio`
+ * denominator), echoed per finding so the verdict is self-contained.
+ */
+trace_count: number
+/**
+ * High-confidence verdict floor (CLI default 5000). When `trace_count` is
+ * below it, confidence is capped regardless of the per-function signal.
+ */
+min_observation_volume: number
+/**
+ * `trace_count >= min_observation_volume`: whether the dump cleared the
+ * confidence floor. `false` means this verdict's confidence is capped.
+ */
+meets_observation_volume: boolean
 }
 export interface RuntimeCoverageHotPath {
 /**
@@ -5193,6 +5267,44 @@ code: string
  * Human-readable warning message.
  */
 message: string
+}
+/**
+ * Provenance of a runtime-coverage report (fallow-rs/fallow-cloud#319), mirroring
+ * the cloud runtime-context `provenance` block so the local-capture and cloud
+ * surfaces present one portable shape. F4: provenance is context only; it never
+ * gates a verdict or confidence.
+ */
+export interface RuntimeCoverageProvenance {
+data_source: RuntimeCoverageDataSource
+/**
+ * `true` / `false` / `unknown`. Always `unknown` for a local capture: the
+ * local path has no deployment-origin signal (the cloud may resolve it).
+ */
+is_production: string
+/**
+ * Age in whole days of the most recent evidence; `0` for a fresh local
+ * capture, `null` when no runtime data is present.
+ */
+freshness_days?: (number | null)
+/**
+ * `functions_untracked / (functions_tracked + functions_untracked)`, in
+ * `[0, 1]`. High ratios mark a thin / partial capture.
+ */
+untracked_ratio: number
+/**
+ * Fraction of resolution-attempted functions whose position could not be
+ * mapped to source, in `[0, 1]`. `0` for a local capture (positions resolve
+ * natively or via the sidecar).
+ */
+unresolved_ratio: number
+/**
+ * Whether `freshness_days` exceeds `stale_after_days`.
+ */
+stale: boolean
+/**
+ * The documented staleness cutoff (days), echoed so the rule travels in-band.
+ */
+stale_after_days: number
 }
 /**
  * Combined coverage, runtime, complexity, and change-scope verdicts.
@@ -5465,7 +5577,7 @@ fingerprint: string
  * the target's `evidence.complex_functions` back to the matching
  * `ComplexityViolation` and read placement from THAT action instead.
  *
- * [`RefactoringTarget`]: ../../fallow-cli/src/health_types/targets.rs
+ * [`RefactoringTarget`]: ../../fallow-output/src/health_targets.rs
  */
 export interface RefactoringTargetAction {
 type: RefactoringTargetActionType
@@ -5483,7 +5595,7 @@ description: string
 /**
  * Recommendation category for `apply-refactoring` actions. Mirrors
  * the parent target's
- * [`category`](../../fallow-cli/src/health_types/targets.rs.html)
+ * [`category`](../../fallow-output/src/health_targets.rs.html)
  * field so consumers can route on the action alone.
  */
 category?: (string | null)
@@ -5567,11 +5679,11 @@ snapshot_schema_version?: (number | null)
  */
 export interface TrendMetric {
 /**
- * Metric identifier (e.g., `"score"`, `"dead_file_pct"`).
+ * Metric identifier, e.g. `"score"` or `"dead_file_pct"`.
  */
 name: string
 /**
- * Human-readable label (e.g., `"Health Score"`, `"Dead Files"`).
+ * Human-readable label, e.g. `"Health Score"` or `"Dead Files"`.
  */
 label: string
 /**
@@ -5583,12 +5695,12 @@ previous: number
  */
 current: number
 /**
- * Absolute change (current − previous).
+ * Absolute change (current - previous).
  */
 delta: number
 direction: TrendDirection
 /**
- * Unit for display (e.g., `"%"`, `""`, `"pts"`).
+ * Unit for display, e.g. `"%"`, `""`, or `"pts"`.
  */
 unit: string
 /**
@@ -5605,11 +5717,11 @@ current_count?: (TrendCount | null)
  */
 export interface TrendCount {
 /**
- * The numerator (e.g., dead files count).
+ * The numerator, e.g. dead files count.
  */
 value: number
 /**
- * The denominator (e.g., total files).
+ * The denominator, e.g. total files.
  */
 total: number
 }
@@ -5617,10 +5729,10 @@ total: number
  * Auditable breadcrumb recording when health-finding `suppress-line`
  * action hints were omitted from the report.
  *
- * Set at construction time on [`HealthReport::actions_meta`] (and on
- * each [`HealthGroup::actions_meta`](crate::health_types::HealthGroup)
+ * Set at construction time on `HealthReport::actions_meta` (and on
+ * each `HealthGroup::actions_meta`
  * when grouped) by the report builder, derived from the active
- * [`HealthActionContext`]. Lets consumers see "where did the
+ * `HealthActionContext`. Lets consumers see "where did the
  * suppress-line hints go?" without having to grep the config or CLI
  * history.
  *
@@ -5632,8 +5744,8 @@ total: number
  */
 export interface HealthActionsMeta {
 /**
- * Always `true` when the breadcrumb is emitted. Absent from the wire
- * when no suppression occurred.
+ * Always `true` when the breadcrumb is emitted. Absent from the wire when
+ * no suppression occurred.
  */
 suppression_hints_omitted: boolean
 /**
@@ -6648,10 +6760,9 @@ _meta?: (Meta | null)
 }
 /**
  * Envelope emitted by `fallow list --boundaries --format json`. Surfaces
- * the architecture boundary zones, rules, and (issue #373) the user's
- * pre-expansion `autoDiscover` logical groups so consumers can render
- * grouping intent that `expand_auto_discover` would otherwise flatten out
- * of `zones[]`.
+ * the architecture boundary zones, rules, and the user's pre-expansion
+ * `autoDiscover` logical groups so consumers can render grouping intent that
+ * expansion would otherwise flatten out of `zones[]`.
  */
 export interface ListBoundariesOutput {
 boundaries: BoundariesListing
@@ -6688,10 +6799,10 @@ from: string
 allow: string[]
 }
 /**
- * A pre-expansion `autoDiscover` logical group surfaced for observability
- * (issue #373). Captured during `expand_auto_discover` so consumers can
- * see the user-authored parent name and grouping intent after expansion
- * would otherwise flatten it out of [`BoundariesListing::zones`].
+ * A pre-expansion `autoDiscover` logical group surfaced for observability.
+ * Captured during expansion so consumers can see the user-authored parent
+ * name and grouping intent after expansion would otherwise flatten it out of
+ * [`BoundariesListing::zones`].
  */
 export interface BoundariesListLogicalGroup {
 name: string
@@ -6779,7 +6890,7 @@ elapsed_ms: ElapsedMs
 /**
  * Functions and synthetic template entries exceeding complexity
  * thresholds, sorted by the --sort criteria. Each entry wraps its
- * inner [`ComplexityViolation`] payload (flattened on the wire) with
+ * inner `ComplexityViolation` payload (flattened on the wire) with
  * the typed `actions` list and an optional audit-mode `introduced`
  * flag.
  */
@@ -6824,7 +6935,7 @@ prop_drilling_chains?: PropDrillingChainFinding[]
 /**
  * Hotspot entries combining git churn with complexity. Only present when
  * --hotspots is used. Sorted by score descending (highest risk first).
- * Each entry wraps its inner [`HotspotEntry`] payload (flattened on the
+ * Each entry wraps its inner `HotspotEntry` payload (flattened on the
  * wire) with a typed `actions` list.
  */
 hotspots?: HotspotFinding[]
@@ -6849,7 +6960,7 @@ large_functions?: LargeFunctionEntry[]
 /**
  * Ranked refactoring recommendations. Only present when --targets is used.
  * Sorted by efficiency (priority/effort) descending. Each entry wraps
- * its inner [`RefactoringTarget`] payload (flattened on the wire) with
+ * its inner `RefactoringTarget` payload (flattened on the wire) with
  * a typed `actions` list.
  */
 targets?: RefactoringTargetFinding[]
@@ -6886,7 +6997,7 @@ _meta?: (Meta | null)
 workspace_diagnostics?: WorkspaceDiagnostic[]
 /**
  * Read-only follow-up commands computed from this run's findings. See
- * [`CheckOutput::next_steps`] for the contract.
+ * `CheckOutput::next_steps` for the contract.
  */
 next_steps?: NextStep[]
 }
@@ -6901,7 +7012,7 @@ next_steps?: NextStep[]
  * files in the group, so they answer "what is the health of workspace X" in
  * a single invocation. `files_analyzed` and `functions_above_threshold`
  * summarise the subset for parity with the project-level
- * [`crate::health_types::HealthSummary`].
+ * project-level health summary.
  */
 export interface HealthGroup {
 /**
@@ -6948,7 +7059,7 @@ health_score?: (HealthScore | null)
 /**
  * Findings restricted to files in this group. Each entry is the typed
  * [`HealthFinding`] wrapper around a
- * [`ComplexityViolation`](crate::health_types::ComplexityViolation)
+ * `ComplexityViolation`
  * payload.
  */
 findings?: HealthFinding[]
@@ -6959,7 +7070,7 @@ file_scores?: FileHealthScore[]
 /**
  * Hotspots restricted to files in this group. Each entry is the typed
  * [`HotspotFinding`] wrapper around a
- * [`HotspotEntry`](crate::health_types::HotspotEntry) payload.
+ * `HotspotEntry` payload.
  */
 hotspots?: HotspotFinding[]
 /**
@@ -6969,7 +7080,7 @@ large_functions?: LargeFunctionEntry[]
 /**
  * Refactoring targets in files belonging to this group. Each entry is
  * the typed [`RefactoringTargetFinding`] wrapper around a
- * [`RefactoringTarget`](crate::health_types::RefactoringTarget)
+ * `RefactoringTarget`
  * payload.
  */
 targets?: RefactoringTargetFinding[]
@@ -6977,21 +7088,17 @@ targets?: RefactoringTargetFinding[]
  * Auditable breadcrumb recording why `suppress-line` action hints
  * were omitted from this group's findings. Mirrors the project-level
  * `HealthReport.actions_meta`; populated at construction time when the
- * per-group [`HealthActionContext`](crate::health_types::HealthActionContext)
+ * per-group `HealthActionContext`
  * suppresses inline hints.
  */
 actions_meta?: (HealthActionsMeta | null)
 }
 /**
- * Wire-shape payload for `fallow dupes --format json` (the body that
- * flattens into [`crate::output_envelope::DupesOutput`] and is also
- * emitted under the `dupes` / `duplication` key inside the combined and
- * audit envelopes).
+ * Envelope emitted by `fallow dupes --format json`.
  *
- * Mirrors [`DuplicationReport`] field-for-field, except `clone_groups`
- * and `clone_families` carry the typed wrapper envelopes instead of bare
- * findings, so the schema (and any TS / agent consumer) sees the typed
- * `actions[]` natively.
+ * `Report` and `Group` are generic so the envelope can live in
+ * `fallow-output` while duplication report wrappers and grouped output
+ * internals continue to migrate out of CLI/API-specific crates.
  */
 export interface DupesOutput {
 schema_version: SchemaVersion
@@ -7003,8 +7110,8 @@ elapsed_ms: ElapsedMs
 clone_groups: CloneGroupFinding[]
 /**
  * Clone families, each wrapped with typed actions. Inner `groups`
- * inside each [`CloneFamilyFinding`] are themselves wrapped as
- * [`CloneGroupFinding`] entries carrying their own `actions[]` (and
+ * inside each `CloneFamilyFinding` are themselves wrapped as
+ * `CloneGroupFinding` entries carrying their own `actions[]` (and
  * optional audit-mode `introduced` flag), so JSON-Schema strict
  * consumers and TS consumers reading `clone_families[].groups[]` see
  * the same shape as the top-level `clone_groups[]` array (preserves
@@ -7026,7 +7133,7 @@ groups?: (DuplicationGroup[] | null)
 _meta?: (Meta | null)
 /**
  * Workspace-discovery diagnostics surfaced during config load
- * (issue #473). See [`CheckOutput::workspace_diagnostics`] for the full
+ * (issue #473). See `CheckOutput::workspace_diagnostics` for the full
  * contract; the same list is repeated on each top-level command's
  * envelope so single-command consumers see it without having to look at
  * a separate top-level field.
@@ -7034,7 +7141,7 @@ _meta?: (Meta | null)
 workspace_diagnostics?: WorkspaceDiagnostic[]
 /**
  * Read-only follow-up commands computed from this run's findings. See
- * [`CheckOutput::next_steps`] for the contract.
+ * `CheckOutput::next_steps` for the contract.
  */
 next_steps?: NextStep[]
 }
@@ -7067,7 +7174,7 @@ clone_families: CloneFamilyFinding[]
  * Wire-shape envelope for an [`AttributedCloneGroup`] finding (per-bucket
  * duplication attribution emitted under `fallow dupes --group-by`).
  * Flattens the attributed group and carries the same typed
- * `CloneGroupAction` array as [`CloneGroupFinding`]; no `introduced`
+ * `CloneGroupAction` array as `CloneGroupFinding`; no `introduced`
  * field because `fallow audit` does not run on grouped output.
  */
 export interface AttributedCloneGroupFinding {
@@ -7076,7 +7183,13 @@ export interface AttributedCloneGroupFinding {
  * this clone group. Ties broken alphabetically (smallest key wins).
  */
 primary_owner: string
+/**
+ * Number of tokens in the clone group.
+ */
 token_count: number
+/**
+ * Number of source lines in the clone group.
+ */
 line_count: number
 /**
  * Each instance carries its own `owner` field alongside the standard
@@ -7486,7 +7599,7 @@ thin_wrappers?: ThinWrapperFinding[]
 duplicate_prop_shapes?: DuplicatePropShapeFinding[]
 }
 /**
- * The rendered impact report, derived purely from the store (no analysis run).
+ * The rendered impact report, derived purely from the store.
  */
 export interface ImpactReport {
 schema_version: ImpactReportSchemaVersion
@@ -7582,18 +7695,24 @@ duplication: number
 export interface TrendSummary {
 direction: ImpactTrendDirection
 /**
- * Signed delta in total issues (current minus previous).
+ * Signed delta in total issues, current minus previous.
  */
 total_delta: number
 previous_total: number
 current_total: number
 }
+/**
+ * A commit-gate containment event recorded by `fallow impact`.
+ */
 export interface ContainmentEvent {
 blocked_at: string
 cleared_at: string
 git_sha?: (string | null)
 blocked_counts: ImpactCounts
 }
+/**
+ * A resolved or suppressed finding attribution event.
+ */
 export interface ResolutionEvent {
 kind: string
 path: string
@@ -7602,7 +7721,7 @@ git_sha?: (string | null)
 timestamp: string
 }
 /**
- * The cross-repo aggregate report (`fallow impact --all --format json`).
+ * The cross-repo aggregate report, `fallow impact --all --format json`.
  */
 export interface CrossRepoImpactReport {
 schema_version: CrossRepoImpactSchemaVersion
@@ -8235,17 +8354,8 @@ top_files_limit: number
  * One sampled unresolved-callee row.
  */
 export interface SecurityUnresolvedCalleeSample {
-/**
- * Project-relative source path.
- */
 path: string
-/**
- * 1-based source line.
- */
 line: number
-/**
- * 0-based byte column.
- */
 col: number
 reason: SkippedSecurityCalleeReason
 expression_kind: SkippedSecurityCalleeExpressionKind
@@ -8254,9 +8364,6 @@ expression_kind: SkippedSecurityCalleeExpressionKind
  * Count of unresolved callees in one file.
  */
 export interface SecurityUnresolvedCalleeTopFile {
-/**
- * Project-relative source path.
- */
 path: string
 /**
  * Number of unresolved callees in this file.
@@ -8397,13 +8504,7 @@ export interface SecuritySurvivor {
  */
 finding_id: string
 verdict: SecurityVerifierVerdictStatus
-/**
- * Short verifier reason.
- */
 reason?: (string | null)
-/**
- * Short verifier rationale.
- */
 rationale?: (string | null)
 /**
  * Optional verifier-provided confidence or review priority.
@@ -8463,9 +8564,6 @@ suggestion: string
  * One file inside a blind-spot group.
  */
 export interface SecurityBlindSpotFile {
-/**
- * Project-relative source path.
- */
 path: string
 /**
  * Count in the bounded diagnostic sample.
@@ -8485,10 +8583,13 @@ dupes?: (DupesReportPayload | null)
 health?: (HealthReport | null)
 /**
  * Read-only follow-up commands aggregated across the combined run's
- * findings. See [`CheckOutput::next_steps`] for the contract.
+ * findings. See `CheckOutput::next_steps` for the contract.
  */
 next_steps?: NextStep[]
 }
+/**
+ * Optional `_meta` block for [`CombinedOutput`].
+ */
 export interface CombinedMeta {
 check?: (Meta | null)
 dupes?: (Meta | null)
@@ -8786,7 +8887,7 @@ export interface RoutingFacts {
 units: RoutingUnit[]
 }
 /**
- * One routed unit (a changed file) with its experts and bus-factor flag.
+ * One routed unit with its experts and bus-factor flag.
  */
 export interface RoutingUnit {
 /**
@@ -8810,11 +8911,11 @@ bus_factor_one?: boolean
  */
 export interface DecisionSurface {
 /**
- * Up to `cap` ranked decisions, highest consequence first.
+ * Ranked decisions, highest consequence first.
  */
 decisions: Decision[]
 /**
- * Present when more than `cap` decisions were extracted.
+ * Present when more than the cap were extracted.
  */
 truncated?: (TruncationNote | null)
 /**
@@ -8840,7 +8941,7 @@ category: DecisionCategory
  */
 question: string
 /**
- * Root-relative file the decision is anchored at (for suppression + routing).
+ * Root-relative file the decision is anchored at.
  */
 anchor_file: string
 /**
@@ -8848,7 +8949,7 @@ anchor_file: string
  */
 anchor_line: number
 /**
- * The raw fallow-emitted candidate key the `signal_id` hashes (the evidence).
+ * The raw fallow-emitted candidate key the `signal_id` hashes.
  */
 signal_key: string
 /**
@@ -8873,7 +8974,7 @@ consequence: number
  */
 expert: string[]
 /**
- * Whether the anchor file's only qualified owner is one person (bus-factor-1).
+ * Whether the anchor file's only qualified owner is one person.
  */
 bus_factor_one?: boolean
 /**
@@ -8894,7 +8995,7 @@ internal_consumer_count: number
 tradeoff: string
 }
 /**
- * A note for the decisions collapsed below the cap.
+ * A note for decisions collapsed below the cap.
  */
 export interface TruncationNote {
 /**
@@ -8955,7 +9056,7 @@ export interface ReviewDirection {
  */
 order: string[]
 /**
- * The coherent review units, in `order`.
+ * Coherent review units, in `order`.
  */
 units: DirectionUnit[]
 }
@@ -8986,7 +9087,7 @@ scoring_budget: number
  */
 out_of_diff: string[]
 /**
- * The routed expert(s) to ask, from ownership routing.
+ * Routed expert(s), when ownership signals are available.
  */
 expert: string[]
 }
@@ -9041,7 +9142,7 @@ judgment_shape: string
  */
 echo_field: string
 /**
- * The constant naming the anti-hallucination rule.
+ * The anchoring rule name.
  */
 anchoring_rule: string
 }
@@ -9114,11 +9215,11 @@ change_anchor: string
  */
 anchor_kind: string
 /**
- * The agent's framing, FENCED: this is non-deterministic agent prose.
+ * The agent's fenced free-text framing.
  */
 agent_framing: string
 /**
- * The agent's optional concern category (advisory).
+ * The agent's optional concern category.
  */
 concern?: (string | null)
 /**
@@ -9159,6 +9260,15 @@ categories: string[]
 severity: CodeClimateSeverity
 fingerprint: string
 location: CodeClimateLocation
+/**
+ * Optional owner attribution used by grouped dead-code output.
+ */
+owner?: (string | null)
+/**
+ * Optional grouping attribution used by grouped health and duplication
+ * output.
+ */
+group?: (string | null)
 }
 /**
  * Location block inside [`CodeClimateIssue::location`].

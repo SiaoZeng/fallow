@@ -38,7 +38,7 @@ fn cross_module_factory_return_credits_class_member() {
     // Each must credit the class member across the module boundary (issue #1441,
     // Part A), while two over-credit negatives stay flagged:
     //   Ghost        -> reached only via notAFactory().Ghost(); notAFactory is not a
-    //                   class factory, so the sentinel must resolve to nothing
+    //                   class factory, so the fact must resolve to nothing
     //   unusedMethod -> never reached at all
     let root = fixture_path("issue-1441-cross-module-factory-member");
     let mut config = create_config(root);
@@ -61,7 +61,7 @@ fn cross_module_factory_return_credits_class_member() {
     assert!(
         unused.contains(&"RESTApi.Ghost".to_string()),
         "RESTApi.Ghost is reached only through notAFactory() (not a class factory) and must stay \
-         flagged , the cross-module credit must not fire for a non-factory callee, found: {unused:?}"
+         flagged, the cross-module credit must not fire for a non-factory callee, found: {unused:?}"
     );
     assert!(
         unused.contains(&"RESTApi.unusedMethod".to_string()),
@@ -71,14 +71,12 @@ fn cross_module_factory_return_credits_class_member() {
 
 #[test]
 fn inferred_return_factory_credits_class_member() {
-    // The exact issue #1441 repro: `useApi()` has an INFERRED return type (no
-    // `: Api` annotation), so the class type reaches the consumer only through the
-    // typed module-local `let api: Api` the factory returns. The headline of the
-    // issue is precisely the inferred-return form; the other #1441 fixtures all
-    // annotate the return, so this pins the inferred case against regression.
-    //   const api = useApi(); api.ViaFactory.call() -> must credit Api.ViaFactory
-    //   useDirect(api: Api) { api.Direct.call() }    -> must credit Api.Direct
-    //   Api.DeadMember (never accessed)              -> must stay flagged (control)
+    // `useApi` has NO `: Api` return annotation: the class reaches the consumer
+    // only through the typed module-local `let api: Api` it returns. A consumer's
+    // `const api = useApi(); api.ViaFactory.call()` must credit the class PROPERTY
+    // `Api.ViaFactory` across the module boundary, while a member only reached via
+    // a directly-typed param (`Api.Direct`) is credited by ordinary chains and a
+    // genuinely unaccessed member (`Api.DeadMember`) stays flagged. Issue #1441.
     let root = fixture_path("issue-1441-inferred-return-member");
     let mut config = create_config(root);
     config.rules.unused_class_members = fallow_config::Severity::Error;
@@ -93,12 +91,11 @@ fn inferred_return_factory_credits_class_member() {
     for credited in ["Api.Direct", "Api.ViaFactory"] {
         assert!(
             !unused.contains(&credited.to_string()),
-            "{credited} is a genuine usage reached through the inferred-return factory and must be \
-             credited (issue #1441), found: {unused:?}"
+            "{credited} is reached and must be credited (issue #1441), found: {unused:?}"
         );
     }
     assert!(
         unused.contains(&"Api.DeadMember".to_string()),
-        "Api.DeadMember has no call site and must stay flagged (non-vacuous control), found: {unused:?}"
+        "Api.DeadMember has no call site and must stay flagged, found: {unused:?}"
     );
 }

@@ -8,31 +8,23 @@
 //! audit verdict is `fail`. The verdict is still computed and carried in the
 //! brief JSON informationally, but it never drives the exit code on this path.
 //!
-//! The JSON envelope is an independently-versioned
-//! [`crate::output_envelope::FallowOutput::AuditBrief`] variant
-//! (`kind: "audit-brief"`) so the brief shape evolves on its own cadence
-//! without bumping the main `--format json` contract.
+//! The JSON envelope is independently versioned and tagged as
+//! `kind: "audit-brief"` so the brief shape evolves on its own cadence without
+//! bumping the main `--format json` contract.
 
 use std::process::ExitCode;
 
+pub use fallow_output::{
+    CoordinationGapFact, DiffTriage, GraphFacts, ImpactClosureFacts, PartitionFacts,
+    ReviewBriefSchemaVersion, ReviewBriefSubtractSections, ReviewDeltas, ReviewEffort,
+    ReviewUnitFact, RiskClass,
+};
 use fallow_types::results::AnalysisResults;
 use rustc_hash::FxHashSet;
-use serde::Serialize;
 
 use crate::audit::AuditResult;
 
-/// Wire version for the `fallow audit --brief --format json` envelope. Bumped
-/// independently of the main `--format json` contract: the brief shape can grow
-/// without touching `report::SCHEMA_VERSION`.
-///
-/// v2: adds the stage-4 weighted `focus` map (composite attention score per
-/// unit + no-skip labels + confidence flags + the `deprioritized` escape hatch).
-/// v5: adds `change_anchors` to the walkthrough guide and `anchor_kind` /
-/// `change_anchor` to the walkthrough validation judgments. This version pins the
-/// brief, the walkthrough guide, and the validation envelope together; it is a
-/// SEMANTIC marker only (the integer is not pinned in the wire schema, so the
-/// bump alone produces no schema/`.d.ts` diff).
-pub const REVIEW_BRIEF_SCHEMA_VERSION: u32 = 5;
+pub type ReviewBriefOutput = fallow_output::StandardReviewBriefOutput;
 
 /// A file count at or above which a changeset is classified [`RiskClass::High`].
 const RISK_HIGH_FILES: usize = 20;
@@ -48,182 +40,8 @@ const RISK_MEDIUM_FILES: usize = 5;
 /// [`RiskClass::Medium`].
 const RISK_MEDIUM_LINES: i64 = 100;
 
-/// Independently-versioned wire-version newtype for the brief envelope.
-/// Serializes as the integer `REVIEW_BRIEF_SCHEMA_VERSION`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct ReviewBriefSchemaVersion(pub u32);
-
-impl Default for ReviewBriefSchemaVersion {
-    fn default() -> Self {
-        Self(REVIEW_BRIEF_SCHEMA_VERSION)
-    }
-}
-
-/// Coarse risk classification for a changeset, a pure function of the change
-/// size (file count plus, once threaded, net lines).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum RiskClass {
-    /// Small, contained change.
-    Low,
-    /// Moderately sized change.
-    Medium,
-    /// Large change spanning many files or lines.
-    High,
-}
-
-/// Suggested reviewer effort, a pure function of [`RiskClass`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum ReviewEffort {
-    /// A quick scan is enough.
-    Glance,
-    /// A normal line-by-line review.
-    Review,
-    /// A careful, deep review is warranted.
-    DeepDive,
-}
-
-/// Stage 0 of the brief: triage facts derived purely from the diff size.
-///
-/// `hunks` and `net_lines` are `None` in v1: the file-level audit does not yet
-/// thread a `DiffIndex` (from `report/ci/diff_filter.rs`). They populate later,
-/// on `--diff-file` / `--diff-stdin`, without a schema bump.
-#[derive(Debug, Clone, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct DiffTriage {
-    /// Number of changed files in the audit scope.
-    pub files: usize,
-    /// Number of diff hunks. `None` in v1 (no diff index threaded yet).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hunks: Option<usize>,
-    /// Net added-minus-removed lines. `None` in v1 (no diff index threaded yet).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub net_lines: Option<i64>,
-    /// Coarse risk class derived from the change size.
-    pub risk_class: RiskClass,
-    /// Suggested reviewer effort derived from `risk_class`.
-    pub review_effort: ReviewEffort,
-}
-
-/// Stage 1 of the brief: graph-derived orientation facts.
-///
-/// `boundaries_touched` is derived from the run's boundary-violation zones;
-/// `reachable_from` is populated by the impact closure (the affected-not-shown
-/// set: modules the changed code is reachable from / affects, none in the diff).
-/// `exports_added` / `api_width_delta` stay honestly stubbed (`0`) until the
-/// export-surface delta lands. The fields are present and correctly typed so
-/// values fill in later without a schema bump.
-#[derive(Debug, Clone, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct GraphFacts {
-    /// Number of exports added by the changeset. Stubbed to `0` in v1.
-    pub exports_added: usize,
-    /// Change in public API width (added minus removed exports). Stubbed to `0`
-    /// in v1.
-    pub api_width_delta: i64,
-    /// Root-relative paths of modules the changed code is reachable from / affects
-    /// (the impact closure's affected-but-not-in-diff set), deduped and sorted.
-    /// Empty when no graph was retained or nothing depends on the changed files.
-    pub reachable_from: Vec<String>,
-    /// Architecture boundary zones touched by the changeset, deduped and sorted.
-    /// Derived from the run's boundary-violation findings.
-    pub boundaries_touched: Vec<String>,
-}
-
-/// Stage 3 of the brief: the impact closure. The transitive
-/// affected-but-not-in-diff set plus the coordination gap. The differentiator a
-/// diff tool fundamentally cannot do, because it has no graph.
-///
-/// Honest scope (ADR-001, syntactic): the coordination gap is an attention
-/// pointer at the exact inter-module failure mode, NOT a correctness proof.
-#[derive(Debug, Clone, Default, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct ImpactClosureFacts {
-    /// Root-relative paths transitively affected by the changeset (reverse-deps +
-    /// re-export chains) that are NOT in the diff, deduped and sorted.
-    pub affected_not_shown: Vec<String>,
-    /// Coordination gaps: a changed file exports a contract consumed by a module
-    /// absent from the diff. One entry per (changed file, consumer) pair.
-    pub coordination_gap: Vec<CoordinationGapFact>,
-}
-
-/// One coordination-gap entry: a changed file exports symbols consumed by a
-/// `consumer_file` that is NOT in the diff. Deduped per (changed, consumer) pair
-/// (firing-precision rule R2).
-#[derive(Debug, Clone, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct CoordinationGapFact {
-    /// Root-relative path of the changed file whose contract is consumed elsewhere.
-    pub changed_file: String,
-    /// Root-relative path of the consumer module that is NOT in the diff.
-    pub consumer_file: String,
-    /// The exported symbol names the consumer references, sorted.
-    pub consumed_symbols: Vec<String>,
-    /// Honest scope note: this is a syntactic attention pointer, not a proof.
-    pub note: String,
-}
-
 /// The honest-scope note stamped on every coordination-gap entry (ADR-001).
 const COORDINATION_GAP_NOTE: &str = "syntactic attention pointer, not a correctness proof";
-
-/// Stage 2 of the brief: the partition + order. The changed files split into
-/// coherent BY-MODULE units (the only byte-identical-deterministic clustering
-/// definition straight from the graph), plus a dependency-sensible review ORDER
-/// over those units (definitions before consumers, mechanical/leaf units last,
-/// ties broken by the path sort). Stage 2 sits UNDER the decision surface as a
-/// drill-down; it is the backbone the directed-review loop hands the agent.
-///
-/// Feature-cluster and concern partitioning are deferred (they need scoring
-/// heuristics whose tie-breaks are a fresh nondeterminism surface).
-#[derive(Debug, Clone, Default, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct PartitionFacts {
-    /// The by-module units, sorted by module directory. Empty when no graph was
-    /// retained or no changed file maps to a known module.
-    pub units: Vec<ReviewUnitFact>,
-    /// The dependency-sensible review order: module-directory strings,
-    /// definitions before consumers, mechanical/leaf units last. A permutation of
-    /// the `units` module directories.
-    pub order: Vec<String>,
-}
-
-/// One review unit: a coherent by-module cluster of the changed set.
-#[derive(Debug, Clone, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct ReviewUnitFact {
-    /// The module directory the unit covers (root-relative, forward-slashed).
-    /// The empty string is the repository-root group.
-    pub module_dir: String,
-    /// The changed files in this unit, path-sorted.
-    pub files: Vec<String>,
-}
-
-/// Diff-aware deterministic deltas (6.A), framed new-vs-pre-existing against
-/// the audit base snapshot. Each entry is a brief summary/verdict line.
-///
-/// `public_api` is batch-consolidated to ONE decision per change (rule R1):
-/// the `added` list carries the introduced public-export keys as evidence, but a
-/// reviewer reads "the public surface widened by N", never one decision per
-/// symbol.
-#[derive(Debug, Clone, Default, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct ReviewDeltas {
-    /// Cross-zone boundary EDGES introduced vs base (R2 first-edge-only: one per
-    /// `<from_zone>-><to_zone>` pair, never per import). New-vs-pre-existing.
-    pub boundary_introduced: Vec<String>,
-    /// Circular dependencies introduced vs base (canonical file-set keys).
-    pub cycle_introduced: Vec<String>,
-    /// Exports-aware public-API surface delta: the public-export keys
-    /// (`<rel_path>::<name>`) added vs base, resolved through `package.json`
-    /// `exports` + re-export reachability. A symbol re-exported only through an
-    /// internal barrel NOT in `exports` is absent here (zero delta); one
-    /// reachable through an `exports` path is present (exactly one).
-    pub public_api_added: Vec<String>,
-}
 
 /// Build the deltas from head sets vs a base set, sorted for determinism.
 #[must_use]
@@ -245,55 +63,6 @@ pub fn build_review_deltas(
         cycle_introduced: introduced_keys(head_cycles, base_cycles),
         public_api_added: introduced_keys(head_public_api, base_public_api),
     }
-}
-
-/// The full `fallow audit --brief --format json` envelope. Carries the
-/// informational verdict, the triage and graph-facts orientation stages, plus
-/// the reused "subtract" section (the same dead-code / duplication / complexity
-/// payload `fallow audit --format json` emits).
-#[derive(Debug, Clone, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[cfg_attr(
-    feature = "schema",
-    schemars(title = "fallow audit --brief --format json")
-)]
-pub struct ReviewBriefOutput {
-    /// Independently-versioned brief schema version.
-    pub schema_version: ReviewBriefSchemaVersion,
-    /// Fallow CLI version that produced this output.
-    pub version: String,
-    /// Command discriminator singleton: always `"audit-brief"`.
-    pub command: String,
-    /// Stage 0: diff triage.
-    pub triage: DiffTriage,
-    /// Stage 1: graph orientation facts.
-    pub graph_facts: GraphFacts,
-    /// Stage 2: the partition + order (by-module units + dependency-sensible
-    /// review order). The backbone the directed-review loop hands the agent.
-    pub partition: PartitionFacts,
-    /// Stage 3: the impact closure (affected-not-shown + coordination gap).
-    pub impact_closure: ImpactClosureFacts,
-    /// Stage 4: the weighted focus map. A composite attention score per
-    /// changed-file unit (fan-in/out + security taint + risk zone + change shape),
-    /// with `review-here` / `not-prioritized` labels (NEVER `skip` in free mode),
-    /// a per-unit confidence flag, and the FULL `deprioritized` escape-hatch list
-    /// so every de-prioritized piece is reachable. Stage 4 sits UNDER the decision
-    /// surface as drill-down.
-    pub focus: crate::audit_focus::FocusMap,
-    /// 6.A: diff-aware deterministic deltas (boundary/cycle introduced +
-    /// exports-aware public-API surface delta), new-vs-pre-existing.
-    pub deltas: ReviewDeltas,
-    /// 6.F, headline: reviewer-private weakening signals (tests
-    /// removed/skipped, thresholds lowered, suppressions added, security steps
-    /// removed). Advisory, never gates, never auto-posted.
-    pub weakening: Vec<crate::audit::weakening::WeakeningSignal>,
-    /// 6.D: ownership-aware reviewer routing (per-file expert + bus-factor).
-    pub routing: crate::audit::routing::RoutingFacts,
-    /// 6.G, the APEX: the decision surface. The ranked, capped,
-    /// signal_id-anchored set of consequential structural decisions, each framed
-    /// as a judgment question with its routed expert. This is the only thing the
-    /// brief visibly leads with; the stages above are its drill-down derivation.
-    pub decisions: crate::audit_decision_surface::DecisionSurface,
 }
 
 /// Classify a changeset's risk purely from its size. `net_lines` is consulted
@@ -348,7 +117,7 @@ pub fn build_triage(result: &AuditResult) -> DiffTriage {
 #[must_use]
 pub fn derive_graph_facts(
     results: &AnalysisResults,
-    closure: Option<&fallow_core::graph::ImpactClosurePaths>,
+    closure: Option<&fallow_engine::graph::ImpactClosurePaths>,
 ) -> GraphFacts {
     let mut zones: FxHashSet<String> = FxHashSet::default();
     for finding in &results.boundary_violations {
@@ -564,103 +333,26 @@ pub fn build_brief_output(result: &AuditResult) -> ReviewBriefOutput {
     }
 }
 
-/// Insert the Stage 0 triage object into the brief JSON map.
-fn insert_brief_triage_json(
-    obj: &mut serde_json::Map<String, serde_json::Value>,
-    brief: &ReviewBriefOutput,
-) {
-    if let Ok(value) = serde_json::to_value(&brief.triage) {
-        obj.insert("triage".into(), value);
-    }
-}
-
-/// Insert the Stage 1 graph-facts object into the brief JSON map.
-fn insert_brief_graph_facts_json(
-    obj: &mut serde_json::Map<String, serde_json::Value>,
-    brief: &ReviewBriefOutput,
-) {
-    if let Ok(value) = serde_json::to_value(&brief.graph_facts) {
-        obj.insert("graph_facts".into(), value);
-    }
-}
-
-/// Insert the Stage 2 partition + order object into the brief JSON map.
-fn insert_brief_partition_json(
-    obj: &mut serde_json::Map<String, serde_json::Value>,
-    brief: &ReviewBriefOutput,
-) {
-    if let Ok(value) = serde_json::to_value(&brief.partition) {
-        obj.insert("partition".into(), value);
-    }
-}
-
-/// Insert the Stage 3 impact-closure object into the brief JSON map.
-fn insert_brief_impact_closure_json(
-    obj: &mut serde_json::Map<String, serde_json::Value>,
-    brief: &ReviewBriefOutput,
-) {
-    if let Ok(value) = serde_json::to_value(&brief.impact_closure) {
-        obj.insert("impact_closure".into(), value);
-    }
-}
-
-/// Insert the Stage 4 weighted focus map into the brief JSON map. The
-/// `deprioritized` escape-hatch list is ALWAYS present (every de-prioritized
-/// unit), so nothing is hidden regardless of `--show-deprioritized` (a
-/// human-rendering-only flag).
-fn insert_brief_focus_json(
-    obj: &mut serde_json::Map<String, serde_json::Value>,
-    brief: &ReviewBriefOutput,
-) {
-    if let Ok(value) = serde_json::to_value(&brief.focus) {
-        obj.insert("focus".into(), value);
-    }
-}
-
-/// Insert the deltas / weakening / routing sections into the brief JSON map.
-fn insert_brief_e3_json(
-    obj: &mut serde_json::Map<String, serde_json::Value>,
-    brief: &ReviewBriefOutput,
-) {
-    if let Ok(value) = serde_json::to_value(&brief.deltas) {
-        obj.insert("deltas".into(), value);
-    }
-    if let Ok(value) = serde_json::to_value(&brief.weakening) {
-        obj.insert("weakening".into(), value);
-    }
-    if let Ok(value) = serde_json::to_value(&brief.routing) {
-        obj.insert("routing".into(), value);
-    }
-}
-
-/// Insert the decision surface (the apex) into the brief JSON map.
-fn insert_brief_decisions_json(
-    obj: &mut serde_json::Map<String, serde_json::Value>,
-    brief: &ReviewBriefOutput,
-) {
-    if let Ok(value) = serde_json::to_value(&brief.decisions) {
-        obj.insert("decisions".into(), value);
-    }
-}
-
-/// Insert the reused "subtract" section (dead-code / duplication / complexity)
-/// into the brief JSON map, mirroring `fallow audit --format json`. Returns the
-/// failing exit code if any sub-payload fails to serialize; the caller maps that
-/// to a force-success on the brief path but surfaces the serialization error.
-fn insert_brief_subtract_json(
-    obj: &mut serde_json::Map<String, serde_json::Value>,
+/// Build the reused "subtract" section (dead-code / duplication / complexity)
+/// for the brief JSON value, mirroring `fallow audit --format json`.
+fn build_brief_subtract_sections(
     result: &AuditResult,
-) -> Result<(), ExitCode> {
+) -> Result<ReviewBriefSubtractSections, ExitCode> {
+    let mut obj = serde_json::Map::new();
     if let Some(ref check) = result.check {
-        crate::audit::insert_audit_dead_code_json(obj, result, check)?;
+        crate::audit::insert_audit_dead_code_json(&mut obj, result, check)?;
     }
     if let Some(ref dupes) = result.dupes {
-        crate::audit::insert_audit_duplication_json(obj, result, dupes)?;
+        crate::audit::insert_audit_duplication_json(&mut obj, result, dupes)?;
     }
     if let Some(ref health) = result.health {
-        crate::audit::insert_audit_health_json(obj, result, health)?;
+        crate::audit::insert_audit_health_json(&mut obj, result, health)?;
     }
-    Ok(())
+    Ok(ReviewBriefSubtractSections {
+        dead_code: obj.remove("dead_code"),
+        duplication: obj.remove("duplication"),
+        complexity: obj.remove("complexity"),
+    })
 }
 
 /// Build the complete brief JSON value: the versioned brief header, the
@@ -668,56 +360,38 @@ fn insert_brief_subtract_json(
 /// reused subtract section.
 fn build_brief_json(result: &AuditResult) -> Result<serde_json::Value, ExitCode> {
     let brief = build_brief_output(result);
-    let mut obj = serde_json::Map::new();
-
-    obj.insert(
-        "schema_version".into(),
-        serde_json::to_value(brief.schema_version).unwrap_or(serde_json::Value::Null),
-    );
-    obj.insert(
-        "version".into(),
-        serde_json::Value::String(brief.version.clone()),
-    );
-    obj.insert(
-        "command".into(),
-        serde_json::Value::String(brief.command.clone()),
-    );
-
-    // The audit verdict and scope are carried informationally so the brief is a
-    // superset of the audit header; the verdict never drives the brief exit.
-    crate::audit::insert_audit_json_header(&mut obj, result);
-    // Re-stamp the brief command over the audit header's `"audit"` / its
-    // `SCHEMA_VERSION`, so the document advertises the brief contract.
-    obj.insert(
-        "schema_version".into(),
-        serde_json::to_value(brief.schema_version).unwrap_or(serde_json::Value::Null),
-    );
-    obj.insert(
-        "command".into(),
-        serde_json::Value::String(brief.command.clone()),
-    );
-
-    // The decision surface is the apex; it leads the JSON (collapse-by-
-    // default), with the stages below as its drill-down derivation.
-    insert_brief_decisions_json(&mut obj, &brief);
-    insert_brief_triage_json(&mut obj, &brief);
-    insert_brief_graph_facts_json(&mut obj, &brief);
-    insert_brief_partition_json(&mut obj, &brief);
-    insert_brief_impact_closure_json(&mut obj, &brief);
-    insert_brief_focus_json(&mut obj, &brief);
-    insert_brief_e3_json(&mut obj, &brief);
-    insert_brief_subtract_json(&mut obj, result)?;
-
-    Ok(serde_json::Value::Object(obj))
+    let audit_header = fallow_api::build_audit_header_map(crate::audit::audit_json_header_input(
+        result,
+    ))
+    .map_err(|err| {
+        crate::error::emit_error(
+            &format!("JSON serialization error: {err}"),
+            2,
+            fallow_config::OutputFormat::Json,
+        )
+    })?;
+    let subtract = build_brief_subtract_sections(result)?;
+    fallow_output::build_review_brief_json_output(&brief, audit_header, subtract).map_err(|err| {
+        crate::error::emit_error(
+            &format!("JSON serialization error: {err}"),
+            2,
+            fallow_config::OutputFormat::Json,
+        )
+    })
 }
 
 /// Render the brief as JSON. Always returns `SUCCESS`; a serialization failure
 /// surfaces the error but the brief contract still exits 0.
 fn print_brief_json(result: &AuditResult) -> ExitCode {
     match build_brief_json(result) {
-        Ok(mut output) => {
-            crate::output_envelope::apply_root_kind(&mut output, "audit-brief");
-            crate::output_envelope::attach_telemetry_meta(&mut output);
+        Ok(output) => {
+            let Ok(output) = fallow_output::serialize_review_brief_json_output(
+                output,
+                crate::output_runtime::current_root_envelope_mode(),
+                crate::output_runtime::telemetry_analysis_run_id().as_deref(),
+            ) else {
+                return ExitCode::SUCCESS;
+            };
             let _ = crate::report::emit_json(&output, "audit-brief");
             ExitCode::SUCCESS
         }
@@ -1027,7 +701,7 @@ pub fn print_brief_result(
 /// tool's output + `fallow decision-surface`). Emits ONLY the ranked, capped
 /// decisions with structured `actions[]`, never the full brief. Always exit 0.
 ///
-/// JSON renders the `FallowOutput::DecisionSurface` envelope (`kind:
+/// JSON renders the typed decision-surface envelope (`kind:
 /// "decision-surface"`); human / compact / markdown render the apex header.
 #[must_use]
 pub fn print_decision_surface_result(result: &AuditResult, quiet: bool) -> ExitCode {
@@ -1036,13 +710,13 @@ pub fn print_decision_surface_result(result: &AuditResult, quiet: bool) -> ExitC
     let surface = result.decision_surface.clone().unwrap_or_default();
     match result.output {
         OutputFormat::Json => {
-            let envelope = crate::output_envelope::FallowOutput::DecisionSurface(
-                crate::audit_decision_surface::build_decision_surface_output(&surface),
-            );
-            match serde_json::to_value(&envelope) {
-                Ok(mut value) => {
-                    crate::output_envelope::apply_root_kind(&mut value, "decision-surface");
-                    crate::output_envelope::attach_telemetry_meta(&mut value);
+            let output = crate::audit_decision_surface::build_decision_surface_output(&surface);
+            match fallow_output::serialize_decision_surface_json_output(
+                output,
+                crate::output_runtime::current_root_envelope_mode(),
+                crate::output_runtime::telemetry_analysis_run_id().as_deref(),
+            ) {
+                Ok(value) => {
                     let _ = crate::report::emit_json(&value, "decision-surface");
                     ExitCode::SUCCESS
                 }
@@ -1060,17 +734,18 @@ pub fn print_decision_surface_result(result: &AuditResult, quiet: bool) -> ExitC
 
 /// Render the agent-contract WALKTHROUGH GUIDE: the digest (brief +
 /// decision surface), the review direction, the JSON schema the agent returns,
-/// and the deterministic graph-snapshot pin. JSON renders the
-/// `FallowOutput::WalkthroughGuide` envelope (`kind: "review-walkthrough-guide"`).
-/// Every format emits the guide as JSON: the guide is an agent-facing contract,
-/// not a human walkthrough. Always exit 0.
+/// and the deterministic graph-snapshot pin. JSON renders the typed guide
+/// envelope (`kind: "review-walkthrough-guide"`). Every format emits the guide
+/// as JSON: the guide is an agent-facing contract, not a human walkthrough.
+/// Always exit 0.
 #[must_use]
 pub fn print_walkthrough_guide_result(result: &AuditResult) -> ExitCode {
     let guide = crate::audit_walkthrough::build_guide_from_result(result);
-    let envelope = crate::output_envelope::FallowOutput::WalkthroughGuide(guide);
-    if let Ok(mut value) = serde_json::to_value(&envelope) {
-        crate::output_envelope::apply_root_kind(&mut value, "review-walkthrough-guide");
-        crate::output_envelope::attach_telemetry_meta(&mut value);
+    if let Ok(value) = fallow_output::serialize_walkthrough_guide_json_output(
+        guide,
+        crate::output_runtime::current_root_envelope_mode(),
+        crate::output_runtime::telemetry_analysis_run_id().as_deref(),
+    ) {
         let _ = crate::report::emit_json(&value, "review-walkthrough-guide");
     }
     ExitCode::SUCCESS
@@ -1079,7 +754,7 @@ pub fn print_walkthrough_guide_result(result: &AuditResult) -> ExitCode {
 /// Ingest the agent's judgment JSON from `path` and POST-VALIDATE it against
 /// the live graph: reject unanchored signal_ids (anti-hallucination), refuse the
 /// whole payload when the echoed graph-snapshot hash is stale (the tree moved).
-/// JSON renders the `FallowOutput::WalkthroughValidation` envelope (`kind:
+/// JSON renders the typed walkthrough-validation envelope (`kind:
 /// "review-walkthrough-validation"`). Always exit 0 (advisory).
 ///
 /// A path that cannot be read yields an empty agent payload (default `""` hash),
@@ -1099,10 +774,11 @@ pub fn print_walkthrough_file_result(result: &AuditResult, path: &std::path::Pat
         &change_anchor_ids,
         &current_hash,
     );
-    let envelope = crate::output_envelope::FallowOutput::WalkthroughValidation(validation);
-    if let Ok(mut value) = serde_json::to_value(&envelope) {
-        crate::output_envelope::apply_root_kind(&mut value, "review-walkthrough-validation");
-        crate::output_envelope::attach_telemetry_meta(&mut value);
+    if let Ok(value) = fallow_output::serialize_walkthrough_validation_json_output(
+        validation,
+        crate::output_runtime::current_root_envelope_mode(),
+        crate::output_runtime::telemetry_analysis_run_id().as_deref(),
+    ) {
         let _ = crate::report::emit_json(&value, "review-walkthrough-validation");
     }
     ExitCode::SUCCESS
@@ -1113,6 +789,7 @@ mod tests {
     use std::time::Duration;
 
     use fallow_config::{AuditGate, OutputFormat};
+    use fallow_output::REVIEW_BRIEF_SCHEMA_VERSION;
 
     use crate::audit::{AuditAttribution, AuditResult, AuditSummary, AuditVerdict};
 
@@ -1174,8 +851,12 @@ mod tests {
     #[test]
     fn brief_json_validates_against_audit_brief_schema_variant() {
         let result = audit_result(AuditVerdict::Fail, OutputFormat::Json);
-        let mut value = build_brief_json(&result).expect("brief json must build");
-        crate::output_envelope::apply_root_kind(&mut value, "audit-brief");
+        let value = fallow_output::serialize_review_brief_json_output(
+            build_brief_json(&result).expect("brief json must build"),
+            crate::output_runtime::current_root_envelope_mode(),
+            crate::output_runtime::telemetry_analysis_run_id().as_deref(),
+        )
+        .expect("brief json must serialize");
 
         assert_eq!(value["kind"], "audit-brief");
         assert_eq!(value["command"], "audit-brief");
@@ -1222,7 +903,7 @@ mod tests {
 
     #[test]
     fn derive_graph_facts_populates_reachable_from_from_closure() {
-        use fallow_core::graph::{CoordinationGapPaths, ImpactClosurePaths};
+        use fallow_engine::graph::{CoordinationGapPaths, ImpactClosurePaths};
         let results = AnalysisResults::default();
         let closure = ImpactClosurePaths {
             in_diff: vec!["src/core.ts".to_string()],

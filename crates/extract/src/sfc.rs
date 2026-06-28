@@ -700,7 +700,11 @@ fn harvest_template_visible_bindings(
             .binding_target_names()
             .iter()
             .filter(|(local, _)| !local.starts_with("this."))
-            .map(|(local, target)| (local.clone(), target.clone())),
+            .filter_map(|(local, target)| {
+                target
+                    .class_name()
+                    .map(|class_name| (local.clone(), class_name.to_string()))
+            }),
     );
 }
 
@@ -1093,9 +1097,9 @@ fn merge_template_usage_into_combined(
     combined
         .member_accesses
         .extend(template_usage.member_accesses);
-    combined
-        .whole_object_uses
-        .extend(template_usage.whole_object_uses);
+    let mut whole_object_uses = std::mem::take(&mut combined.whole_object_uses).into_vec();
+    whole_object_uses.extend(template_usage.whole_object_uses);
+    combined.whole_object_uses = whole_object_uses.into_boxed_slice();
     combined
         .security_sinks
         .extend(template_usage.security_sinks);

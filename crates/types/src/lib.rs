@@ -13,6 +13,10 @@
     )
 )]
 
+/// Typed audit cache-key inputs.
+pub mod audit_cache;
+/// Shared churn output contracts.
+pub mod churn;
 /// File discovery types: discovered files, file IDs, and entry points.
 pub mod discover;
 /// JSON-output envelope and utility types: `SchemaVersion`, `ToolVersion`,
@@ -62,5 +66,13 @@ pub mod path_util;
 pub mod results;
 /// Custom serde serializers for cross-platform path output.
 pub mod serde_path;
+/// Shared source-file freshness metadata used by cache invalidation.
+pub mod source_fingerprint;
 /// Inline suppression comment types and issue kind definitions.
 pub mod suppress;
+/// Workspace and source-discovery diagnostic data types
+/// (`WorkspaceDiagnostic`, `WorkspaceDiagnosticKind`). Re-exported by
+/// `fallow-config` for back-compat; embedded directly by `fallow-output` so
+/// `workspace_diagnostics[]` keeps its typed JSON schema. The
+/// `schemars::JsonSchema` derive is gated on the `schema` feature.
+pub mod workspace;

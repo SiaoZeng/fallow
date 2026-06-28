@@ -25,69 +25,57 @@ use std::process::ExitCode;
 use schemars::generate::SchemaSettings;
 use serde_json::{Map, Value};
 
-use fallow_cli::audit_brief::{
-    DiffTriage, GraphFacts, ReviewBriefOutput, ReviewBriefSchemaVersion, ReviewEffort, RiskClass,
-};
-use fallow_cli::audit_decision_surface::{
-    Decision, DecisionAction, DecisionActionType, DecisionCategory, DecisionSurface,
-    DecisionSurfaceOutput, DecisionSurfaceSchemaVersion, DecisionWithActions, TruncationNote,
-};
-use fallow_cli::audit_focus::{ConfidenceFlag, FocusLabel, FocusMap, FocusScore, FocusUnit};
-use fallow_cli::audit_walkthrough::{
-    AcceptedJudgment, AgentSchema, ChangeAnchor, DirectionUnit, RejectedJudgment, ReviewDirection,
-    WalkthroughGuide, WalkthroughValidation,
-};
-use fallow_cli::health_types::{
-    ComplexityViolation, ContributorEntry, ContributorIdentifierFormat, CoverageGapSummary,
-    CoverageGaps, CoverageModel, CoverageTier, ExceededThreshold, FileHealthScore, FindingSeverity,
-    HealthActionsMeta, HealthScore, HealthScorePenalties, HealthSummary, HealthTrend, HotspotEntry,
-    HotspotFinding, HotspotSummary, LargeFunctionEntry, OwnershipMetrics, RecommendationCategory,
-    RefactoringTarget, RefactoringTargetFinding, RiskProfile, RuntimeCoverageReport,
-    TargetThresholds, TrendCount, UntestedExport, UntestedExportFinding, UntestedFile,
-    UntestedFileFinding, VitalSigns, VitalSignsCounts,
-};
-use fallow_cli::impact::{
-    ContainmentEvent, CrossRepoImpactReport, CrossRepoImpactSchemaVersion, CrossRepoProjectEntry,
-    CrossRepoTotals, EnabledSource, ImpactCounts, ImpactReport, ImpactReportSchemaVersion,
-    ImpactTrendDirection, ResolutionEvent, TrendSummary,
-};
-use fallow_cli::output_dupes::{
-    AttributedCloneGroupFinding, CloneFamilyAction, CloneFamilyActionType, CloneFamilyFinding,
-    CloneGroupAction, CloneGroupActionType, CloneGroupFinding, DupesReportPayload,
-};
-use fallow_cli::output_envelope::{
-    AuditCommand, AuditOutput, BoundariesListLogicalGroup, BoundariesListRule, BoundariesListZone,
-    BoundariesListing, CheckGroupedEntry, CheckGroupedOutput, CheckOutput, CodeClimateIssue,
-    CodeClimateIssueKind, CodeClimateLines, CodeClimateLocation, CodeClimateOutput,
-    CodeClimateSeverity, CombinedOutput, CoverageAnalyzeOutput, CoverageAnalyzeSchemaVersion,
-    CoverageSetupFileToEdit, CoverageSetupFramework, CoverageSetupMember, CoverageSetupOutput,
-    CoverageSetupPackageManager, CoverageSetupRuntimeTarget, CoverageSetupSchemaVersion,
-    CoverageSetupSnippet, DupesOutput, ExplainOutput, FallowOutput, GitHubReviewComment,
-    GitHubReviewSide, GitLabReviewComment, GitLabReviewPosition, GitLabReviewPositionType,
-    GroupByMode, HealthOutput, InspectEvidence, InspectEvidenceScope, InspectEvidenceSection,
-    InspectFileIdentity, InspectIdentity, InspectOutput, InspectSectionStatus,
-    InspectSymbolIdentity, InspectTargetDescriptor, ListBoundariesOutput, ReviewCheckConclusion,
-    ReviewComment, ReviewEnvelopeEvent, ReviewEnvelopeMeta, ReviewEnvelopeOutput,
-    ReviewEnvelopeSchema, ReviewEnvelopeSummary, ReviewProvider, ReviewReconcileOutput,
-    ReviewReconcileSchema, WorkspaceInfo, WorkspacesOutput,
-};
-use fallow_cli::report::dupes_grouping::{
-    AttributedCloneGroup, AttributedInstance, DuplicationGroup,
-};
-use fallow_cli::security::{
-    SecurityBlindSpotFile, SecurityBlindSpotGroup, SecurityBlindSpotsOutput,
-    SecurityBlindSpotsSchemaVersion, SecurityBlindSpotsSummary, SecurityGate, SecurityGateMode,
-    SecurityGateVerdict, SecurityOutput, SecurityReachabilityCounts, SecurityRuntimeStateCounts,
-    SecuritySchemaVersion, SecuritySeverityCounts, SecuritySummary, SecuritySummaryOutput,
-    SecuritySurvivor, SecuritySurvivorsOutput, SecuritySurvivorsSchemaVersion,
-    SecuritySurvivorsSummary, SecurityUnresolvedCalleeDiagnostics,
-    SecurityUnresolvedCalleeReasonCount, SecurityUnresolvedCalleeSample,
-    SecurityUnresolvedCalleeTopFile, SecurityVerifierVerdict, SecurityVerifierVerdictStatus,
+use fallow_api::{
+    AttributedCloneGroup, AttributedCloneGroupFinding, AttributedInstance, AuditOutput,
+    BoundariesListLogicalGroup, BoundariesListing, CloneFamilyFinding, CloneGroupFinding,
+    CombinedOutput, DupesReportPayload, DuplicationGroup, FallowOutput, ListBoundariesOutput,
+    SecurityGate, SecurityGateMode, SecurityOutput, SecuritySummaryOutput, WorkspacesOutput,
 };
 use fallow_config::{AuthoredRule, LogicalGroup, LogicalGroupStatus};
-use fallow_core::duplicates::{
+use fallow_engine::duplicates::{
     CloneFamily, CloneGroup, CloneInstance, DuplicationReport, DuplicationStats, MirroredDirectory,
     RefactoringKind, RefactoringSuggestion,
+};
+use fallow_output::{
+    AcceptedJudgment, AgentSchema, AuditCommand, BoundariesListRule, BoundariesListZone,
+    ChangeAnchor, CheckGroupedEntry, CheckGroupedOutput, CheckOutput, ComplexityViolation,
+    ConfidenceFlag, ContainmentEvent, ContributorEntry, ContributorIdentifierFormat,
+    CoverageAnalyzeOutput, CoverageAnalyzeSchemaVersion, CoverageGapSummary, CoverageGaps,
+    CoverageModel, CoverageSetupFileToEdit, CoverageSetupFramework, CoverageSetupMember,
+    CoverageSetupOutput, CoverageSetupPackageManager, CoverageSetupRuntimeTarget,
+    CoverageSetupSchemaVersion, CoverageSetupSnippet, CoverageTier, CrossRepoImpactReport,
+    CrossRepoImpactSchemaVersion, CrossRepoProjectEntry, CrossRepoTotals, Decision, DecisionAction,
+    DecisionActionType, DecisionCategory, DecisionSurface, DecisionSurfaceOutput,
+    DecisionSurfaceSchemaVersion, DecisionWithActions, DiffTriage, DirectionUnit, DupesOutput,
+    EnabledSource, ExceededThreshold, ExplainOutput, FileHealthScore, FindingSeverity, FocusLabel,
+    FocusMap, FocusScore, FocusUnit, GitHubReviewComment, GitHubReviewSide, GitLabReviewComment,
+    GitLabReviewPosition, GitLabReviewPositionType, GraphFacts, GroupByMode, HealthActionsMeta,
+    HealthGroup, HealthOutput, HealthReport, HealthScore, HealthScorePenalties, HealthSummary,
+    HealthTrend, HotspotEntry, HotspotFinding, HotspotSummary, ImpactCounts, ImpactReport,
+    ImpactReportSchemaVersion, ImpactTrendDirection, InspectEvidence, InspectEvidenceScope,
+    InspectEvidenceSection, InspectFileIdentity, InspectIdentity, InspectOutput,
+    InspectSectionStatus, InspectSymbolIdentity, InspectTargetDescriptor, LargeFunctionEntry,
+    OwnershipMetrics, RecommendationCategory, RefactoringTarget, RefactoringTargetFinding,
+    RejectedJudgment, ResolutionEvent, ReviewBriefSchemaVersion, ReviewCheckConclusion,
+    ReviewComment, ReviewDirection, ReviewEffort, ReviewEnvelopeEvent, ReviewEnvelopeMeta,
+    ReviewEnvelopeOutput, ReviewEnvelopeSchema, ReviewEnvelopeSummary, ReviewProvider,
+    ReviewReconcileOutput, ReviewReconcileSchema, RiskClass, RiskProfile, RuntimeCoverageReport,
+    SecurityBlindSpotFile, SecurityBlindSpotGroup, SecurityBlindSpotsOutput,
+    SecurityBlindSpotsSchemaVersion, SecurityBlindSpotsSummary, SecurityGateVerdict,
+    SecurityReachabilityCounts, SecurityRuntimeStateCounts, SecuritySchemaVersion,
+    SecuritySeverityCounts, SecuritySummary, SecuritySurvivor, SecuritySurvivorsOutput,
+    SecuritySurvivorsSchemaVersion, SecuritySurvivorsSummary, SecurityUnresolvedCalleeDiagnostics,
+    SecurityUnresolvedCalleeReasonCount, SecurityUnresolvedCalleeSample,
+    SecurityUnresolvedCalleeTopFile, SecurityVerifierVerdict, SecurityVerifierVerdictStatus,
+    StandardReviewBriefOutput as ReviewBriefOutput, StandardWalkthroughGuide as WalkthroughGuide,
+    TargetThresholds, TrendCount, TrendSummary, TruncationNote, UntestedExport,
+    UntestedExportFinding, UntestedFile, UntestedFileFinding, VitalSigns, VitalSignsCounts,
+    WalkthroughValidation, WorkspaceInfo,
+};
+use fallow_output::{
+    CloneFamilyAction, CloneFamilyActionType, CloneGroupAction, CloneGroupActionType,
+    CodeClimateIssue, CodeClimateIssueKind, CodeClimateLines, CodeClimateLocation,
+    CodeClimateOutput, CodeClimateSeverity,
 };
 use fallow_types::envelope::{
     AuditIntroduced, BaselineCategoryDelta, BaselineDeltas, BaselineMatch, CheckSummary, ElapsedMs,
@@ -789,10 +777,10 @@ fn register_per_command_envelope_definitions(generator: &mut schemars::SchemaGen
     let _ = generator.subschema_for::<CheckOutput>();
     let _ = generator.subschema_for::<CheckGroupedOutput>();
     let _ = generator.subschema_for::<CheckGroupedEntry>();
-    let _ = generator.subschema_for::<DupesOutput>();
-    let _ = generator.subschema_for::<HealthOutput>();
-    let _ = generator.subschema_for::<fallow_cli::health_types::HealthGroup>();
-    let _ = generator.subschema_for::<fallow_cli::health_types::HealthReport>();
+    let _ = generator.subschema_for::<DupesOutput<DupesReportPayload, DuplicationGroup>>();
+    let _ = generator.subschema_for::<HealthOutput<HealthReport, HealthGroup>>();
+    let _ = generator.subschema_for::<HealthGroup>();
+    let _ = generator.subschema_for::<HealthReport>();
     let _ = generator.subschema_for::<GroupByMode>();
     let _ = generator.subschema_for::<ExplainOutput>();
     let _ = generator.subschema_for::<InspectOutput>();
@@ -805,10 +793,10 @@ fn register_per_command_envelope_definitions(generator: &mut schemars::SchemaGen
     let _ = generator.subschema_for::<InspectSectionStatus>();
     let _ = generator.subschema_for::<InspectEvidenceScope>();
     // Symbol-level call chain (`fallow trace`, `FallowOutput::Trace`).
-    let _ = generator.subschema_for::<fallow_core::trace_chain::SymbolChainTrace>();
-    let _ = generator.subschema_for::<fallow_core::trace_chain::ChainHop>();
-    let _ = generator.subschema_for::<fallow_core::trace_chain::UnresolvedCallee>();
-    let _ = generator.subschema_for::<fallow_core::trace_chain::UnresolvedReason>();
+    let _ = generator.subschema_for::<fallow_engine::trace_chain::SymbolChainTrace>();
+    let _ = generator.subschema_for::<fallow_engine::trace_chain::ChainHop>();
+    let _ = generator.subschema_for::<fallow_engine::trace_chain::UnresolvedCallee>();
+    let _ = generator.subschema_for::<fallow_engine::trace_chain::UnresolvedReason>();
     let _ = generator.subschema_for::<CodeClimateOutput>();
     let _ = generator.subschema_for::<CodeClimateIssue>();
     let _ = generator.subschema_for::<CodeClimateIssueKind>();

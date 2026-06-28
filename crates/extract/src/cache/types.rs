@@ -461,11 +461,10 @@ use crate::MemberKind;
 /// Bumped to 171 (feat/angular): Angular input/output IR
 /// (`angular_inputs` / `angular_outputs` on `ModuleInfo`) plus the
 /// `unused-component-input` / `unused-component-output` suppression tokens, and
-/// the Angular `{ ...this }` spread now records an
-/// `ANGULAR_THIS_SPREAD_SENTINEL` member access (whole-component abstain for the
-/// input/output detectors); a warm cache from 170 lacks the Angular IR and the
-/// sentinel and would report zero input/output findings or false-flag
-/// spread-forwarded inputs/outputs.
+/// the Angular `{ ...this }` spread now records a whole-component abstain marker
+/// for the input/output detectors; a warm cache from 170 lacks the Angular IR
+/// and the abstain marker and would report zero input/output findings or
+/// false-flag spread-forwarded inputs/outputs.
 ///
 /// Bumped to 172 (feat/vue-options-api-prop-emit): the Vue Options API
 /// (`export default { props, emits, ... }` / `defineComponent({ ... })`) in a
@@ -588,48 +587,108 @@ use crate::MemberKind;
 /// descriptive per-component hook summary stays exact in multi-component files.
 /// A warm cache from 187 lacks the attribution field on persisted `hook_uses`.
 ///
-/// Bumped to 189 for the extract false-positive hardening bundle:
-/// - issue #1439: Vue SFC template close tags tolerate whitespace before `>`,
-///   so previously dropped template bodies need to be re-extracted.
-/// - issue #1489: inline `useFooStore().member` receivers emit store-factory
-///   member accesses, so warm caches lack the `unused-store-member` credit.
-/// - issue #1441: same-file factory functions returning `new Class()` bind
-///   `const x = useApi()` receivers to the class, so warm caches lack the
-///   `unused-class-member` credit.
+/// Bumped to 189: `ModuleInfo`/`CachedModule` now carry typed semantic facts for
+/// Angular template member accesses alongside the older string payload entries.
 ///
-/// Bumped to 190 (issue #1441, var-return): a same-file function that returns a
-/// bare identifier (`useApi() { return api }`) whose typed local (`let api: RESTApi`)
-/// resolves to a class now promotes to a factory-return, so `const x = useApi()`
-/// credits `x.member`. A warm cache from 189 lacks the added `member_accesses`.
+/// Bumped to 190: `SemanticFact` now includes typed static-factory call member
+/// access facts alongside the older factory-call string payload entries.
 ///
-/// Bumped to 191 (issue #1441, cross-module Part A): exported free-function
-/// factories now persist `exported_factory_returns`, and a consumer's
-/// `const x = importedFactory()` emits a cross-module factory-fn sentinel access
-/// so `x.member` credits the class across module boundaries. A warm cache from
-/// 190 lacks both the new metadata and the added sentinel `member_accesses`.
+/// Bumped to 191: `SemanticFact` now includes typed fluent-chain member access
+/// facts alongside the older fluent-chain string payload entries.
 ///
-/// Bumped to 192 (issue #1489 Case 2): a param typed as a Pinia store
+/// Bumped to 192: `SemanticFact` now includes typed Playwright fixture-use facts
+/// alongside the older fixture-use string payload entries.
+///
+/// Bumped to 193: `SemanticFact` now includes typed Playwright fixture definition
+/// facts alongside the older fixture-definition string payload entries.
+///
+/// Bumped to 194: `SemanticFact` now includes typed Playwright fixture alias
+/// facts alongside the older fixture-alias string payload entries.
+///
+/// Bumped to 195: `SemanticFact` now includes typed Playwright fixture type
+/// facts alongside the older fixture-type string payload entries.
+///
+/// Bumped to 196: `SemanticFact` now includes typed instance export binding
+/// facts alongside the older instance-export string payload entries.
+///
+/// Bumped to 197: factory-call member accesses are now persisted only as typed
+/// semantic facts; older cache payloads are reparsed by subsequent schema bumps.
+///
+/// Bumped to 198: fluent-chain member accesses are now persisted only as typed
+/// semantic facts; older cache payloads are reparsed by subsequent schema bumps.
+///
+/// Bumped to 199: constructor-rooted fluent-chain member accesses are now
+/// persisted only as typed semantic facts; older cache payloads are reparsed by
+/// subsequent schema bumps.
+///
+/// Bumped to 200: instance export bindings are now persisted only as typed
+/// semantic facts; older cache payloads are reparsed by subsequent schema bumps.
+///
+/// Bumped to 201: Playwright fixture-use member accesses are now persisted only
+/// as typed semantic facts; older cache payloads are reparsed by subsequent
+/// schema bumps.
+///
+/// Bumped to 202: Playwright fixture-definition member accesses are now
+/// persisted only as typed semantic facts; older cache payloads are reparsed by
+/// subsequent schema bumps.
+///
+/// Bumped to 203: Playwright fixture-alias member accesses are now persisted
+/// only as typed semantic facts; older cache payloads are reparsed by subsequent
+/// schema bumps.
+///
+/// Bumped to 204: Playwright fixture-type member accesses are now persisted
+/// only as typed semantic facts; older cache payloads are reparsed by subsequent
+/// schema bumps.
+///
+/// Bumped to 205: Angular template member accesses are now persisted only as
+/// typed semantic facts; older cache payloads are reparsed by subsequent schema
+/// bumps.
+///
+/// Bumped to 206: Angular `{ ...this }` spread abstains are now persisted as
+/// typed semantic facts; older cache payloads are reparsed by subsequent schema
+/// bumps.
+///
+/// Bumped to 207: dynamic custom-element render abstains are now persisted as
+/// typed semantic facts.
+///
+/// Bumped to 208: empty cached semantic facts are omitted from the persisted
+/// module payload. The in-memory `ModuleInfo` contract still exposes an empty
+/// vector, but warm caches from 207 carry the old eager `Vec` field shape.
+///
+/// Bumped to 209: pre-typed semantic payloads are no longer decoded from cached
+/// member accesses. Warm caches from 208 or earlier are reparsed so analyzers
+/// consume typed semantic facts only.
+///
+/// Bumped to 210 (issue #1489 Case 2): a param typed as a Pinia store
 /// (`ReturnType<typeof useFooStore>`, inline or aliased) now binds to the store
 /// factory, so `props.store.member` / `const { m } = props.store` emit factory
-/// `member_accesses` a 191 warm cache lacks.
+/// `member_accesses` a 209 warm cache lacks.
 ///
-/// Bumped to 193 (issue #1641): Svelte template usage now credits
+/// Bumped to 211 (issue #1441, cross-module Part A): exported free-function
+/// factories now persist `exported_factory_returns`, and a consumer's
+/// `const x = importedFactory()` emits a typed `FactoryFnMemberAccess` semantic
+/// fact so `x.member` credits the returned class across module boundaries. A
+/// warm cache from 210 lacks both the new metadata and the added facts.
+///
+/// Bumped to 212 (issue #1489 Case 1): an inline `useFooStore().member` call
+/// with no bound local now emits a factory `member_access` so the member is
+/// credited; a 211 warm cache lacks it.
+///
+/// Bumped to 213 (issue #1641): Svelte template usage now credits
 /// `bind:`/`style:`/`class:` directive shorthands (`bind:open` =
 /// `bind:open={open}`) as references, so a prop used only via a shorthand
-/// directive sets `used_in_template`. A warm cache from 192 carries the stale
+/// directive sets `used_in_template`. A warm cache from 212 carries the stale
 /// (uncredited) prop-usage flags.
 ///
-/// Bumped to 194 (issue #1641, Vue side): Vue template usage now credits the
+/// Bumped to 214 (issue #1641, Vue side): Vue template usage now credits the
 /// 3.4+ same-name `v-bind` shorthand (`:open` = `:open="open"`, `:some-prop` =
 /// `:some-prop="someProp"`) as a reference, so a prop used only via a value-less
-/// `v-bind` sets `used_in_template`. A warm cache from 193 carries the stale
-/// (uncredited) prop-usage flags.
-///
-/// Bumped to 195: Vue SFC `<style> v-bind(expr)` references are now scanned, so
+/// `v-bind` sets `used_in_template`. Vue SFC `<style> v-bind(expr)` references
+/// are now scanned too, so
 /// a prop / import used only via CSS `v-bind(accent)` / `v-bind(props.x)` /
-/// `v-bind('a.b')` sets `used_in_template`. A warm cache from 194 carries the
+/// `v-bind('a.b')` sets `used_in_template`. A warm cache from 213 carries the
 /// stale (uncredited) prop-usage flags.
-pub(super) const CACHE_VERSION: u32 = 195;
+pub(super) const CACHE_VERSION: u32 = 214;
 
 /// Duplication token cache version. Bump when duplicate tokenization,
 /// normalization, or the on-disk token cache schema changes.
@@ -697,6 +756,7 @@ assert_cached_type_size!(CachedReExport, 88);
 assert_cached_type_size!(CachedMember, 64);
 assert_cached_type_size!(CachedDynamicImportPattern, 56);
 assert_cached_type_size!(crate::MemberAccess, 48);
+assert_cached_type_size!(fallow_types::extract::SemanticFact, 96);
 assert_cached_type_size!(fallow_types::extract::CalleeUse, 32);
 assert_cached_type_size!(fallow_types::extract::MisplacedDirectiveSite, 8);
 assert_cached_type_size!(fallow_types::extract::SinkSite, 216);
@@ -712,9 +772,9 @@ assert_cached_type_size!(fallow_types::extract::LoadReturnKey, 32);
 pub struct CachedModule {
     /// xxh3 hash of the file content.
     pub content_hash: u64,
-    /// File modification time (seconds since epoch) for fast cache validation.
+    /// File modification time in nanoseconds for fast cache validation.
     /// When mtime+size match the on-disk file, we skip reading file content entirely.
-    pub mtime_secs: u64,
+    pub mtime_ns: u64,
     /// File size in bytes for fast cache validation.
     pub file_size: u64,
     /// Seconds-since-epoch at the time this entry was last WRITTEN
@@ -736,11 +796,14 @@ pub struct CachedModule {
     /// `require()` specifiers.
     pub require_calls: Vec<CachedRequireCall>,
     /// Package names statically referenced through package path resolution.
-    pub package_path_references: Vec<String>,
+    pub package_path_references: Box<[String]>,
     /// Static member accesses (e.g., `Status.Active`).
     pub member_accesses: Vec<crate::MemberAccess>,
+    /// Typed semantic facts produced by extraction for cross-layer analysis.
+    /// `None` means no facts, which keeps the common warm-cache payload lean.
+    pub semantic_facts: Option<Box<[fallow_types::extract::SemanticFact]>>,
     /// Identifiers used as whole objects (Object.values, for..in, spread, etc.).
-    pub whole_object_uses: Vec<String>,
+    pub whole_object_uses: Box<[String]>,
     /// Dynamic import patterns with partial static resolution.
     pub dynamic_import_patterns: Vec<CachedDynamicImportPattern>,
     /// Whether this module uses CJS exports.
@@ -768,7 +831,8 @@ pub struct CachedModule {
     /// Heritage metadata for exported classes.
     pub class_heritage: Vec<fallow_types::extract::ClassHeritageInfo>,
     /// Exported free-function factories that provably return one class instance
-    /// (`export function useApi() { return new RESTApi() }`). See #1441 Part A.
+    /// (`export function useApi() { return new RESTApi() }`). Compacted to `None`
+    /// when empty so the common no-factory module pays no payload. See #1441 Part A.
     pub exported_factory_returns: Option<Box<[fallow_types::extract::FactoryReturnExport]>>,
     /// Angular `InjectionToken<Interface>` `(token, interface)` pairs (#920).
     pub injection_tokens: Vec<(String, String)>,
@@ -913,6 +977,15 @@ pub struct CachedModule {
     /// Whether a `dispatch(<nonLiteral>)` call or whole-`dispatch`-value use was
     /// seen. Round-trips for the `unused-svelte-event` abstain.
     pub has_dynamic_dispatch: bool,
+}
+
+impl CachedModule {
+    /// Source metadata fingerprint stored with this cache entry.
+    ///
+    #[must_use]
+    pub fn source_fingerprint(&self) -> fallow_types::source_fingerprint::SourceFingerprint {
+        fallow_types::source_fingerprint::SourceFingerprint::new(self.mtime_ns, self.file_size)
+    }
 }
 
 /// Cached namespace-object alias.

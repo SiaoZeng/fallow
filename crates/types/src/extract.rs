@@ -23,11 +23,16 @@ pub struct ModuleInfo {
     /// All `require()` calls.
     pub require_calls: Vec<RequireCallInfo>,
     /// Package names statically referenced through package path resolution.
-    pub package_path_references: Vec<String>,
+    pub package_path_references: Box<[String]>,
     /// Static member access expressions (e.g., `Status.Active`).
     pub member_accesses: Vec<MemberAccess>,
+    /// Typed semantic facts produced by extraction for cross-layer analysis.
+    ///
+    /// This carries facts that were previously encoded as synthetic
+    /// `member_accesses` strings. Extraction and analysis now use typed facts.
+    pub semantic_facts: Box<[SemanticFact]>,
     /// Identifiers used in whole-object access patterns.
-    pub whole_object_uses: Vec<String>,
+    pub whole_object_uses: Box<[String]>,
     /// Whether this module uses CommonJS exports.
     pub has_cjs_exports: bool,
     /// Whether this module declares an Angular component `templateUrl`.
@@ -60,16 +65,11 @@ pub struct ModuleInfo {
     pub flag_uses: Vec<FlagUse>,
     /// Heritage metadata for exported classes that declare `implements`.
     pub class_heritage: Vec<ClassHeritageInfo>,
-    /// Exported free-function factories whose body provably returns a single
-    /// class instance (`export function useApi() { return new RESTApi() }`, or
-    /// the var-return shape resolved to one class). Each entry maps the public
-    /// export name to the class's LOCAL name in this module, so a consumer doing
-    /// `const x = useApi(); x.member` can credit the class across module
-    /// boundaries: the analyze layer walks the import to this module, reads the
-    /// `class_local_name`, then resolves THAT through this module's own imports
-    /// to the class export. Populated only from an all-paths-unanimous proof
-    /// (else absent) to bound the cross-module over-credit blast radius. See
-    /// issue #1441 (cross-module factory, Part A).
+    /// Exported free-function factories that provably return one class instance
+    /// (`export function useApi() { return new RESTApi() }`). Origin-module proof
+    /// that an exported function returns a class instance, so a cross-module
+    /// `const x = useApi(); x.member` consumer can credit the returned class.
+    /// See issue #1441 (Part A).
     pub exported_factory_returns: Box<[FactoryReturnExport]>,
     /// Angular `InjectionToken<Interface>` declarations, as
     /// `(token_export_name, interface_name)` pairs. Recorded only for
@@ -361,8 +361,8 @@ impl ModuleInfo {
 
         Self::release_vec(&mut self.dynamic_imports);
         Self::release_vec(&mut self.require_calls);
-        Self::release_vec(&mut self.package_path_references);
-        Self::release_vec(&mut self.whole_object_uses);
+        Self::release_boxed_slice(&mut self.package_path_references);
+        Self::release_boxed_slice(&mut self.whole_object_uses);
         Self::release_vec(&mut self.unused_import_bindings);
         Self::release_vec(&mut self.type_referenced_import_bindings);
         Self::release_vec(&mut self.value_referenced_import_bindings);
@@ -372,6 +372,10 @@ impl ModuleInfo {
 
     fn release_vec<T>(values: &mut Vec<T>) {
         *values = Vec::new();
+    }
+
+    fn release_boxed_slice<T>(values: &mut Box<[T]>) {
+        *values = Box::default();
     }
 }
 
@@ -837,7 +841,7 @@ pub fn compute_line_offsets(source: &str) -> Vec<u32> {
         if byte == b'\n' {
             debug_assert!(
                 u32::try_from(i + 1).is_ok(),
-                "source file exceeds u32::MAX bytes, line offsets would overflow"
+                "source file exceeds u32::MAX bytes: line offsets would overflow"
             );
             offsets.push((i + 1) as u32);
         }
@@ -1168,7 +1172,7 @@ pub struct DynamicImportPattern {
 }
 
 /// Visibility tag from JSDoc/TSDoc comments that suppresses unused-export detection.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[repr(u8)]
 pub enum VisibilityTag {
@@ -1256,8 +1260,14 @@ pub struct ClassHeritageInfo {
     pub instance_bindings: Vec<(String, String)>,
 }
 
-/// An exported free-function factory that provably returns one class instance.
-/// See `ModuleInfo.exported_factory_returns` and issue #1441 (Part A).
+/// An exported free-function factory proven to return one class instance.
+///
+/// `export function useApi() { return new RESTApi() }` records
+/// `FactoryReturnExport { export_name: "useApi", class_local_name: "RESTApi" }`.
+/// The `class_local_name` is the factory module's own LOCAL name, resolved at
+/// analyze time through that module's imports/exports to the real class export,
+/// so a cross-module `const x = useApi(); x.member` consumer credits the class
+/// across the boundary. See issue #1441 (Part A).
 #[derive(
     Debug,
     Clone,
@@ -1269,10 +1279,9 @@ pub struct ClassHeritageInfo {
     Eq,
 )]
 pub struct FactoryReturnExport {
-    /// Public export name (`default` for a default-exported factory).
+    /// Public export name (honors `export { useApi as useRestApi }`).
     pub export_name: String,
-    /// The returned class's LOCAL name in the factory's own module. Resolved at
-    /// analyze time through that module's imports to the real class export.
+    /// The returned class's local name within the factory module.
     pub class_local_name: String,
 }
 
@@ -1342,7 +1351,17 @@ pub struct MemberInfo {
 }
 
 /// The kind of member.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, bitcode::Encode, bitcode::Decode)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    bitcode::Encode,
+    bitcode::Decode,
+)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum MemberKind {
@@ -1368,6 +1387,505 @@ pub struct MemberAccess {
     /// The member being accessed.
     pub member: String,
 }
+
+/// A typed extraction fact for cross-layer analysis.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, bitcode::Encode, bitcode::Decode)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SemanticFact {
+    /// A class member referenced from an Angular template, host binding, or
+    /// component metadata entry.
+    AngularTemplateMemberAccess(AngularTemplateMemberAccessFact),
+    /// An Angular component spreads `this` into an object literal, so component
+    /// input/output usage is opaque.
+    AngularThisSpread(AngularThisSpreadFact),
+    /// A member access on a value returned by an imported static factory call.
+    FactoryCallMemberAccess(FactoryCallMemberAccessFact),
+    /// A member access on a value returned by an imported free-function factory
+    /// (`const x = importedFactory(); x.member`). See issue #1441 (Part A).
+    FactoryFnMemberAccess(FactoryFnMemberAccessFact),
+    /// A member access on a fluent chain rooted at an imported static factory.
+    FluentChainMemberAccess(FluentChainMemberAccessFact),
+    /// A member access on a fluent chain rooted at a `new` expression.
+    FluentChainNewMemberAccess(FluentChainNewMemberAccessFact),
+    /// A member access on a Playwright fixture object inside a test callback.
+    PlaywrightFixtureUse(PlaywrightFixtureUseFact),
+    /// A Playwright fixture definition declared by a typed `test.extend<T>()`.
+    PlaywrightFixtureDefinition(PlaywrightFixtureDefinitionFact),
+    /// A Playwright fixture wrapper alias declared by `mergeTests` or `.extend`.
+    PlaywrightFixtureAlias(PlaywrightFixtureAliasFact),
+    /// A nested Playwright fixture binding declared by a fixture type alias.
+    PlaywrightFixtureType(PlaywrightFixtureTypeFact),
+    /// An exported value whose runtime instance targets a local class or interface.
+    InstanceExportBinding(InstanceExportBindingFact),
+    /// A dynamic custom-element tag render that makes static Lit tag credit opaque.
+    DynamicCustomElementRender(DynamicCustomElementRenderFact),
+}
+
+/// Iterate Angular template member names from typed semantic facts.
+fn angular_template_member_names_from_parts(
+    semantic_facts: &[SemanticFact],
+) -> impl Iterator<Item = &str> {
+    semantic_facts.iter().filter_map(|fact| {
+        if let SemanticFact::AngularTemplateMemberAccess(access) = fact {
+            Some(access.member.as_str())
+        } else {
+            None
+        }
+    })
+}
+
+/// Iterate Angular template member names from a module's typed facts.
+pub fn angular_template_member_names(module: &ModuleInfo) -> impl Iterator<Item = &str> {
+    angular_template_member_names_from_parts(&module.semantic_facts)
+}
+
+/// Return true when the fact/member-access slices contain any Angular template
+/// member reference.
+#[must_use]
+fn has_angular_template_members_from_parts(
+    semantic_facts: &[SemanticFact],
+    _member_accesses: &[MemberAccess],
+) -> bool {
+    angular_template_member_names_from_parts(semantic_facts)
+        .next()
+        .is_some()
+}
+
+/// Return true when the module contains any Angular template member reference.
+#[must_use]
+pub fn has_angular_template_members(module: &ModuleInfo) -> bool {
+    has_angular_template_members_from_parts(&module.semantic_facts, &module.member_accesses)
+}
+
+/// Return true when a module spreads `this` in Angular template context.
+#[must_use]
+pub fn has_angular_this_spread(module: &ModuleInfo) -> bool {
+    SemanticFactView::new(&module.semantic_facts, &module.member_accesses).has_angular_this_spread()
+}
+
+/// Return true when a module contains a dynamic custom-element render.
+#[must_use]
+pub fn has_dynamic_custom_element_render(module: &ModuleInfo) -> bool {
+    module
+        .semantic_facts
+        .iter()
+        .any(|fact| matches!(fact, SemanticFact::DynamicCustomElementRender(_)))
+}
+
+/// Typed-first view over semantic extraction facts.
+///
+/// Extraction populates `semantic_facts` directly. The `member_accesses` slice
+/// remains available for consumers that need ordinary source member accesses,
+/// but it is no longer decoded as a string protocol for semantic facts.
+#[derive(Debug, Clone, Copy)]
+pub struct SemanticFactView<'a> {
+    semantic_facts: &'a [SemanticFact],
+    member_accesses: &'a [MemberAccess],
+}
+
+impl<'a> SemanticFactView<'a> {
+    /// Create a typed semantic fact view from current facts plus legacy cache
+    /// member accesses.
+    #[must_use]
+    pub const fn new(
+        semantic_facts: &'a [SemanticFact],
+        member_accesses: &'a [MemberAccess],
+    ) -> Self {
+        Self {
+            semantic_facts,
+            member_accesses,
+        }
+    }
+
+    /// Iterate typed semantic facts.
+    pub fn facts(self) -> impl Iterator<Item = &'a SemanticFact> + 'a {
+        self.semantic_facts.iter()
+    }
+
+    /// Iterate Angular template member references.
+    pub fn angular_template_member_names(self) -> impl Iterator<Item = &'a str> + 'a {
+        angular_template_member_names_from_parts(self.semantic_facts)
+    }
+
+    /// Return true when any Angular template member reference exists.
+    #[must_use]
+    pub fn has_angular_template_members(self) -> bool {
+        self.angular_template_member_names().next().is_some()
+    }
+
+    /// Return true when a module spreads `this` in Angular template context.
+    #[must_use]
+    pub fn has_angular_this_spread(self) -> bool {
+        self.semantic_facts
+            .iter()
+            .any(|fact| matches!(fact, SemanticFact::AngularThisSpread(_)))
+    }
+
+    /// Iterate ordinary source member accesses.
+    pub fn ordinary_member_accesses(self) -> impl Iterator<Item = &'a MemberAccess> + 'a {
+        self.member_accesses.iter()
+    }
+
+    /// Collect instance-export binding facts.
+    pub fn instance_export_bindings(self) -> Vec<InstanceExportBindingFact> {
+        instance_export_binding_facts(self.semantic_facts)
+            .cloned()
+            .collect()
+    }
+
+    /// Alias for [`Self::instance_export_bindings`].
+    pub fn typed_instance_export_bindings(self) -> Vec<InstanceExportBindingFact> {
+        self.instance_export_bindings()
+    }
+
+    /// Collect static factory call member facts.
+    pub fn factory_call_member_accesses(self) -> Vec<FactoryCallMemberAccessFact> {
+        factory_call_member_access_facts(self.semantic_facts)
+            .cloned()
+            .collect()
+    }
+
+    /// Alias for [`Self::factory_call_member_accesses`].
+    pub fn typed_factory_call_member_accesses(self) -> Vec<FactoryCallMemberAccessFact> {
+        self.factory_call_member_accesses()
+    }
+
+    /// Collect free-function factory-return member facts.
+    pub fn factory_fn_member_accesses(self) -> Vec<FactoryFnMemberAccessFact> {
+        factory_fn_member_access_facts(self.semantic_facts)
+            .cloned()
+            .collect()
+    }
+
+    /// Alias for [`Self::factory_fn_member_accesses`].
+    pub fn typed_factory_fn_member_accesses(self) -> Vec<FactoryFnMemberAccessFact> {
+        self.factory_fn_member_accesses()
+    }
+
+    /// Collect static factory fluent-chain member facts.
+    pub fn fluent_chain_member_accesses(self) -> Vec<FluentChainMemberAccessFact> {
+        fluent_chain_member_access_facts(self.semantic_facts)
+            .cloned()
+            .collect()
+    }
+
+    /// Alias for [`Self::fluent_chain_member_accesses`].
+    pub fn typed_fluent_chain_member_accesses(self) -> Vec<FluentChainMemberAccessFact> {
+        self.fluent_chain_member_accesses()
+    }
+
+    /// Collect constructor-rooted fluent-chain member facts.
+    pub fn fluent_chain_new_member_accesses(self) -> Vec<FluentChainNewMemberAccessFact> {
+        fluent_chain_new_member_access_facts(self.semantic_facts)
+            .cloned()
+            .collect()
+    }
+
+    /// Alias for [`Self::fluent_chain_new_member_accesses`].
+    pub fn typed_fluent_chain_new_member_accesses(self) -> Vec<FluentChainNewMemberAccessFact> {
+        self.fluent_chain_new_member_accesses()
+    }
+
+    /// Collect Playwright fixture-use facts.
+    pub fn playwright_fixture_uses(self) -> Vec<PlaywrightFixtureUseFact> {
+        playwright_fixture_use_facts(self.semantic_facts)
+            .cloned()
+            .collect()
+    }
+
+    /// Alias for [`Self::playwright_fixture_uses`].
+    pub fn typed_playwright_fixture_uses(self) -> Vec<PlaywrightFixtureUseFact> {
+        self.playwright_fixture_uses()
+    }
+
+    /// Collect Playwright fixture-definition facts.
+    pub fn playwright_fixture_definitions(self) -> Vec<PlaywrightFixtureDefinitionFact> {
+        playwright_fixture_definition_facts(self.semantic_facts)
+            .cloned()
+            .collect()
+    }
+
+    /// Alias for [`Self::playwright_fixture_definitions`].
+    pub fn typed_playwright_fixture_definitions(self) -> Vec<PlaywrightFixtureDefinitionFact> {
+        self.playwright_fixture_definitions()
+    }
+
+    /// Collect Playwright fixture-alias facts.
+    pub fn playwright_fixture_aliases(self) -> Vec<PlaywrightFixtureAliasFact> {
+        playwright_fixture_alias_facts(self.semantic_facts)
+            .cloned()
+            .collect()
+    }
+
+    /// Alias for [`Self::playwright_fixture_aliases`].
+    pub fn typed_playwright_fixture_aliases(self) -> Vec<PlaywrightFixtureAliasFact> {
+        self.playwright_fixture_aliases()
+    }
+
+    /// Collect Playwright fixture-type facts.
+    pub fn playwright_fixture_types(self) -> Vec<PlaywrightFixtureTypeFact> {
+        playwright_fixture_type_facts(self.semantic_facts)
+            .cloned()
+            .collect()
+    }
+
+    /// Alias for [`Self::playwright_fixture_types`].
+    pub fn typed_playwright_fixture_types(self) -> Vec<PlaywrightFixtureTypeFact> {
+        self.playwright_fixture_types()
+    }
+}
+
+/// Iterate ordinary whole-object uses.
+pub fn ordinary_whole_object_uses(whole_object_uses: &[String]) -> impl Iterator<Item = &str> {
+    whole_object_uses.iter().map(String::as_str)
+}
+
+/// Iterate typed instance-export binding facts.
+fn instance_export_binding_facts(
+    semantic_facts: &[SemanticFact],
+) -> impl Iterator<Item = &InstanceExportBindingFact> {
+    semantic_facts.iter().filter_map(|fact| {
+        if let SemanticFact::InstanceExportBinding(access) = fact {
+            Some(access)
+        } else {
+            None
+        }
+    })
+}
+
+/// Iterate typed factory-call member facts.
+fn factory_call_member_access_facts(
+    semantic_facts: &[SemanticFact],
+) -> impl Iterator<Item = &FactoryCallMemberAccessFact> {
+    semantic_facts.iter().filter_map(|fact| {
+        if let SemanticFact::FactoryCallMemberAccess(access) = fact {
+            Some(access)
+        } else {
+            None
+        }
+    })
+}
+
+/// Iterate typed free-function factory-return member facts.
+fn factory_fn_member_access_facts(
+    semantic_facts: &[SemanticFact],
+) -> impl Iterator<Item = &FactoryFnMemberAccessFact> {
+    semantic_facts.iter().filter_map(|fact| {
+        if let SemanticFact::FactoryFnMemberAccess(access) = fact {
+            Some(access)
+        } else {
+            None
+        }
+    })
+}
+
+/// Iterate typed fluent-chain member facts.
+fn fluent_chain_member_access_facts(
+    semantic_facts: &[SemanticFact],
+) -> impl Iterator<Item = &FluentChainMemberAccessFact> {
+    semantic_facts.iter().filter_map(|fact| {
+        if let SemanticFact::FluentChainMemberAccess(access) = fact {
+            Some(access)
+        } else {
+            None
+        }
+    })
+}
+
+/// Iterate typed constructor-rooted fluent-chain member facts.
+fn fluent_chain_new_member_access_facts(
+    semantic_facts: &[SemanticFact],
+) -> impl Iterator<Item = &FluentChainNewMemberAccessFact> {
+    semantic_facts.iter().filter_map(|fact| {
+        if let SemanticFact::FluentChainNewMemberAccess(access) = fact {
+            Some(access)
+        } else {
+            None
+        }
+    })
+}
+
+/// Iterate typed Playwright fixture-use facts.
+fn playwright_fixture_use_facts(
+    semantic_facts: &[SemanticFact],
+) -> impl Iterator<Item = &PlaywrightFixtureUseFact> {
+    semantic_facts.iter().filter_map(|fact| {
+        if let SemanticFact::PlaywrightFixtureUse(access) = fact {
+            Some(access)
+        } else {
+            None
+        }
+    })
+}
+
+/// Iterate typed Playwright fixture-definition facts.
+fn playwright_fixture_definition_facts(
+    semantic_facts: &[SemanticFact],
+) -> impl Iterator<Item = &PlaywrightFixtureDefinitionFact> {
+    semantic_facts.iter().filter_map(|fact| {
+        if let SemanticFact::PlaywrightFixtureDefinition(access) = fact {
+            Some(access)
+        } else {
+            None
+        }
+    })
+}
+
+/// Iterate typed Playwright fixture-alias facts.
+fn playwright_fixture_alias_facts(
+    semantic_facts: &[SemanticFact],
+) -> impl Iterator<Item = &PlaywrightFixtureAliasFact> {
+    semantic_facts.iter().filter_map(|fact| {
+        if let SemanticFact::PlaywrightFixtureAlias(access) = fact {
+            Some(access)
+        } else {
+            None
+        }
+    })
+}
+
+/// Iterate typed Playwright fixture-type facts.
+fn playwright_fixture_type_facts(
+    semantic_facts: &[SemanticFact],
+) -> impl Iterator<Item = &PlaywrightFixtureTypeFact> {
+    semantic_facts.iter().filter_map(|fact| {
+        if let SemanticFact::PlaywrightFixtureType(access) = fact {
+            Some(access)
+        } else {
+            None
+        }
+    })
+}
+
+/// A member name referenced from an Angular template surface.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, bitcode::Encode, bitcode::Decode)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct AngularTemplateMemberAccessFact {
+    /// Referenced class member name.
+    pub member: String,
+}
+
+/// Opaque Angular `{ ...this }` forwarding marker.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, bitcode::Encode, bitcode::Decode)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct AngularThisSpreadFact;
+
+/// A member access on a static factory call result.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, bitcode::Encode, bitcode::Decode)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct FactoryCallMemberAccessFact {
+    /// Local imported class or namespace object used as the factory callee.
+    pub callee_object: String,
+    /// Static factory method invoked on the callee object.
+    pub callee_method: String,
+    /// Member accessed on the returned instance-like object.
+    pub member: String,
+}
+
+/// A member access on a value returned by an imported free-function factory.
+///
+/// `const x = importedFactory(); x.member` emits one fact per first-level read
+/// on `x`. The analyze layer resolves `callee_name` through the consumer's
+/// imports to the factory's origin module, reads that module's
+/// `exported_factory_returns` to learn the returned class's local name, resolves
+/// THAT through the factory module's own imports to the class export, and
+/// credits `member` on the class. See issue #1441 (Part A).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, bitcode::Encode, bitcode::Decode)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct FactoryFnMemberAccessFact {
+    /// Local imported function used as the factory callee.
+    pub callee_name: String,
+    /// Member accessed on the returned instance-like object.
+    pub member: String,
+}
+
+/// A member access on a fluent chain rooted at a static factory call.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, bitcode::Encode, bitcode::Decode)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct FluentChainMemberAccessFact {
+    /// Local imported class or namespace object used as the chain root.
+    pub root_object: String,
+    /// Static factory method that starts the fluent chain.
+    pub root_method: String,
+    /// Intermediate fluent methods between the root method and final member.
+    pub chain: Vec<String>,
+    /// Member accessed at this chain step.
+    pub member: String,
+}
+
+/// A member access on a fluent chain rooted at a `new` expression.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, bitcode::Encode, bitcode::Decode)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct FluentChainNewMemberAccessFact {
+    /// Local imported class constructed by the `new` expression.
+    pub class_name: String,
+    /// Intermediate fluent methods between construction and final member.
+    pub chain: Vec<String>,
+    /// Member accessed at this chain step.
+    pub member: String,
+}
+
+/// A member access on a Playwright fixture object inside a test callback.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, bitcode::Encode, bitcode::Decode)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct PlaywrightFixtureUseFact {
+    /// Local test function or wrapper used as the callback callee.
+    pub test_name: String,
+    /// Fixture name or dotted fixture path referenced in the callback.
+    pub fixture_name: String,
+    /// Member accessed on the fixture target.
+    pub member: String,
+}
+
+/// A Playwright fixture definition declared by a typed `test.extend<T>()`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, bitcode::Encode, bitcode::Decode)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct PlaywrightFixtureDefinitionFact {
+    /// Local test function or wrapper receiving the fixture definition.
+    pub test_name: String,
+    /// Fixture name or dotted fixture path declared by the fixture type.
+    pub fixture_name: String,
+    /// Local type symbol used as the fixture target.
+    pub type_name: String,
+}
+
+/// A Playwright fixture wrapper alias declared by `mergeTests` or `.extend`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, bitcode::Encode, bitcode::Decode)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct PlaywrightFixtureAliasFact {
+    /// Local test function or wrapper that inherits fixture definitions.
+    pub test_name: String,
+    /// Local test function or wrapper inherited by `test_name`.
+    pub base_name: String,
+}
+
+/// A nested Playwright fixture binding declared by a fixture type alias.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, bitcode::Encode, bitcode::Decode)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct PlaywrightFixtureTypeFact {
+    /// Local type alias containing the nested fixture binding.
+    pub alias_name: String,
+    /// Fixture name or dotted fixture path declared inside the type alias.
+    pub fixture_name: String,
+    /// Local type symbol used as the nested fixture target.
+    pub type_name: String,
+}
+
+/// An exported value whose runtime instance targets a local class or interface.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, bitcode::Encode, bitcode::Decode)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct InstanceExportBindingFact {
+    /// Exported binding name.
+    pub export_name: String,
+    /// Local class or interface symbol used as the instance target.
+    pub target_name: String,
+}
+
+/// Opaque marker for a dynamic custom-element render site.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, bitcode::Encode, bitcode::Decode)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct DynamicCustomElementRenderFact;
 
 /// A statically flattenable callee path invoked in a module (e.g. `execSync`,
 /// `child_process.exec`, `console.log`). One entry per unique `callee_path`
@@ -1561,14 +2079,6 @@ pub struct AngularComponentSelector {
     /// class-name references project-wide).
     pub class_name: String,
 }
-
-/// Sentinel pushed into `ModuleInfo.used_custom_element_tags` when an `html`
-/// template renders a DYNAMIC tag (`` html`<${tag}>` ``, the lit `static-html`
-/// form). It contains `<`/`>` so it can never collide with a real (hyphenated,
-/// no-angle-bracket) custom-element tag. When present project-wide, the Lit
-/// `unrendered-component` arm abstains on EVERY element (a dynamic render could
-/// instantiate any of them), mirroring `unprovided-inject`'s `has_dynamic_provide`.
-pub const DYNAMIC_CUSTOM_ELEMENT_TAG: &str = "<dynamic>";
 
 /// A Lit / web-component custom element registered in a module via
 /// `@customElement('x-foo')` or `customElements.define('x-foo', C)`. Consumed by
@@ -1771,7 +2281,7 @@ fn serialize_span<S: serde::Serializer>(span: &Span, serializer: S) -> Result<S:
 }
 
 /// Export identifier.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ExportName {
     /// A named export (e.g., `export const foo`).
     Named(String),
@@ -1819,7 +2329,7 @@ pub struct ImportInfo {
 }
 
 /// How a symbol is imported.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ImportedName {
     /// A named import (e.g., `import { foo }`).
     Named(String),
@@ -1841,6 +2351,8 @@ const _: () = assert!(std::mem::size_of::<ExportName>() == 24);
 const _: () = assert!(std::mem::size_of::<ImportedName>() == 24);
 #[cfg(target_pointer_width = "64")]
 const _: () = assert!(std::mem::size_of::<MemberAccess>() == 48);
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(std::mem::size_of::<SemanticFact>() == 96);
 #[cfg(target_pointer_width = "64")]
 const _: () = assert!(std::mem::size_of::<SinkSite>() == 216);
 #[cfg(target_pointer_width = "64")]
@@ -1921,7 +2433,6 @@ mod tests {
     macro_rules! assert_released {
         ($values:expr) => {{
             assert!($values.is_empty());
-            assert_eq!($values.capacity(), 0);
         }};
     }
 
@@ -1940,6 +2451,276 @@ mod tests {
                 "{name} should remain secret-shaped"
             );
         }
+    }
+
+    #[test]
+    fn ordinary_access_helpers_keep_source_accesses() {
+        let member_accesses = vec![
+            MemberAccess {
+                object: "this".to_string(),
+                member: "render".to_string(),
+            },
+            MemberAccess {
+                object: "service".to_string(),
+                member: "run".to_string(),
+            },
+        ];
+        let ordinary = SemanticFactView::new(&[], &member_accesses)
+            .ordinary_member_accesses()
+            .map(|access| (access.object.as_str(), access.member.as_str()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(ordinary, vec![("this", "render"), ("service", "run")]);
+
+        let whole_object_uses = vec!["model".to_string(), "service".to_string()];
+
+        assert_eq!(
+            ordinary_whole_object_uses(&whole_object_uses).collect::<Vec<_>>(),
+            vec!["model", "service"]
+        );
+    }
+
+    #[test]
+    fn angular_template_member_names_use_typed_facts() {
+        let mut module = minimal_module_info();
+        push_semantic_fact(
+            &mut module,
+            SemanticFact::AngularTemplateMemberAccess(AngularTemplateMemberAccessFact {
+                member: "typed".to_string(),
+            }),
+        );
+
+        let names: Vec<&str> = angular_template_member_names(&module).collect();
+
+        assert_eq!(names, vec!["typed"]);
+        assert!(has_angular_template_members(&module));
+    }
+
+    #[test]
+    fn angular_this_spread_uses_typed_fact() {
+        let mut typed = minimal_module_info();
+        push_semantic_fact(
+            &mut typed,
+            SemanticFact::AngularThisSpread(AngularThisSpreadFact),
+        );
+
+        assert!(has_angular_this_spread(&typed));
+        assert!(!has_angular_this_spread(&minimal_module_info()));
+    }
+
+    #[test]
+    fn semantic_fact_view_iterates_typed_facts() {
+        let mut module = minimal_module_info();
+        push_semantic_fact(
+            &mut module,
+            SemanticFact::FactoryCallMemberAccess(FactoryCallMemberAccessFact {
+                callee_object: "Svc".to_string(),
+                callee_method: "make".to_string(),
+                member: "run".to_string(),
+            }),
+        );
+
+        let facts = SemanticFactView::new(&module.semantic_facts, &module.member_accesses)
+            .facts()
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            facts[0],
+            &SemanticFact::FactoryCallMemberAccess(FactoryCallMemberAccessFact {
+                callee_object: "Svc".to_string(),
+                callee_method: "make".to_string(),
+                member: "run".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn typed_fact_helpers_collect_each_family() {
+        let mut module = minimal_module_info();
+        push_semantic_fact(
+            &mut module,
+            SemanticFact::InstanceExportBinding(InstanceExportBindingFact {
+                export_name: "exported".to_string(),
+                target_name: "target".to_string(),
+            }),
+        );
+        push_semantic_fact(
+            &mut module,
+            SemanticFact::FactoryCallMemberAccess(FactoryCallMemberAccessFact {
+                callee_object: "Svc".to_string(),
+                callee_method: "create".to_string(),
+                member: "run".to_string(),
+            }),
+        );
+        push_semantic_fact(
+            &mut module,
+            SemanticFact::FluentChainMemberAccess(FluentChainMemberAccessFact {
+                root_object: "Builder".to_string(),
+                root_method: "start".to_string(),
+                chain: vec!["next".to_string()],
+                member: "value".to_string(),
+            }),
+        );
+        push_semantic_fact(
+            &mut module,
+            SemanticFact::FluentChainNewMemberAccess(FluentChainNewMemberAccessFact {
+                class_name: "Builder".to_string(),
+                chain: vec!["next".to_string(), "finish".to_string()],
+                member: "done".to_string(),
+            }),
+        );
+
+        assert_eq!(
+            SemanticFactView::new(&module.semantic_facts, &module.member_accesses)
+                .instance_export_bindings(),
+            vec![InstanceExportBindingFact {
+                export_name: "exported".to_string(),
+                target_name: "target".to_string(),
+            }]
+        );
+        assert_eq!(
+            SemanticFactView::new(&module.semantic_facts, &module.member_accesses)
+                .factory_call_member_accesses(),
+            vec![FactoryCallMemberAccessFact {
+                callee_object: "Svc".to_string(),
+                callee_method: "create".to_string(),
+                member: "run".to_string(),
+            }]
+        );
+        assert_eq!(
+            SemanticFactView::new(&module.semantic_facts, &module.member_accesses)
+                .fluent_chain_member_accesses(),
+            vec![FluentChainMemberAccessFact {
+                root_object: "Builder".to_string(),
+                root_method: "start".to_string(),
+                chain: vec!["next".to_string()],
+                member: "value".to_string(),
+            }]
+        );
+        assert_eq!(
+            SemanticFactView::new(&module.semantic_facts, &module.member_accesses)
+                .fluent_chain_new_member_accesses(),
+            vec![FluentChainNewMemberAccessFact {
+                class_name: "Builder".to_string(),
+                chain: vec!["next".to_string(), "finish".to_string()],
+                member: "done".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn semantic_fact_view_exposes_typed_first_contract() {
+        let mut module = minimal_module_info();
+        push_semantic_fact(
+            &mut module,
+            SemanticFact::FactoryCallMemberAccess(FactoryCallMemberAccessFact {
+                callee_object: "Svc".to_string(),
+                callee_method: "create".to_string(),
+                member: "run".to_string(),
+            }),
+        );
+        push_semantic_fact(
+            &mut module,
+            SemanticFact::PlaywrightFixtureUse(PlaywrightFixtureUseFact {
+                test_name: "test".to_string(),
+                fixture_name: "page".to_string(),
+                member: "goto".to_string(),
+            }),
+        );
+        push_semantic_fact(
+            &mut module,
+            SemanticFact::InstanceExportBinding(InstanceExportBindingFact {
+                export_name: "exported".to_string(),
+                target_name: "target".to_string(),
+            }),
+        );
+
+        let view = SemanticFactView::new(&module.semantic_facts, &module.member_accesses);
+
+        assert_eq!(
+            view.factory_call_member_accesses(),
+            vec![FactoryCallMemberAccessFact {
+                callee_object: "Svc".to_string(),
+                callee_method: "create".to_string(),
+                member: "run".to_string(),
+            }]
+        );
+        assert_eq!(
+            view.playwright_fixture_uses(),
+            vec![PlaywrightFixtureUseFact {
+                test_name: "test".to_string(),
+                fixture_name: "page".to_string(),
+                member: "goto".to_string(),
+            }]
+        );
+        assert_eq!(
+            view.instance_export_bindings(),
+            vec![InstanceExportBindingFact {
+                export_name: "exported".to_string(),
+                target_name: "target".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn playwright_fixture_fact_helpers_select_each_fact_family() {
+        let mut module = minimal_module_info();
+        push_semantic_fact(
+            &mut module,
+            SemanticFact::PlaywrightFixtureUse(PlaywrightFixtureUseFact {
+                test_name: "test".to_string(),
+                fixture_name: "page".to_string(),
+                member: "goto".to_string(),
+            }),
+        );
+        push_semantic_fact(
+            &mut module,
+            SemanticFact::PlaywrightFixtureDefinition(PlaywrightFixtureDefinitionFact {
+                test_name: "test".to_string(),
+                fixture_name: "adminPage".to_string(),
+                type_name: "AdminPage".to_string(),
+            }),
+        );
+        push_semantic_fact(
+            &mut module,
+            SemanticFact::PlaywrightFixtureAlias(PlaywrightFixtureAliasFact {
+                test_name: "mergedTest".to_string(),
+                base_name: "test".to_string(),
+            }),
+        );
+        push_semantic_fact(
+            &mut module,
+            SemanticFact::PlaywrightFixtureType(PlaywrightFixtureTypeFact {
+                alias_name: "Pages".to_string(),
+                fixture_name: "adminPage".to_string(),
+                type_name: "AdminPage".to_string(),
+            }),
+        );
+
+        assert_eq!(
+            playwright_fixture_use_facts(&module.semantic_facts)
+                .map(|fact| fact.member.as_str())
+                .collect::<Vec<_>>(),
+            vec!["goto"]
+        );
+        assert_eq!(
+            playwright_fixture_definition_facts(&module.semantic_facts)
+                .map(|fact| fact.type_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["AdminPage"]
+        );
+        assert_eq!(
+            playwright_fixture_alias_facts(&module.semantic_facts)
+                .map(|fact| fact.base_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["test"]
+        );
+        assert_eq!(
+            playwright_fixture_type_facts(&module.semantic_facts)
+                .map(|fact| fact.fixture_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["adminPage"]
+        );
     }
 
     #[test]
@@ -2001,12 +2782,13 @@ mod tests {
                 destructured_names: Vec::new(),
                 local_name: Some("required".to_string()),
             }],
-            package_path_references: vec!["react".to_string()],
+            package_path_references: vec!["react".to_string()].into(),
             member_accesses: vec![MemberAccess {
                 object: "Status".to_string(),
                 member: "Active".to_string(),
             }],
-            whole_object_uses: vec!["Status".to_string()],
+            semantic_facts: Box::default(),
+            whole_object_uses: vec!["Status".to_string()].into(),
             has_cjs_exports: true,
             has_angular_component_template_url: true,
             content_hash: 42,
@@ -2045,7 +2827,10 @@ mod tests {
                 implements: vec!["Contract".to_string()],
                 instance_bindings: Vec::new(),
             }],
-            exported_factory_returns: Box::default(),
+            exported_factory_returns: Box::from([FactoryReturnExport {
+                export_name: "useApi".to_string(),
+                class_local_name: "RESTApi".to_string(),
+            }]),
             injection_tokens: vec![("TOKEN".to_string(), "Contract".to_string())],
             local_type_declarations: vec![LocalTypeDeclaration {
                 name: "Contract".to_string(),
@@ -2121,6 +2906,7 @@ mod tests {
         assert_eq!(module.complexity.len(), 1);
         assert_eq!(module.flag_uses.len(), 1);
         assert_eq!(module.class_heritage.len(), 1);
+        assert_eq!(module.exported_factory_returns.len(), 1);
         assert_eq!(module.injection_tokens.len(), 1);
         assert_eq!(module.local_type_declarations.len(), 1);
         assert_eq!(module.public_signature_type_references.len(), 1);
@@ -3142,7 +3928,7 @@ mod tests {
     #[test]
     fn release_payload_derives_page_data_store_whole_use_from_page_data() {
         let mut m = minimal_module_info();
-        m.whole_object_uses = vec!["page.data".to_string()];
+        m.whole_object_uses = vec!["page.data".to_string()].into();
         m.release_resolution_payload();
         assert!(m.has_page_data_store_whole_use);
     }
@@ -3150,7 +3936,7 @@ mod tests {
     #[test]
     fn release_payload_derives_page_data_store_whole_use_from_dollar_page_data() {
         let mut m = minimal_module_info();
-        m.whole_object_uses = vec!["$page.data".to_string()];
+        m.whole_object_uses = vec!["$page.data".to_string()].into();
         m.release_resolution_payload();
         assert!(m.has_page_data_store_whole_use);
     }
@@ -3158,7 +3944,7 @@ mod tests {
     #[test]
     fn release_payload_does_not_set_page_data_store_whole_use_for_other_names() {
         let mut m = minimal_module_info();
-        m.whole_object_uses = vec!["data".to_string(), "page".to_string()];
+        m.whole_object_uses = vec!["data".to_string(), "page".to_string()].into();
         m.release_resolution_payload();
         assert!(!m.has_page_data_store_whole_use);
     }
@@ -3259,9 +4045,10 @@ mod tests {
             dynamic_imports: Vec::new(),
             dynamic_import_patterns: Vec::new(),
             require_calls: Vec::new(),
-            package_path_references: Vec::new(),
+            package_path_references: Box::default(),
             member_accesses: Vec::new(),
-            whole_object_uses: Vec::new(),
+            semantic_facts: Box::default(),
+            whole_object_uses: Box::default(),
             has_cjs_exports: false,
             has_angular_component_template_url: false,
             content_hash: 0,
@@ -3325,6 +4112,23 @@ mod tests {
             svelte_listened_events: Vec::new(),
             has_dynamic_dispatch: false,
         }
+    }
+
+    fn push_semantic_fact(module: &mut ModuleInfo, fact: SemanticFact) {
+        let mut facts = std::mem::take(&mut module.semantic_facts).into_vec();
+        facts.push(fact);
+        module.semantic_facts = facts.into_boxed_slice();
+    }
+
+    #[test]
+    fn dynamic_custom_element_render_helper_prefers_typed_fact() {
+        let mut module = minimal_module_info();
+        push_semantic_fact(
+            &mut module,
+            SemanticFact::DynamicCustomElementRender(DynamicCustomElementRenderFact),
+        );
+
+        assert!(has_dynamic_custom_element_render(&module));
     }
 
     #[test]

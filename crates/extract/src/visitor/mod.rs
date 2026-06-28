@@ -12,8 +12,13 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::suppress::ParsedSuppressions;
 use crate::{
-    DynamicImportInfo, DynamicImportPattern, ExportInfo, ExportName, ImportInfo, ImportedName,
-    MemberAccess, MemberInfo, MemberKind, ModuleInfo, ReExportInfo, RequireCallInfo, VisibilityTag,
+    AngularTemplateMemberAccessFact, AngularThisSpreadFact, DynamicCustomElementRenderFact,
+    DynamicImportInfo, DynamicImportPattern, ExportInfo, ExportName, FactoryCallMemberAccessFact,
+    FactoryFnMemberAccessFact, FluentChainMemberAccessFact, FluentChainNewMemberAccessFact,
+    ImportInfo, ImportedName, InstanceExportBindingFact, MemberAccess, MemberInfo, MemberKind,
+    ModuleInfo, PlaywrightFixtureAliasFact, PlaywrightFixtureDefinitionFact,
+    PlaywrightFixtureTypeFact, PlaywrightFixtureUseFact, ReExportInfo, RequireCallInfo,
+    SemanticFact, VisibilityTag,
 };
 use fallow_types::extract::{
     AngularComponentSelector, AngularInputMember, AngularOutputMember, CalleeUse,
@@ -106,6 +111,29 @@ pub(crate) enum FactoryAssignedValue {
     Other,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BindingTarget {
+    Class(String),
+    FactoryCall {
+        callee_object: String,
+        callee_method: String,
+    },
+}
+
+impl BindingTarget {
+    pub(crate) fn class_name(&self) -> Option<&str> {
+        match self {
+            Self::Class(name) => Some(name),
+            Self::FactoryCall { .. } => None,
+        }
+    }
+
+    fn class_with_suffix(&self, suffix: &str) -> Option<String> {
+        self.class_name()
+            .map(|class_name| format!("{class_name}.{suffix}"))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct PendingPlaywrightFactory {
     pub(crate) test_name: String,
@@ -158,13 +186,14 @@ pub(crate) struct ModuleInfoExtractor {
     pub(crate) require_calls: Vec<RequireCallInfo>,
     pub(crate) package_path_references: Vec<String>,
     pub(crate) member_accesses: Vec<MemberAccess>,
+    pub(crate) semantic_facts: Vec<SemanticFact>,
     pub(crate) whole_object_uses: Vec<String>,
     pub(crate) has_cjs_exports: bool,
     pub(crate) has_angular_component_template_url: bool,
     handled_require_spans: FxHashSet<Span>,
     handled_import_spans: FxHashSet<Span>,
     namespace_binding_names: Vec<String>,
-    binding_target_names: FxHashMap<String, String>,
+    binding_target_names: FxHashMap<String, BindingTarget>,
     interface_property_types: FxHashMap<String, FxHashMap<String, String>>,
     pending_typed_destructures: Vec<(String, String, String)>,
     iterable_element_types: FxHashMap<String, String>,
@@ -173,6 +202,26 @@ pub(crate) struct ModuleInfoExtractor {
     pending_local_export_specifiers: Vec<PendingLocalExportSpecifier>,
     local_structural_functions: FxHashMap<String, LocalStructuralFunction>,
     structural_class_call_candidates: Vec<StructuralClassCallCandidate>,
+    namespace_depth: u32,
+    pending_namespace_members: Vec<MemberInfo>,
+    pub(crate) class_heritage: Vec<ClassHeritageInfo>,
+    /// `(token_export_name, interface_name)` for `new InjectionToken<I>(...)`
+    /// declarations imported from `@angular/core`. See issue #920.
+    pub(crate) injection_tokens: Vec<(String, String)>,
+    pub(crate) local_type_declarations: Vec<LocalTypeDeclaration>,
+    pub(crate) public_signature_type_references: Vec<PublicSignatureTypeReference>,
+    local_signature_type_references: Vec<LocalSignatureTypeReference>,
+    local_class_exports: FxHashMap<String, LocalClassExportInfo>,
+    playwright_fixture_types: FxHashMap<String, Vec<(String, String)>>,
+    block_depth: u32,
+    function_depth: u32,
+    pub(crate) class_super_stack: Vec<Option<String>>,
+    pub(crate) inline_template_findings: Vec<InlineTemplateFinding>,
+    pub(crate) side_effect_registered_class_names: FxHashSet<String>,
+    lit_custom_element_candidates: Vec<LitCustomElementCandidate>,
+    pub(crate) registered_custom_elements: Vec<fallow_types::extract::RegisteredCustomElement>,
+    pub(crate) used_custom_element_tags: FxHashSet<String>,
+    pub(crate) factory_call_candidates: Vec<FactoryCallCandidate>,
     /// Same-file functions whose body returns `new Class()`, mapped to the class
     /// name, plus the `const x = fn()` bindings to resolve against them. See #1441.
     factory_return_functions: FxHashMap<String, String>,
@@ -217,26 +266,6 @@ pub(crate) struct ModuleInfoExtractor {
     /// function itself, so an assignment in an unrelated/sibling function does not
     /// falsely prove it. See #1441 (Part A).
     alias_in_body_assignments: FxHashMap<String, Vec<FactoryAssignedValue>>,
-    namespace_depth: u32,
-    pending_namespace_members: Vec<MemberInfo>,
-    pub(crate) class_heritage: Vec<ClassHeritageInfo>,
-    /// `(token_export_name, interface_name)` for `new InjectionToken<I>(...)`
-    /// declarations imported from `@angular/core`. See issue #920.
-    pub(crate) injection_tokens: Vec<(String, String)>,
-    pub(crate) local_type_declarations: Vec<LocalTypeDeclaration>,
-    pub(crate) public_signature_type_references: Vec<PublicSignatureTypeReference>,
-    local_signature_type_references: Vec<LocalSignatureTypeReference>,
-    local_class_exports: FxHashMap<String, LocalClassExportInfo>,
-    playwright_fixture_types: FxHashMap<String, Vec<(String, String)>>,
-    block_depth: u32,
-    function_depth: u32,
-    pub(crate) class_super_stack: Vec<Option<String>>,
-    pub(crate) inline_template_findings: Vec<InlineTemplateFinding>,
-    pub(crate) side_effect_registered_class_names: FxHashSet<String>,
-    lit_custom_element_candidates: Vec<LitCustomElementCandidate>,
-    pub(crate) registered_custom_elements: Vec<fallow_types::extract::RegisteredCustomElement>,
-    pub(crate) used_custom_element_tags: FxHashSet<String>,
-    pub(crate) factory_call_candidates: Vec<FactoryCallCandidate>,
     pub(crate) node_module_register_url_bindings: FxHashMap<String, Vec<String>>,
     pub(crate) child_process_fork_bindings: FxHashSet<String>,
     pub(crate) child_process_namespace_bindings: FxHashSet<String>,
@@ -570,8 +599,169 @@ impl ModuleInfoExtractor {
         );
     }
 
-    pub(crate) fn binding_target_names(&self) -> &FxHashMap<String, String> {
+    pub(crate) fn binding_target_names(&self) -> &FxHashMap<String, BindingTarget> {
         &self.binding_target_names
+    }
+
+    fn insert_class_binding_target(&mut self, binding: String, target: String) {
+        self.binding_target_names
+            .insert(binding, BindingTarget::Class(target));
+    }
+
+    fn insert_class_binding_target_if_absent(&mut self, binding: String, target: String) {
+        self.binding_target_names
+            .entry(binding)
+            .or_insert(BindingTarget::Class(target));
+    }
+
+    pub(crate) fn record_angular_template_member_fact(&mut self, member: String) {
+        self.semantic_facts
+            .push(SemanticFact::AngularTemplateMemberAccess(
+                AngularTemplateMemberAccessFact { member },
+            ));
+    }
+
+    pub(crate) fn record_angular_this_spread_fact(&mut self) {
+        self.semantic_facts
+            .push(SemanticFact::AngularThisSpread(AngularThisSpreadFact));
+    }
+
+    pub(crate) fn record_dynamic_custom_element_render_fact(&mut self) {
+        self.semantic_facts
+            .push(SemanticFact::DynamicCustomElementRender(
+                DynamicCustomElementRenderFact,
+            ));
+    }
+
+    fn record_instance_export_binding_fact(&mut self, export_name: String, target_name: String) {
+        self.semantic_facts
+            .push(SemanticFact::InstanceExportBinding(
+                InstanceExportBindingFact {
+                    export_name,
+                    target_name,
+                },
+            ));
+    }
+
+    fn record_factory_call_member_fact(
+        &mut self,
+        callee_object: String,
+        callee_method: String,
+        member: String,
+    ) {
+        self.semantic_facts
+            .push(SemanticFact::FactoryCallMemberAccess(
+                FactoryCallMemberAccessFact {
+                    callee_object,
+                    callee_method,
+                    member,
+                },
+            ));
+    }
+
+    fn record_factory_fn_member_fact(&mut self, callee_name: String, member: String) {
+        self.semantic_facts
+            .push(SemanticFact::FactoryFnMemberAccess(
+                FactoryFnMemberAccessFact {
+                    callee_name,
+                    member,
+                },
+            ));
+    }
+
+    pub(crate) fn record_fluent_chain_member_fact(
+        &mut self,
+        root_object: String,
+        root_method: String,
+        chain: Vec<String>,
+        member: String,
+    ) {
+        self.semantic_facts
+            .push(SemanticFact::FluentChainMemberAccess(
+                FluentChainMemberAccessFact {
+                    root_object,
+                    root_method,
+                    chain,
+                    member,
+                },
+            ));
+    }
+
+    pub(crate) fn record_fluent_chain_new_member_fact(
+        &mut self,
+        class_name: String,
+        chain: Vec<String>,
+        member: String,
+    ) {
+        self.semantic_facts
+            .push(SemanticFact::FluentChainNewMemberAccess(
+                FluentChainNewMemberAccessFact {
+                    class_name,
+                    chain,
+                    member,
+                },
+            ));
+    }
+
+    pub(crate) fn record_playwright_fixture_use_fact(
+        &mut self,
+        test_name: String,
+        fixture_name: String,
+        member: String,
+    ) {
+        self.semantic_facts.push(SemanticFact::PlaywrightFixtureUse(
+            PlaywrightFixtureUseFact {
+                test_name,
+                fixture_name,
+                member,
+            },
+        ));
+    }
+
+    pub(crate) fn record_playwright_fixture_definition_fact(
+        &mut self,
+        test_name: String,
+        fixture_name: String,
+        type_name: String,
+    ) {
+        self.semantic_facts
+            .push(SemanticFact::PlaywrightFixtureDefinition(
+                PlaywrightFixtureDefinitionFact {
+                    test_name,
+                    fixture_name,
+                    type_name,
+                },
+            ));
+    }
+
+    pub(crate) fn record_playwright_fixture_alias_fact(
+        &mut self,
+        test_name: String,
+        base_name: String,
+    ) {
+        self.semantic_facts
+            .push(SemanticFact::PlaywrightFixtureAlias(
+                PlaywrightFixtureAliasFact {
+                    test_name,
+                    base_name,
+                },
+            ));
+    }
+
+    pub(crate) fn record_playwright_fixture_type_fact(
+        &mut self,
+        alias_name: String,
+        fixture_name: String,
+        type_name: String,
+    ) {
+        self.semantic_facts
+            .push(SemanticFact::PlaywrightFixtureType(
+                PlaywrightFixtureTypeFact {
+                    alias_name,
+                    fixture_name,
+                    type_name,
+                },
+            ));
     }
 
     pub(crate) fn record_local_declaration_name(&mut self, name: &str) {
@@ -879,20 +1069,20 @@ impl ModuleInfoExtractor {
             return;
         }
 
-        let additional_accesses: Vec<MemberAccess> = self
-            .exports
-            .iter()
-            .filter_map(|export| {
-                let local_name = export.local_name.as_deref()?;
-                let target_name = self.binding_target_names.get(local_name)?;
-                Some(MemberAccess {
-                    object: format!("{}{}", crate::INSTANCE_EXPORT_SENTINEL, export.name),
-                    member: target_name.clone(),
-                })
-            })
-            .collect();
-
-        self.member_accesses.extend(additional_accesses);
+        for export in self.exports.clone() {
+            let Some(local_name) = export.local_name.as_deref() else {
+                continue;
+            };
+            let Some(target_name) = self
+                .binding_target_names
+                .get(local_name)
+                .and_then(BindingTarget::class_name)
+            else {
+                continue;
+            };
+            let export_name = export.name.to_string();
+            self.record_instance_export_binding_fact(export_name, target_name.to_string());
+        }
     }
 
     fn map_local_signature_refs_to_exports(&mut self) {
@@ -968,15 +1158,11 @@ impl ModuleInfoExtractor {
 
         for (test_name, bindings) in factory_bindings {
             for (fixture_name, type_name) in bindings {
-                self.member_accesses.push(MemberAccess {
-                    object: format!(
-                        "{}{}:{}",
-                        crate::PLAYWRIGHT_FIXTURE_DEF_SENTINEL,
-                        test_name,
-                        fixture_name,
-                    ),
-                    member: type_name,
-                });
+                self.record_playwright_fixture_definition_fact(
+                    test_name.clone(),
+                    fixture_name,
+                    type_name,
+                );
             }
         }
     }
@@ -1004,7 +1190,7 @@ impl ModuleInfoExtractor {
                         && m.name == callee_method
                 })
             {
-                self.binding_target_names.insert(local_name, callee_object);
+                self.insert_class_binding_target(local_name, callee_object);
                 continue;
             }
 
@@ -1013,11 +1199,13 @@ impl ModuleInfoExtractor {
                 .iter()
                 .any(|import| import.local_name == callee_object);
             if has_import {
-                let sentinel = format!(
-                    "{}{callee_object}:{callee_method}",
-                    crate::FACTORY_CALL_SENTINEL,
+                self.binding_target_names.insert(
+                    local_name,
+                    BindingTarget::FactoryCall {
+                        callee_object,
+                        callee_method,
+                    },
                 );
-                self.binding_target_names.insert(local_name, sentinel);
             }
         }
     }
@@ -1031,10 +1219,10 @@ impl ModuleInfoExtractor {
     ///   file. This preserves the original var-return behavior.
     /// - CROSS-MODULE (strict) `strict_factory_return_functions`: ALSO requires a
     ///   VALUE proof, the returned local must be assigned `new Class()` or a
-    ///   strict same-file factory (`value_prove_alias`), and the
-    ///   function must be sync + non-falling-through (`strict_alias_eligible`). A
-    ///   type annotation alone (`let api: RESTApi` assigned a mock) must NOT leak
-    ///   into cross-module credit. See #1441 (Part A).
+    ///   strict same-file factory (`value_prove_alias`), and the function must be
+    ///   sync + non-falling-through (`strict_alias_eligible`). A type annotation
+    ///   alone (`let api: RESTApi` assigned a mock) must NOT leak into
+    ///   cross-module credit. See #1441 (Part A).
     fn resolve_factory_return_aliases(&mut self) {
         if self.factory_return_alias_functions.is_empty() {
             return;
@@ -1044,13 +1232,14 @@ impl ModuleInfoExtractor {
             if self.factory_return_functions.contains_key(&fn_name) {
                 continue;
             }
-            let Some(class_name) = self.binding_target_names.get(&returned_id) else {
+            let Some(class_name) = self
+                .binding_target_names
+                .get(&returned_id)
+                .and_then(BindingTarget::class_name)
+            else {
                 continue;
             };
-            if !Self::is_plain_class_binding_target(class_name) {
-                continue;
-            }
-            let class_name = class_name.clone();
+            let class_name = class_name.to_string();
             // Cross-module strict promotion: a sync, terminal body AND a VALUE
             // proof tied to THIS function. Done before the loose insert so a
             // type-only binding never reaches the strict map.
@@ -1140,47 +1329,36 @@ impl ModuleInfoExtractor {
         }
     }
 
-    /// Whether a `binding_target_names` value is a plain class name usable as a
-    /// factory-return source, i.e. NOT a synthetic sentinel (factory-call, fluent
-    /// chain, …) and NOT an object-member path (`obj.member`). Extend the sentinel
-    /// checks here as new sentinels are added (e.g. a cross-module factory-fn one).
-    /// See issue #1441.
-    fn is_plain_class_binding_target(target: &str) -> bool {
-        !target.starts_with(crate::FACTORY_CALL_SENTINEL)
-            && !target.starts_with(crate::FACTORY_FN_SENTINEL)
-            && !target.starts_with(crate::FLUENT_CHAIN_SENTINEL)
-            && !target.starts_with(crate::FLUENT_CHAIN_NEW_SENTINEL)
-            && !target.contains('.')
-    }
-
     /// Resolve `const x = useApi()` bindings. A same-file factory whose body
     /// returns `new Class()` binds `x` directly to the class so `x.member`
-    /// credits it. An IMPORTED factory callee instead emits a `FACTORY_FN_SENTINEL`
-    /// binding target so the analyze layer resolves the returned class across the
-    /// module boundary via `exported_factory_returns`. See issue #1441 (Part A).
+    /// credits it. An IMPORTED factory callee instead emits a typed
+    /// `FactoryFnMemberAccess` fact so the analyze layer resolves the returned
+    /// class across the module boundary via `exported_factory_returns`. See issue
+    /// #1441 (Part A).
     fn resolve_factory_return_candidates(&mut self) {
         if self.factory_return_candidates.is_empty() {
             return;
         }
         let candidates = std::mem::take(&mut self.factory_return_candidates);
-        let mut sentinel_accesses: Vec<MemberAccess> = Vec::new();
+        let mut sentinel_facts: Vec<(String, String)> = Vec::new();
         for candidate in candidates {
             // Same-file factory returning `new Class()`: bind the local to the
             // class so `resolve_bound_member_accesses` credits `x.member` directly.
             if let Some(class_name) = self.factory_return_functions.get(&candidate.callee_name) {
+                let class_name = class_name.clone();
                 self.binding_target_names
                     .entry(candidate.local_name)
-                    .or_insert_with(|| class_name.clone());
+                    .or_insert(BindingTarget::Class(class_name));
                 continue;
             }
             // Cross-module: `const x = importedFactory()`. We do NOT route through
             // `binding_target_names` here: the Pinia store-consumption heuristic
             // (`is_store_factory_call`) already weakly binds every imported-call
-            // local to its bare callee name, which would shadow a sentinel binding.
-            // Instead emit the factory-fn sentinel member accesses directly for the
-            // local's first-level reads. The analyze layer credits a class only
-            // when the callee resolves to a proven exported factory return; for any
-            // other callee (a real store, a plain helper) it is a harmless no-op.
+            // local to its bare callee name, which would shadow a fact binding.
+            // Instead emit the factory-fn member facts directly for the local's
+            // first-level reads. The analyze layer credits a class only when the
+            // callee resolves to a proven exported factory return; for any other
+            // callee (a real store, a plain helper) it is a harmless no-op.
             // See issue #1441 (Part A).
             let callee_is_imported = self
                 .imports
@@ -1189,17 +1367,15 @@ impl ModuleInfoExtractor {
             if !callee_is_imported {
                 continue;
             }
-            let sentinel = format!("{}{}", crate::FACTORY_FN_SENTINEL, candidate.callee_name);
             for access in &self.member_accesses {
                 if access.object == candidate.local_name {
-                    sentinel_accesses.push(MemberAccess {
-                        object: sentinel.clone(),
-                        member: access.member.clone(),
-                    });
+                    sentinel_facts.push((candidate.callee_name.clone(), access.member.clone()));
                 }
             }
         }
-        self.member_accesses.extend(sentinel_accesses);
+        for (callee_name, member) in sentinel_facts {
+            self.record_factory_fn_member_fact(callee_name, member);
+        }
     }
 
     /// Build the cross-module `exported_factory_returns` metadata: join the
@@ -1246,13 +1422,11 @@ impl ModuleInfoExtractor {
             let Some(class_name) = properties.get(&property_key) else {
                 continue;
             };
-            self.binding_target_names
-                .entry(local)
-                .or_insert_with(|| class_name.clone());
+            self.insert_class_binding_target_if_absent(local, class_name.clone());
         }
     }
 
-    fn resolve_bound_object_name(&self, object: &str) -> Option<String> {
+    fn resolve_bound_object_name(&self, object: &str) -> Option<BindingTarget> {
         if let Some(target_name) = self.binding_target_names.get(object) {
             return Some(target_name.clone());
         }
@@ -1261,12 +1435,9 @@ impl ModuleInfoExtractor {
             .iter()
             .filter_map(|(binding, target_name)| {
                 let suffix = object.strip_prefix(binding.as_str())?.strip_prefix('.')?;
-                if target_name.starts_with(crate::FACTORY_CALL_SENTINEL)
-                    || target_name.starts_with(crate::FACTORY_FN_SENTINEL)
-                {
-                    return None;
-                }
-                Some((binding.len(), format!("{target_name}.{suffix}")))
+                target_name
+                    .class_with_suffix(suffix)
+                    .map(|object_name| (binding.len(), BindingTarget::Class(object_name)))
             })
             .max_by_key(|(len, _)| *len)
             .map(|(_, object_name)| object_name)
@@ -1276,23 +1447,39 @@ impl ModuleInfoExtractor {
         if self.binding_target_names.is_empty() {
             return;
         }
-        let additional_accesses: Vec<MemberAccess> = self
-            .member_accesses
-            .iter()
-            .filter_map(|access| {
-                self.resolve_bound_object_name(&access.object)
-                    .map(|object| MemberAccess {
-                        object,
-                        member: access.member.clone(),
-                    })
-            })
-            .collect();
+        let mut additional_accesses = Vec::new();
+        let mut additional_facts = Vec::new();
+        for access in &self.member_accesses {
+            let Some(target) = self.resolve_bound_object_name(&access.object) else {
+                continue;
+            };
+            match target {
+                BindingTarget::Class(object) => additional_accesses.push(MemberAccess {
+                    object,
+                    member: access.member.clone(),
+                }),
+                BindingTarget::FactoryCall {
+                    callee_object,
+                    callee_method,
+                } => additional_facts.push((callee_object, callee_method, access.member.clone())),
+            }
+        }
         let additional_whole: Vec<String> = self
             .whole_object_uses
             .iter()
             .filter_map(|name| self.resolve_bound_object_name(name))
+            .filter_map(|target| {
+                if let BindingTarget::Class(name) = target {
+                    Some(name)
+                } else {
+                    None
+                }
+            })
             .collect();
         self.member_accesses.extend(additional_accesses);
+        for (callee_object, callee_method, member) in additional_facts {
+            self.record_factory_call_member_fact(callee_object, callee_method, member);
+        }
         self.whole_object_uses.extend(additional_whole);
     }
 
@@ -1340,11 +1527,8 @@ impl ModuleInfoExtractor {
             StructuralCallArgument::Binding(binding) => self
                 .binding_target_names
                 .get(binding.as_str())
-                .filter(|target| {
-                    !target.starts_with(crate::FACTORY_CALL_SENTINEL)
-                        && !target.starts_with(crate::FACTORY_FN_SENTINEL)
-                })
-                .cloned(),
+                .and_then(BindingTarget::class_name)
+                .map(str::to_string),
         }
     }
 
@@ -1372,6 +1556,9 @@ impl ModuleInfoExtractor {
         }
         let mut aliases = Vec::new();
         for (binding_path, target_name) in &self.binding_target_names {
+            let Some(target_name) = target_name.class_name() else {
+                continue;
+            };
             if !self
                 .namespace_binding_names
                 .iter()
@@ -1393,7 +1580,7 @@ impl ModuleInfoExtractor {
                 aliases.push(fallow_types::extract::NamespaceObjectAlias {
                     via_export_name: canonical_name,
                     suffix: suffix.to_string(),
-                    namespace_local: target_name.clone(),
+                    namespace_local: target_name.to_string(),
                 });
             }
         }
@@ -1462,9 +1649,10 @@ impl ModuleInfoExtractor {
             dynamic_imports: self.dynamic_imports,
             dynamic_import_patterns: self.dynamic_import_patterns,
             require_calls: self.require_calls,
-            package_path_references: self.package_path_references,
+            package_path_references: self.package_path_references.into_boxed_slice(),
             member_accesses: self.member_accesses,
-            whole_object_uses: self.whole_object_uses,
+            semantic_facts: self.semantic_facts.into_boxed_slice(),
+            whole_object_uses: self.whole_object_uses.into_boxed_slice(),
             has_cjs_exports: self.has_cjs_exports,
             has_angular_component_template_url: self.has_angular_component_template_url,
             content_hash,
@@ -1555,7 +1743,7 @@ impl ModuleInfoExtractor {
         info: &mut ModuleInfo,
         mut namespace_object_aliases: Vec<fallow_types::extract::NamespaceObjectAlias>,
     ) {
-        // Compute before `self.exports` is drained below, the join reads exports.
+        // Compute before `self.exports` is drained below; the join reads exports.
         let mut exported_factory_returns = self.collect_exported_factory_returns();
         info.imports.append(&mut self.imports);
         info.exports.append(&mut self.exports);
@@ -1564,10 +1752,14 @@ impl ModuleInfoExtractor {
         info.dynamic_import_patterns
             .append(&mut self.dynamic_import_patterns);
         info.require_calls.append(&mut self.require_calls);
-        info.package_path_references
-            .append(&mut self.package_path_references);
+        let mut package_path_references =
+            std::mem::take(&mut info.package_path_references).into_vec();
+        package_path_references.append(&mut self.package_path_references);
+        info.package_path_references = package_path_references.into_boxed_slice();
         info.member_accesses.append(&mut self.member_accesses);
-        info.whole_object_uses.append(&mut self.whole_object_uses);
+        let mut whole_object_uses = std::mem::take(&mut info.whole_object_uses).into_vec();
+        whole_object_uses.append(&mut self.whole_object_uses);
+        info.whole_object_uses = whole_object_uses.into_boxed_slice();
         info.has_cjs_exports |= self.has_cjs_exports;
         info.has_angular_component_template_url |= self.has_angular_component_template_url;
         info.class_heritage.append(&mut self.class_heritage);

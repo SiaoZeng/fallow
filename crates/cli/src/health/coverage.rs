@@ -27,9 +27,10 @@ use tempfile::TempDir;
 use url::Url;
 
 use crate::error::emit_error;
-use crate::health::RuntimeCoverageOptions;
 use crate::health::scoring::IstanbulCoverage;
-use crate::health_types::{
+use crate::license::verifying_key;
+use fallow_engine::RuntimeCoverageOptions;
+use fallow_output::{
     RUNTIME_STALE_AFTER_DAYS, RuntimeCoverageAction, RuntimeCoverageConfidence,
     RuntimeCoverageDataSource, RuntimeCoverageDiscriminators, RuntimeCoverageEvidence,
     RuntimeCoverageFinding, RuntimeCoverageHotPath, RuntimeCoverageMessage,
@@ -37,7 +38,6 @@ use crate::health_types::{
     RuntimeCoverageRiskBand, RuntimeCoverageSchemaVersion, RuntimeCoverageSummary,
     RuntimeCoverageVerdict, RuntimeCoverageWatermark,
 };
-use crate::license::verifying_key;
 
 /// Ed25519 public key used to verify the fallow-cov sidecar binary at every
 /// spawn. Intentionally SEPARATE from the license-signing pubkey at
@@ -245,7 +245,7 @@ pub fn prepare_options(
 pub(super) struct RuntimeCoverageAnalysisInput<'a> {
     pub root: &'a Path,
     pub modules: &'a [fallow_types::extract::ModuleInfo],
-    pub analysis_output: &'a fallow_core::AnalysisOutput,
+    pub analysis_output: &'a fallow_engine::DeadCodeAnalysisArtifacts,
     pub istanbul_coverage: Option<&'a IstanbulCoverage>,
     pub file_paths: &'a FxHashMap<fallow_types::discover::FileId, &'a PathBuf>,
     pub ignore_set: &'a GlobSet,
@@ -944,7 +944,7 @@ fn assemble_request(
 
 fn build_static_signal_index(
     modules: &[fallow_types::extract::ModuleInfo],
-    analysis_output: &fallow_core::AnalysisOutput,
+    analysis_output: &fallow_engine::DeadCodeAnalysisArtifacts,
     file_paths: &FxHashMap<fallow_types::discover::FileId, &PathBuf>,
 ) -> Result<StaticSignalIndex, String> {
     let graph = analysis_output
@@ -977,7 +977,7 @@ fn build_static_signal_index(
 /// Seed the signal index with unused-file and unused-export dead-code signals.
 fn index_dead_code_signals(
     index: &mut StaticSignalIndex,
-    analysis_output: &fallow_core::AnalysisOutput,
+    analysis_output: &fallow_engine::DeadCodeAnalysisArtifacts,
 ) {
     for file in &analysis_output.results.unused_files {
         index.unused_files.insert(file.file.path.clone());
@@ -999,8 +999,8 @@ fn index_dead_code_signals(
 /// Index the value exports of one graph node, including test-referenced ones.
 fn index_node_exports(
     index: &mut StaticSignalIndex,
-    graph: &fallow_core::graph::ModuleGraph,
-    node: &fallow_core::graph::ModuleNode,
+    graph: &fallow_engine::graph::ModuleGraph,
+    node: &fallow_engine::graph::ModuleNode,
     module: Option<&fallow_types::extract::ModuleInfo>,
     path: &Path,
 ) {
@@ -1030,7 +1030,7 @@ fn index_node_exports(
                 graph
                     .modules
                     .get(reference.from_file.0 as usize)
-                    .is_some_and(fallow_core::graph::ModuleNode::is_test_reachable)
+                    .is_some_and(fallow_engine::graph::ModuleNode::is_test_reachable)
             });
             if has_test_ref {
                 index
@@ -2074,22 +2074,20 @@ fn map_runtime_hot_paths(entries: Vec<ProtocolHotPath>) -> Vec<RuntimeCoverageHo
 
 fn map_runtime_blast_radius(
     entries: Vec<ProtocolBlastRadiusEntry>,
-) -> Vec<crate::health_types::RuntimeCoverageBlastRadiusEntry> {
+) -> Vec<fallow_output::RuntimeCoverageBlastRadiusEntry> {
     let mut blast_radius = entries
         .into_iter()
-        .map(
-            |entry| crate::health_types::RuntimeCoverageBlastRadiusEntry {
-                id: entry.id,
-                stable_id: entry.identity.map(|identity| identity.stable_id),
-                file: PathBuf::from(entry.file),
-                function: entry.function,
-                line: entry.line,
-                caller_count: entry.caller_count,
-                caller_count_weighted_by_traffic: entry.caller_count_weighted_by_traffic,
-                deploys_touched: entry.deploys_touched,
-                risk_band: map_risk_band(entry.risk_band),
-            },
-        )
+        .map(|entry| fallow_output::RuntimeCoverageBlastRadiusEntry {
+            id: entry.id,
+            stable_id: entry.identity.map(|identity| identity.stable_id),
+            file: PathBuf::from(entry.file),
+            function: entry.function,
+            line: entry.line,
+            caller_count: entry.caller_count,
+            caller_count_weighted_by_traffic: entry.caller_count_weighted_by_traffic,
+            deploys_touched: entry.deploys_touched,
+            risk_band: map_risk_band(entry.risk_band),
+        })
         .collect::<Vec<_>>();
     blast_radius.sort_by(|left, right| {
         risk_band_rank(right.risk_band)
@@ -2108,23 +2106,21 @@ fn map_runtime_blast_radius(
 
 fn map_runtime_importance(
     entries: Vec<ProtocolImportanceEntry>,
-) -> Vec<crate::health_types::RuntimeCoverageImportanceEntry> {
+) -> Vec<fallow_output::RuntimeCoverageImportanceEntry> {
     let mut importance = entries
         .into_iter()
-        .map(
-            |entry| crate::health_types::RuntimeCoverageImportanceEntry {
-                id: entry.id,
-                stable_id: entry.identity.map(|identity| identity.stable_id),
-                file: PathBuf::from(entry.file),
-                function: entry.function,
-                line: entry.line,
-                invocations: entry.invocations,
-                cyclomatic: entry.cyclomatic,
-                owner_count: entry.owner_count,
-                importance_score: entry.importance_score,
-                reason: entry.reason,
-            },
-        )
+        .map(|entry| fallow_output::RuntimeCoverageImportanceEntry {
+            id: entry.id,
+            stable_id: entry.identity.map(|identity| identity.stable_id),
+            file: PathBuf::from(entry.file),
+            function: entry.function,
+            line: entry.line,
+            invocations: entry.invocations,
+            cyclomatic: entry.cyclomatic,
+            owner_count: entry.owner_count,
+            importance_score: entry.importance_score,
+            reason: entry.reason,
+        })
         .collect::<Vec<_>>();
     importance.sort_by(|left, right| {
         right
@@ -2214,10 +2210,8 @@ fn map_watermark(watermark: &Watermark) -> RuntimeCoverageWatermark {
     }
 }
 
-fn map_capture_quality(
-    quality: &CaptureQuality,
-) -> crate::health_types::RuntimeCoverageCaptureQuality {
-    crate::health_types::RuntimeCoverageCaptureQuality {
+fn map_capture_quality(quality: &CaptureQuality) -> fallow_output::RuntimeCoverageCaptureQuality {
+    fallow_output::RuntimeCoverageCaptureQuality {
         window_seconds: quality.window_seconds,
         instances_observed: quality.instances_observed,
         lazy_parse_warning: quality.lazy_parse_warning,
@@ -2238,10 +2232,6 @@ const fn verdict_rank(verdict: RuntimeCoverageVerdict) -> u8 {
 }
 
 #[cfg(test)]
-#[expect(
-    deprecated,
-    reason = "ADR-008 deprecates fallow_core::analyze_with_parse_result externally; tests exercise the workspace path dependency"
-)]
 mod tests {
     use super::{
         AccumulatedFunction, BINARY_SIGNING_VERIFY_KEY, PackageManagerOutput, RemappedFnKey,
@@ -2252,13 +2242,13 @@ mod tests {
         resolve_sidecar_via_command, sidecar_binary_name, static_function, tracking_state_label,
         verify_sidecar_signature, write_istanbul_coverage_file,
     };
-    use crate::health::RuntimeCoverageOptions;
     use fallow_config::{FallowConfig, OutputFormat};
     use fallow_cov_protocol::{
         Confidence, CoverageSource, DiagnosticMessage, Evidence, Finding, FunctionIdentity,
         HotPath, IdentityResolution, PROTOCOL_VERSION, ReportVerdict, Response, Summary, Verdict,
         function_identity_id,
     };
+    use fallow_engine::RuntimeCoverageOptions;
     use globset::{Glob, GlobSetBuilder};
     use oxc_coverage_instrument::{Location, Position};
     use rustc_hash::{FxHashMap, FxHashSet};
@@ -2268,9 +2258,9 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
     use url::Url;
 
-    fn empty_analysis_output() -> fallow_core::AnalysisOutput {
-        fallow_core::AnalysisOutput {
-            results: fallow_core::results::AnalysisResults::default(),
+    fn empty_analysis_output() -> fallow_engine::DeadCodeAnalysisArtifacts {
+        fallow_engine::DeadCodeAnalysisArtifacts {
+            results: fallow_engine::results::AnalysisResults::default(),
             timings: None,
             graph: None,
             modules: None,
@@ -3154,7 +3144,7 @@ mod tests {
         assert_eq!(report.findings[0].line, 8);
         assert_eq!(
             report.findings[0].verdict,
-            crate::health_types::RuntimeCoverageVerdict::ReviewRequired,
+            fallow_output::RuntimeCoverageVerdict::ReviewRequired,
         );
         assert_eq!(report.findings[0].evidence.static_status, "used");
         assert_eq!(report.hot_paths[0].id, "fallow:hot:def67890");
@@ -3182,7 +3172,7 @@ mod tests {
         assert_eq!(report.actionability_verdict, None);
         assert_eq!(
             report.provenance.data_source,
-            crate::health_types::RuntimeCoverageDataSource::Local,
+            fallow_output::RuntimeCoverageDataSource::Local,
         );
         assert_eq!(report.provenance.is_production, "unknown");
         assert_eq!(report.provenance.freshness_days, Some(0));
@@ -3326,11 +3316,11 @@ mod tests {
 
         let config =
             FallowConfig::default().resolve(root.clone(), OutputFormat::Json, 1, true, true, None);
-        let files = fallow_core::discover::discover_files(&config);
-        let parse_result = fallow_core::extract::parse_all_files(&files, None, true);
+        let files = fallow_engine::discover::discover_files(&config);
+        let parse_result = fallow_engine::extract::parse_all_files(&files, None, true);
         let modules = parse_result.modules;
         let file_paths: FxHashMap<_, _> = files.iter().map(|file| (file.id, &file.path)).collect();
-        let analysis_output = fallow_core::analyze_with_parse_result(&config, &modules)
+        let analysis_output = fallow_engine::analyze_with_parse_result(&config, &modules)
             .unwrap_or_else(|err| panic!("failed to analyze temp project: {err}"));
         let static_signals = build_static_signal_index(&modules, &analysis_output, &file_paths)
             .unwrap_or_else(|err| panic!("failed to build static signal index: {err}"));
@@ -3457,8 +3447,8 @@ mod tests {
 
         let config =
             FallowConfig::default().resolve(root.clone(), OutputFormat::Json, 1, true, true, None);
-        let files = fallow_core::discover::discover_files(&config);
-        let parse_result = fallow_core::extract::parse_all_files(&files, None, true);
+        let files = fallow_engine::discover::discover_files(&config);
+        let parse_result = fallow_engine::extract::parse_all_files(&files, None, true);
         let modules = parse_result.modules;
         let file_paths: FxHashMap<_, _> = files.iter().map(|file| (file.id, &file.path)).collect();
         let analysis_output = empty_analysis_output();

@@ -7,10 +7,12 @@ use crate::tests::parse_ts as parse;
 use crate::{ImportedName, MemberKind};
 use fallow_types::discover::FileId;
 use fallow_types::extract::{
-    DiFramework, DiRole, SecurityControlKind, SecurityUrlShape, SinkArgKind, SinkLiteralValue,
-    SinkShape, SkippedSecurityCalleeExpressionKind, SkippedSecurityCalleeReason,
+    DiFramework, DiRole, SecurityControlKind, SecurityUrlShape, SemanticFact, SinkArgKind,
+    SinkLiteralValue, SinkShape, SkippedSecurityCalleeExpressionKind, SkippedSecurityCalleeReason,
 };
 use helpers::regex_pattern_to_suffix;
+
+const LEGACY_SEMANTIC_TEST_OBJECT_PREFIXES: &[&str] = &["__fallow_", "__angular_"];
 
 #[test]
 fn into_module_info_transfers_exports() {
@@ -44,6 +46,108 @@ fn store_member_accesses(info: &crate::ModuleInfo) -> Vec<(String, String)> {
         .collect();
     accesses.sort();
     accesses
+}
+
+fn angular_template_fact_members(info: &crate::ModuleInfo) -> Vec<&str> {
+    info.semantic_facts
+        .iter()
+        .filter_map(|fact| {
+            if let SemanticFact::AngularTemplateMemberAccess(access) = fact {
+                Some(access.member.as_str())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn has_no_legacy_semantic_member_accesses(info: &crate::ModuleInfo) -> bool {
+    !has_legacy_semantic_member_accesses(info)
+}
+
+fn has_legacy_semantic_member_accesses(info: &crate::ModuleInfo) -> bool {
+    info.member_accesses.iter().any(|access| {
+        LEGACY_SEMANTIC_TEST_OBJECT_PREFIXES
+            .iter()
+            .any(|prefix| access.object.starts_with(prefix))
+    })
+}
+
+fn has_playwright_fixture_use_fact(
+    info: &crate::ModuleInfo,
+    test_name: &str,
+    fixture_name: &str,
+    member: &str,
+) -> bool {
+    info.semantic_facts.iter().any(|fact| {
+        matches!(
+            fact,
+            SemanticFact::PlaywrightFixtureUse(access)
+                if access.test_name == test_name
+                    && access.fixture_name == fixture_name
+                    && access.member == member
+        )
+    })
+}
+
+fn has_playwright_fixture_definition_fact(
+    info: &crate::ModuleInfo,
+    test_name: &str,
+    fixture_name: &str,
+    type_name: &str,
+) -> bool {
+    info.semantic_facts.iter().any(|fact| {
+        matches!(
+            fact,
+            SemanticFact::PlaywrightFixtureDefinition(access)
+                if access.test_name == test_name
+                    && access.fixture_name == fixture_name
+                    && access.type_name == type_name
+        )
+    })
+}
+
+fn has_any_playwright_fixture_definition_fact(info: &crate::ModuleInfo) -> bool {
+    info.semantic_facts
+        .iter()
+        .any(|fact| matches!(fact, SemanticFact::PlaywrightFixtureDefinition(_)))
+}
+
+fn has_playwright_fixture_alias_fact(
+    info: &crate::ModuleInfo,
+    test_name: &str,
+    base_name: &str,
+) -> bool {
+    info.semantic_facts.iter().any(|fact| {
+        matches!(
+            fact,
+            SemanticFact::PlaywrightFixtureAlias(access)
+                if access.test_name == test_name && access.base_name == base_name
+        )
+    })
+}
+
+fn has_any_playwright_fixture_alias_fact(info: &crate::ModuleInfo) -> bool {
+    info.semantic_facts
+        .iter()
+        .any(|fact| matches!(fact, SemanticFact::PlaywrightFixtureAlias(_)))
+}
+
+fn has_playwright_fixture_type_fact(
+    info: &crate::ModuleInfo,
+    alias_name: &str,
+    fixture_name: &str,
+    type_name: &str,
+) -> bool {
+    info.semantic_facts.iter().any(|fact| {
+        matches!(
+            fact,
+            SemanticFact::PlaywrightFixtureType(access)
+                if access.alias_name == alias_name
+                    && access.fixture_name == fixture_name
+                    && access.type_name == type_name
+        )
+    })
 }
 
 #[test]
@@ -127,161 +231,6 @@ fn pinia_credits_inline_to_refs_store_members() {
 }
 
 #[test]
-fn pinia_credits_inline_store_call_member_access() {
-    // `useCounterStore().count` / `useCounterStore().increment()` with no bound
-    // local must credit the member on the store factory, mirroring the bound
-    // `const s = useCounterStore(); s.member` path. Regression for issue #1489
-    // case 1.
-    let info = parse(
-        "import { useCounterStore } from './counter'\nconst n = useCounterStore().count\nuseCounterStore().increment()\nvoid n",
-    );
-    let accesses = store_member_accesses(&info);
-    assert!(
-        accesses.contains(&("useCounterStore".to_string(), "count".to_string())),
-        "inline store call should credit a property read on the factory: {accesses:?}"
-    );
-    assert!(
-        accesses.contains(&("useCounterStore".to_string(), "increment".to_string())),
-        "inline store call should credit a method call on the factory: {accesses:?}"
-    );
-}
-
-#[test]
-fn pinia_credits_object_wrapped_typed_param_member_access() {
-    // `props: { store: CounterStore }` then `props.store.member`: the store reaches
-    // the access through a typed param, never bound from a `useStore()` call. The
-    // param-type alias must resolve to the factory so the member is credited.
-    // Regression for issue #1489 case 2.
-    let info = parse(
-        "import { useCounterStore } from './store'\n\
-         type CounterStore = ReturnType<typeof useCounterStore>\n\
-         export function f(props: { store: CounterStore }) {\n\
-           return props.store.viaTypedParam()\n\
-         }",
-    );
-    let accesses = store_member_accesses(&info);
-    assert!(
-        accesses.contains(&("useCounterStore".to_string(), "viaTypedParam".to_string())),
-        "props.store.member on a typed store param should credit the factory: {accesses:?}"
-    );
-}
-
-#[test]
-fn pinia_credits_object_wrapped_typed_param_destructure() {
-    // `const { member } = props.store` on a typed store param must credit the
-    // destructured member on the factory. Regression for issue #1489 case 2.
-    let info = parse(
-        "import { useCounterStore } from './store'\n\
-         type CounterStore = ReturnType<typeof useCounterStore>\n\
-         export function f(props: { store: CounterStore }) {\n\
-           const { viaParamDestructure } = props.store\n\
-           return viaParamDestructure.value\n\
-         }",
-    );
-    let accesses = store_member_accesses(&info);
-    assert!(
-        accesses.contains(&(
-            "useCounterStore".to_string(),
-            "viaParamDestructure".to_string()
-        )),
-        "destructure of a typed store param should credit the factory: {accesses:?}"
-    );
-}
-
-#[test]
-fn pinia_credits_direct_typed_param_member_access() {
-    // `(store: CounterStore) { store.member }`: the store IS the param (not wrapped
-    // in an object), credited on the factory through the alias. Issue #1489 case 2.
-    let info = parse(
-        "import { useCounterStore } from './store'\n\
-         type CounterStore = ReturnType<typeof useCounterStore>\n\
-         export function f(store: CounterStore) {\n\
-           return store.viaTypedParam()\n\
-         }",
-    );
-    let accesses = store_member_accesses(&info);
-    assert!(
-        accesses.contains(&("useCounterStore".to_string(), "viaTypedParam".to_string())),
-        "a direct store-typed param should credit member access on the factory: {accesses:?}"
-    );
-}
-
-#[test]
-fn pinia_credits_inline_return_type_param_without_alias() {
-    // The inline `ReturnType<typeof useCounterStore>` annotation (no `type` alias)
-    // must resolve to the factory exactly like the aliased form. Issue #1489 case 2.
-    let info = parse(
-        "import { useCounterStore } from './store'\n\
-         export function f(store: ReturnType<typeof useCounterStore>) {\n\
-           return store.viaTypedParam()\n\
-         }",
-    );
-    let accesses = store_member_accesses(&info);
-    assert!(
-        accesses.contains(&("useCounterStore".to_string(), "viaTypedParam".to_string())),
-        "an inline ReturnType<typeof useStore> param should credit the member: {accesses:?}"
-    );
-}
-
-#[test]
-fn typed_param_non_store_does_not_credit_store_member() {
-    // A param typed as a NON-store alias must NOT credit a member on any store
-    // factory, so the typed-param path can never mask a real unused member.
-    let info = parse(
-        "import { makeThing } from './lib'\n\
-         type Thing = ReturnType<typeof makeThing>\n\
-         export function f(props: { store: Thing }) {\n\
-           return props.store.viaTypedParam()\n\
-         }",
-    );
-    let accesses = store_member_accesses(&info);
-    assert!(
-        !accesses.contains(&("makeThing".to_string(), "viaTypedParam".to_string())),
-        "a non-store typed param must not credit a member on the factory: {accesses:?}"
-    );
-}
-
-#[test]
-fn pinia_credits_auto_imported_inline_store_call_member() {
-    // Nuxt auto-import: `useCounterStore` follows the `use<Name>Store` convention
-    // with no explicit import, so the inline path credits `.count` by name alone.
-    let info = parse("const n = useCounterStore().count\nvoid n");
-    let accesses = store_member_accesses(&info);
-    assert!(
-        accesses.contains(&("useCounterStore".to_string(), "count".to_string())),
-        "auto-imported inline store call should credit the member: {accesses:?}"
-    );
-}
-
-#[test]
-fn pinia_credits_inline_store_call_with_argument() {
-    // `useFooStore(pinia).count` (passing the pinia instance outside setup) is a
-    // valid inline form; the member must still be credited (parity with the bound
-    // `const s = useFooStore(pinia)` path).
-    let info = parse(
-        "import { useFooStore } from './store'\nimport { pinia } from './pinia'\nconst n = useFooStore(pinia).count\nvoid n",
-    );
-    let accesses = store_member_accesses(&info);
-    assert!(
-        accesses.contains(&("useFooStore".to_string(), "count".to_string())),
-        "inline store call with an argument should still credit the member: {accesses:?}"
-    );
-}
-
-#[test]
-fn inline_non_store_call_does_not_credit_member_on_import() {
-    // `makeThing().foo` on an imported NON-store name must NOT credit `makeThing.foo`:
-    // the inline path is gated on the `use*Store` convention, so an imported class
-    // or enum can never mask a real `unused-class-member` / `unused-enum-member`.
-    let info = parse("import { makeThing } from './lib'\nconst x = makeThing().foo\nvoid x");
-    let accesses = store_member_accesses(&info);
-    assert!(
-        !accesses.contains(&("makeThing".to_string(), "foo".to_string())),
-        "non-store inline call must not credit a member on the import: {accesses:?}"
-    );
-}
-
-#[test]
 fn pinia_credits_original_key_for_aliased_inline_store_to_refs_member() {
     let info = parse(
         "import { storeToRefs } from 'pinia'\nimport { useCounterStore } from './counter'\nconst { count: localCount } = storeToRefs(useCounterStore())\nvoid localCount",
@@ -349,6 +298,22 @@ fn has_member_access(info: &crate::ModuleInfo, object: &str, member: &str) -> bo
         .any(|a| a.object == object && a.member == member)
 }
 
+fn has_factory_fn_fact(info: &crate::ModuleInfo, callee: &str, member: &str) -> bool {
+    info.semantic_facts.iter().any(|fact| {
+        matches!(
+            fact,
+            SemanticFact::FactoryFnMemberAccess(access)
+                if access.callee_name == callee && access.member == member
+        )
+    })
+}
+
+fn has_exported_factory_return(info: &crate::ModuleInfo, export: &str, class_local: &str) -> bool {
+    info.exported_factory_returns
+        .iter()
+        .any(|fr| fr.export_name == export && fr.class_local_name == class_local)
+}
+
 #[test]
 fn factory_return_function_decl_credits_member_on_class() {
     // `function useApi() { return new RESTApi() }` + `const api = useApi(); api.Plan()`
@@ -404,21 +369,6 @@ fn factory_returning_builtin_constructor_is_not_traced() {
 }
 
 #[test]
-fn factory_return_propagates_through_object_binding() {
-    // `const box = { api }` then `box.api.Plan()` must credit `RESTApi.Plan`:
-    // the factory-return binding is resolved before object-binding propagation,
-    // matching the during-the-walk `new Class()` binding. Issue #1441.
-    let info = parse(
-        "class RESTApi { Plan() {} }\nfunction useApi() { return new RESTApi() }\nconst api = useApi()\nconst box = { api }\nbox.api.Plan()",
-    );
-    assert!(
-        has_member_access(&info, "RESTApi", "Plan"),
-        "factory-return should propagate through an object binding: {:?}",
-        info.member_accesses
-    );
-}
-
-#[test]
 fn factory_var_return_credits_member_via_typed_local() {
     // Real composable shape: `useApi` returns the module `let api: RESTApi` (a bare
     // identifier, assigned from a separate factory). The typed local resolves the
@@ -434,65 +384,31 @@ fn factory_var_return_credits_member_via_typed_local() {
 }
 
 #[test]
-fn factory_var_return_abstains_on_shadowed_or_branching_returns() {
-    // Each function returns a bare `api`, but the identifier is NOT the typed module
-    // binding (shadowed by a local / loop var / catch param) or the function has more
-    // than one return, so the alias must abstain and `x.Plan()` stays uncredited.
-    for source in [
-        // local shadow
-        "class RESTApi { Plan() {} }\nlet api: RESTApi\nfunction useApi() { const api = {}; return api }\nconst x = useApi()\nx.Plan()",
-        // for-of loop-header shadow (single return, so it pins the loop-header guard)
-        "class RESTApi { Plan() {} }\nlet api: RESTApi\nfunction useApi(items) { for (const api of items) { return api } }\nconst x = useApi([])\nx.Plan()",
-        // catch-param shadow (single return, so it pins the catch-param guard)
-        "class RESTApi { Plan() {} }\nlet api: RESTApi\nfunction useApi() { try { doThing() } catch (api) { return api } }\nconst x = useApi()\nx.Plan()",
-        // multiple / branching returns
-        "class RESTApi { Plan() {} }\nlet api: RESTApi\nlet other: RESTApi\nfunction useApi(f) { if (f) { return other } return api }\nconst x = useApi(true)\nx.Plan()",
-    ] {
-        let info = parse(source);
-        assert!(
-            !has_member_access(&info, "RESTApi", "Plan"),
-            "alias-return must abstain (no over-credit) for: {source:?} -> {:?}",
-            info.member_accesses
-        );
-    }
-}
-
-fn factory_fn_sentinel(callee: &str) -> String {
-    format!("{}{callee}", crate::FACTORY_FN_SENTINEL)
-}
-
-fn has_exported_factory_return(info: &crate::ModuleInfo, export: &str, class_local: &str) -> bool {
-    info.exported_factory_returns
-        .iter()
-        .any(|fr| fr.export_name == export && fr.class_local_name == class_local)
-}
-
-#[test]
-fn cross_module_factory_fn_emits_sentinel_for_imported_callee() {
-    // `const api = useApi()` where `useApi` is IMPORTED emits a factory-fn
-    // sentinel binding target, so `api.Plan()` becomes a sentinel member access
-    // the analyze layer resolves across the module boundary. Issue #1441 (Part A).
+fn cross_module_factory_fn_emits_fact_for_imported_callee() {
+    // `const api = useApi()` where `useApi` is IMPORTED emits a typed
+    // `FactoryFnMemberAccess` fact, so `api.Plan()` becomes a fact the analyze
+    // layer resolves across the module boundary. Issue #1441 (Part A).
     let info =
         parse("import { useApi } from './composables/api'\nconst api = useApi()\napi.Plan()");
     assert!(
-        has_member_access(&info, &factory_fn_sentinel("useApi"), "Plan"),
-        "imported factory callee should emit a factory-fn sentinel access: {:?}",
-        info.member_accesses
+        has_factory_fn_fact(&info, "useApi", "Plan"),
+        "imported factory callee should emit a factory-fn fact: {:?}",
+        info.semantic_facts
     );
 }
 
 #[test]
-fn cross_module_factory_fn_no_sentinel_for_local_non_factory_callee() {
-    // `useThing` is a LOCAL (non-imported) call, so no cross-module sentinel is
-    // emitted, guards against blanket sentinel emission for every bare call.
+fn cross_module_factory_fn_no_fact_for_local_non_factory_callee() {
+    // `useThing` is a LOCAL (non-imported) call, so no cross-module fact is
+    // emitted, guards against blanket fact emission for every bare call.
     let info = parse("function useThing() { return {} }\nconst x = useThing()\nx.Plan()");
     assert!(
         !info
-            .member_accesses
+            .semantic_facts
             .iter()
-            .any(|a| a.object.starts_with(crate::FACTORY_FN_SENTINEL)),
-        "a local non-factory callee must not emit a factory-fn sentinel: {:?}",
-        info.member_accesses
+            .any(|fact| matches!(fact, SemanticFact::FactoryFnMemberAccess(_))),
+        "a local non-factory callee must not emit a factory-fn fact: {:?}",
+        info.semantic_facts
     );
 }
 
@@ -510,24 +426,9 @@ fn exported_factory_returns_records_direct_new_return() {
 }
 
 #[test]
-fn exported_factory_returns_records_typed_module_local_return() {
-    // The real composable shape: `useApi` returns a typed module `let api: RESTApi`.
-    // The typed local proves the class, so the export is published as metadata.
-    let info = parse(
-        "import { RESTApi } from './api'\nlet api: RESTApi\nexport function useApi() { if (!api) { api = init() } return api }\nfunction init() { return new RESTApi() }",
-    );
-    assert!(
-        has_exported_factory_return(&info, "useApi", "RESTApi"),
-        "an exported typed-module-local factory should be recorded: {:?}",
-        info.exported_factory_returns
-    );
-}
-
-#[test]
 fn exported_factory_returns_honors_aliased_export_name() {
     // `export { useApi as useRestApi }` publishes under the PUBLIC name while the
-    // class local name stays the in-module name, so a consumer importing
-    // `useRestApi` resolves correctly.
+    // class local name stays the in-module name.
     let info = parse(
         "class RESTApi { Plan() {} }\nfunction useApi() { return new RESTApi() }\nexport { useApi as useRestApi }",
     );
@@ -540,8 +441,7 @@ fn exported_factory_returns_honors_aliased_export_name() {
 
 #[test]
 fn exported_factory_returns_abstains_on_conflicting_returns() {
-    // Two different classes across return paths -> not unanimous -> NOT exported,
-    // so a consumer cannot over-credit either class. Issue #1441 (Part A).
+    // Two different classes across return paths -> not unanimous -> NOT exported.
     let info = parse(
         "class A { m() {} }\nclass B { m() {} }\nexport function make(f) { if (f) { return new A() } return new B() }",
     );
@@ -553,15 +453,28 @@ fn exported_factory_returns_abstains_on_conflicting_returns() {
 }
 
 #[test]
-fn exported_factory_returns_abstains_on_non_instance_return_path() {
-    // One path returns `new A()`, another returns a non-instance value, so the
-    // factory does not provably return a single class -> NOT exported.
+fn exported_factory_returns_abstains_on_async_factory() {
+    // `async function make()` returns Promise<RESTApi>, not RESTApi. Must abstain.
     let info = parse(
-        "class A { m() {} }\nexport function make(f) { if (f) { return new A() } return null }",
+        "class RESTApi { Plan() {} }\nexport async function make(): Promise<RESTApi> { return new RESTApi() }",
     );
     assert!(
         info.exported_factory_returns.is_empty(),
-        "a non-instance return path must abstain from cross-module export: {:?}",
+        "an async factory must not be exported cross-module: {:?}",
+        info.exported_factory_returns
+    );
+}
+
+#[test]
+fn exported_factory_returns_abstains_on_fallthrough_return() {
+    // `if (flag) return new RESTApi()` falls through to `undefined` when flag is
+    // false, so the function does not provably return RESTApi on every path.
+    let info = parse(
+        "class RESTApi { Plan() {} }\nexport function make(flag: boolean) { if (flag) { return new RESTApi() } }",
+    );
+    assert!(
+        info.exported_factory_returns.is_empty(),
+        "a factory that can fall through to undefined must abstain: {:?}",
         info.exported_factory_returns
     );
 }
@@ -577,164 +490,6 @@ fn exported_factory_returns_requires_value_proof_for_alias() {
     assert!(
         info.exported_factory_returns.is_empty(),
         "a type-only alias (no value assignment) must not be exported cross-module: {:?}",
-        info.exported_factory_returns
-    );
-}
-
-#[test]
-fn exported_factory_returns_rejects_unrelated_function_local_proof() {
-    // The `new RESTApi()` is a LOCAL `api` inside `unrelated`, not the module
-    // `api` that `useApi` returns. The value-proof must be tied to the alias
-    // function, so this must NOT export. Issue #1441 (Part A).
-    let info = parse(
-        "import { RESTApi } from './api'\nlet api: RESTApi\nfunction unrelated() { const api = new RESTApi() }\nexport function useApi(): RESTApi { return api }",
-    );
-    assert!(
-        info.exported_factory_returns.is_empty(),
-        "a class-proven LOCAL in an unrelated function must not prove the alias: {:?}",
-        info.exported_factory_returns
-    );
-}
-
-#[test]
-fn exported_factory_returns_rejects_non_dominating_sibling_assignment() {
-    // The module `api` is assigned in a SEPARATE function `warm`, which `useApi`
-    // neither performs nor dominates, `useApi()` can still return `undefined`.
-    // Must NOT export. Issue #1441 (Part A).
-    let info = parse(
-        "import { RESTApi } from './api'\nlet api: RESTApi\nfunction init() { return new RESTApi() }\nfunction warm() { api = init() }\nexport function useApi(): RESTApi { return api }",
-    );
-    assert!(
-        info.exported_factory_returns.is_empty(),
-        "an assignment in a sibling function must not prove the alias: {:?}",
-        info.exported_factory_returns
-    );
-}
-
-#[test]
-fn exported_factory_returns_admits_module_scope_initializer() {
-    // A MODULE-SCOPE initializer `let api = new RESTApi()` runs at load and
-    // dominates any later call, so it value-proves the alias. Issue #1441 (A).
-    let info = parse(
-        "class RESTApi { Plan() {} }\nlet api = new RESTApi()\nexport function useApi(): RESTApi { return api }",
-    );
-    assert!(
-        has_exported_factory_return(&info, "useApi", "RESTApi"),
-        "a module-scope new-class initializer should value-prove the alias: {:?}",
-        info.exported_factory_returns
-    );
-}
-
-#[test]
-fn exported_factory_returns_poisoned_by_module_scope_reassignment() {
-    // A module-scope new-class initializer is later reassigned to a non-class
-    // value, so `useApi()` returns that object, not RESTApi. Must NOT export.
-    // Issue #1441 (Part A).
-    let info = parse(
-        "class RESTApi { Plan() {} }\nlet api = new RESTApi()\napi = {} as any\nexport function useApi(): RESTApi { return api }",
-    );
-    assert!(
-        info.exported_factory_returns.is_empty(),
-        "a later module-scope reassignment to a non-class value must poison the proof: {:?}",
-        info.exported_factory_returns
-    );
-}
-
-#[test]
-fn exported_factory_returns_rejects_non_dominating_conditional_assignment() {
-    // The assignment is guarded by an arbitrary `flag`, not a `!api` self-guard,
-    // so `flag === false` returns the uninitialized `api`. Must NOT export.
-    // Issue #1441 (Part A).
-    let info = parse(
-        "class RESTApi { Plan() {} }\nfunction init() { return new RESTApi() }\nlet api: RESTApi\nexport function useApi(flag: boolean): RESTApi { if (flag) { api = init() } return api }",
-    );
-    assert!(
-        info.exported_factory_returns.is_empty(),
-        "a non-dominating conditional assignment must not prove the alias: {:?}",
-        info.exported_factory_returns
-    );
-}
-
-#[test]
-fn exported_factory_returns_rejects_strict_null_guard() {
-    // An uninitialized `let api: RESTApi` is `undefined`, not `null`, so a strict
-    // `=== null` guard never fires and `useApi()` can return `undefined`. Must NOT
-    // export. Issue #1441 (Part A).
-    let info = parse(
-        "class RESTApi { Plan() {} }\nfunction init() { return new RESTApi() }\nlet api: RESTApi\nexport function useApi(): RESTApi { if (api === null) { api = init() } return api }",
-    );
-    assert!(
-        info.exported_factory_returns.is_empty(),
-        "a strict `=== null` lazy guard is unsound for an undefined-initialized local: {:?}",
-        info.exported_factory_returns
-    );
-}
-
-#[test]
-fn exported_factory_returns_admits_strict_undefined_guard() {
-    // A strict `=== undefined` guard DOES match the uninitialized value, so the
-    // lazy-init dominates. Issue #1441 (Part A).
-    let info = parse(
-        "class RESTApi { Plan() {} }\nfunction init() { return new RESTApi() }\nlet api: RESTApi\nexport function useApi(): RESTApi { if (api === undefined) { api = init() } return api }",
-    );
-    assert!(
-        has_exported_factory_return(&info, "useApi", "RESTApi"),
-        "a strict `=== undefined` lazy guard should value-prove the alias: {:?}",
-        info.exported_factory_returns
-    );
-}
-
-#[test]
-fn exported_factory_returns_poisoned_by_sibling_function_write() {
-    // A sibling function reassigns the module binding to a non-class value, so
-    // after `poison()` the lazy guard is bypassed and `useApi()` returns the mock.
-    // Any such write must abstain the strict export. Issue #1441 (Part A), round 4.
-    let info = parse(
-        "class RESTApi { Plan() {} }\nfunction init() { return new RESTApi() }\nlet api: RESTApi\nexport function poison() { api = {} as any }\nexport function useApi(): RESTApi { if (!api) { api = init() } return api }",
-    );
-    assert!(
-        info.exported_factory_returns.is_empty(),
-        "a sibling-function write to a non-class value must poison the strict export: {:?}",
-        info.exported_factory_returns
-    );
-}
-
-#[test]
-fn exported_factory_returns_abstains_on_async_factory() {
-    // `async function make()` returns Promise<RESTApi>, not RESTApi, so a consumer
-    // `const x = make(); x.Plan()` would be on the wrong type. Must abstain.
-    let info = parse(
-        "class RESTApi { Plan() {} }\nexport async function make(): Promise<RESTApi> { return new RESTApi() }",
-    );
-    assert!(
-        info.exported_factory_returns.is_empty(),
-        "an async factory must not be exported cross-module: {:?}",
-        info.exported_factory_returns
-    );
-}
-
-#[test]
-fn exported_factory_returns_abstains_on_generator_factory() {
-    // A generator returns an iterator, not the class instance. Must abstain.
-    let info =
-        parse("class RESTApi { Plan() {} }\nexport function* make() { return new RESTApi() }");
-    assert!(
-        info.exported_factory_returns.is_empty(),
-        "a generator factory must not be exported cross-module: {:?}",
-        info.exported_factory_returns
-    );
-}
-
-#[test]
-fn exported_factory_returns_abstains_on_fallthrough_return() {
-    // `if (flag) return new RESTApi()` falls through to `undefined` when flag is
-    // false, so the function does not provably return RESTApi on every path.
-    let info = parse(
-        "class RESTApi { Plan() {} }\nexport function make(flag: boolean) { if (flag) { return new RESTApi() } }",
-    );
-    assert!(
-        info.exported_factory_returns.is_empty(),
-        "a factory that can fall through to undefined must abstain: {:?}",
         info.exported_factory_returns
     );
 }
@@ -2607,11 +2362,20 @@ fn exported_instance_binding_is_recorded() {
     );
 
     assert!(
-        info.member_accesses.iter().any(|a| {
-            a.object == format!("{}box", crate::INSTANCE_EXPORT_SENTINEL) && a.member == "Box"
-        }),
-        "exported instance binding should be recorded, found: {:?}",
+        !has_legacy_semantic_member_accesses(&info),
+        "exported instance binding should not emit synthetic member access, found: {:?}",
         info.member_accesses
+    );
+    assert!(
+        info.semantic_facts.iter().any(|fact| {
+            matches!(
+                fact,
+                SemanticFact::InstanceExportBinding(access)
+                    if access.export_name == "box" && access.target_name == "Box"
+            )
+        }),
+        "exported instance binding should emit a typed fact, found: {:?}",
+        info.semantic_facts
     );
 }
 
@@ -3053,20 +2817,19 @@ fn playwright_extend_type_alias_records_fixture_definitions() {
     );
 
     assert!(
-        info.member_accesses.iter().any(|a| {
-            a.object == format!("{}test:adminPage", crate::PLAYWRIGHT_FIXTURE_DEF_SENTINEL)
-                && a.member == "AdminPage"
-        }),
-        "typed Playwright fixture adminPage should be recorded, found: {:?}",
+        !has_legacy_semantic_member_accesses(&info),
+        "Playwright fixture definitions should not emit synthetic member accesses, found: {:?}",
         info.member_accesses
     );
     assert!(
-        info.member_accesses.iter().any(|a| {
-            a.object == format!("{}test:userPage", crate::PLAYWRIGHT_FIXTURE_DEF_SENTINEL)
-                && a.member == "UserPage"
-        }),
-        "typed Playwright fixture userPage should be recorded, found: {:?}",
-        info.member_accesses
+        has_playwright_fixture_definition_fact(&info, "test", "adminPage", "AdminPage"),
+        "typed Playwright fixture adminPage should emit a fixture definition fact, found: {:?}",
+        info.semantic_facts
+    );
+    assert!(
+        has_playwright_fixture_definition_fact(&info, "test", "userPage", "UserPage"),
+        "typed Playwright fixture userPage should emit a fixture definition fact, found: {:?}",
+        info.semantic_facts
     );
 }
 
@@ -3086,12 +2849,9 @@ fn non_playwright_extend_does_not_record_fixture_definitions() {
     );
 
     assert!(
-        !info
-            .member_accesses
-            .iter()
-            .any(|a| a.object.starts_with(crate::PLAYWRIGHT_FIXTURE_DEF_SENTINEL)),
-        "non-Playwright .extend<T>() should not emit Playwright fixture definitions, found: {:?}",
-        info.member_accesses
+        !has_any_playwright_fixture_definition_fact(&info),
+        "non-Playwright .extend<T>() should not emit typed Playwright fixture definitions, found: {:?}",
+        info.semantic_facts
     );
 }
 
@@ -3108,20 +2868,19 @@ fn playwright_merge_tests_records_fixture_aliases() {
     );
 
     assert!(
-        info.member_accesses.iter().any(|a| {
-            a.object == format!("{}mergedTest:", crate::PLAYWRIGHT_FIXTURE_ALIAS_SENTINEL)
-                && a.member == "testPrimary"
-        }),
-        "Playwright mergeTests should record the first inherited fixture test, found: {:?}",
+        !has_legacy_semantic_member_accesses(&info),
+        "Playwright fixture aliases should not emit synthetic member accesses, found: {:?}",
         info.member_accesses
     );
     assert!(
-        info.member_accesses.iter().any(|a| {
-            a.object == format!("{}mergedTest:", crate::PLAYWRIGHT_FIXTURE_ALIAS_SENTINEL)
-                && a.member == "testSecondary"
-        }),
-        "Playwright mergeTests should record the second inherited fixture test, found: {:?}",
-        info.member_accesses
+        has_playwright_fixture_alias_fact(&info, "mergedTest", "testPrimary"),
+        "Playwright mergeTests should emit a typed alias for testPrimary, found: {:?}",
+        info.semantic_facts
+    );
+    assert!(
+        has_playwright_fixture_alias_fact(&info, "mergedTest", "testSecondary"),
+        "Playwright mergeTests should emit a typed alias for testSecondary, found: {:?}",
+        info.semantic_facts
     );
 }
 
@@ -3137,12 +2896,9 @@ fn playwright_aliased_merge_tests_records_fixture_aliases() {
     );
 
     assert!(
-        info.member_accesses.iter().any(|a| {
-            a.object == format!("{}mergedTest:", crate::PLAYWRIGHT_FIXTURE_ALIAS_SENTINEL)
-                && a.member == "testPrimary"
-        }),
-        "aliased Playwright mergeTests should record an inherited fixture test, found: {:?}",
-        info.member_accesses
+        has_playwright_fixture_alias_fact(&info, "mergedTest", "testPrimary"),
+        "aliased Playwright mergeTests should emit a typed inherited fixture test, found: {:?}",
+        info.semantic_facts
     );
 }
 
@@ -3157,12 +2913,9 @@ fn playwright_wrapper_extend_records_fixture_alias() {
     );
 
     assert!(
-        info.member_accesses.iter().any(|a| {
-            a.object == format!("{}extendedTest:", crate::PLAYWRIGHT_FIXTURE_ALIAS_SENTINEL)
-                && a.member == "testPrimary"
-        }),
-        "chained Playwright wrapper .extend should record an inherited fixture test, found: {:?}",
-        info.member_accesses
+        has_playwright_fixture_alias_fact(&info, "extendedTest", "testPrimary"),
+        "chained Playwright wrapper .extend should emit a typed inherited fixture test, found: {:?}",
+        info.semantic_facts
     );
 }
 
@@ -3181,11 +2934,9 @@ fn non_playwright_merge_tests_does_not_record_fixture_aliases() {
     );
 
     assert!(
-        !info.member_accesses.iter().any(|a| a
-            .object
-            .starts_with(crate::PLAYWRIGHT_FIXTURE_ALIAS_SENTINEL)),
-        "local mergeTests should not emit Playwright fixture aliases, found: {:?}",
-        info.member_accesses
+        !has_any_playwright_fixture_alias_fact(&info),
+        "local mergeTests should not emit typed Playwright fixture aliases, found: {:?}",
+        info.semantic_facts
     );
 }
 
@@ -3203,20 +2954,19 @@ fn playwright_test_callback_records_fixture_member_uses() {
     );
 
     assert!(
-        info.member_accesses.iter().any(|a| {
-            a.object == format!("{}test:adminPage", crate::PLAYWRIGHT_FIXTURE_USE_SENTINEL)
-                && a.member == "assertGreeting"
-        }),
-        "adminPage.assertGreeting should be recorded as a Playwright fixture use, found: {:?}",
-        info.member_accesses
+        !has_legacy_semantic_member_accesses(&info),
+        "Playwright fixture uses should not emit synthetic member accesses, found: {:?}",
+        info.member_accesses,
     );
     assert!(
-        info.member_accesses.iter().any(|a| {
-            a.object == format!("{}test:userPage", crate::PLAYWRIGHT_FIXTURE_USE_SENTINEL)
-                && a.member == "assertGreeting"
-        }),
-        "aliased userPage.assertGreeting should be recorded as a Playwright fixture use, found: {:?}",
-        info.member_accesses
+        has_playwright_fixture_use_fact(&info, "test", "adminPage", "assertGreeting"),
+        "adminPage.assertGreeting should emit a typed Playwright fixture use, found: {:?}",
+        info.semantic_facts
+    );
+    assert!(
+        has_playwright_fixture_use_fact(&info, "test", "userPage", "assertGreeting"),
+        "aliased userPage.assertGreeting should emit a typed Playwright fixture use, found: {:?}",
+        info.semantic_facts
     );
 }
 
@@ -3259,14 +3009,7 @@ fn playwright_test_callback_records_branch_selected_fixture_alias_uses() {
     );
 
     let has_use = |fixture_name: &str, member_name: &str| {
-        info.member_accesses.iter().any(|a| {
-            a.object
-                == format!(
-                    "{}test:{fixture_name}",
-                    crate::PLAYWRIGHT_FIXTURE_USE_SENTINEL
-                )
-                && a.member == member_name
-        })
+        has_playwright_fixture_use_fact(&info, "test", fixture_name, member_name)
     };
 
     assert!(
@@ -3326,12 +3069,8 @@ fn playwright_test_callback_fixture_aliases_are_ordered_and_scoped() {
         ",
     );
 
-    let has_use = |member_name: &str| {
-        info.member_accesses.iter().any(|a| {
-            a.object == format!("{}test:readerA", crate::PLAYWRIGHT_FIXTURE_USE_SENTINEL)
-                && a.member == member_name
-        })
-    };
+    let has_use =
+        |member_name: &str| has_playwright_fixture_use_fact(&info, "test", "readerA", member_name);
 
     assert!(
         has_use("afterAssign"),
@@ -3372,28 +3111,14 @@ fn playwright_nested_fixture_type_records_dotted_path_definitions() {
     );
 
     assert!(
-        info.member_accesses.iter().any(|a| {
-            a.object
-                == format!(
-                    "{}test:pages.adminPage",
-                    crate::PLAYWRIGHT_FIXTURE_DEF_SENTINEL
-                )
-                && a.member == "AdminPage"
-        }),
-        "nested Playwright fixture pages.adminPage should map to AdminPage, found: {:?}",
-        info.member_accesses
+        has_playwright_fixture_definition_fact(&info, "test", "pages.adminPage", "AdminPage"),
+        "nested Playwright fixture pages.adminPage should emit typed definition for AdminPage, found: {:?}",
+        info.semantic_facts
     );
     assert!(
-        info.member_accesses.iter().any(|a| {
-            a.object
-                == format!(
-                    "{}test:pages.userPage",
-                    crate::PLAYWRIGHT_FIXTURE_DEF_SENTINEL
-                )
-                && a.member == "UserPage"
-        }),
-        "nested Playwright fixture pages.userPage should map to UserPage, found: {:?}",
-        info.member_accesses
+        has_playwright_fixture_definition_fact(&info, "test", "pages.userPage", "UserPage"),
+        "nested Playwright fixture pages.userPage should emit typed definition for UserPage, found: {:?}",
+        info.semantic_facts
     );
 }
 
@@ -3419,28 +3144,14 @@ fn playwright_nested_fixture_alias_type_records_dotted_path_definitions() {
     );
 
     assert!(
-        info.member_accesses.iter().any(|a| {
-            a.object
-                == format!(
-                    "{}test:pages.adminPage",
-                    crate::PLAYWRIGHT_FIXTURE_DEF_SENTINEL
-                )
-                && a.member == "AdminPage"
-        }),
-        "nested alias fixture pages.adminPage should map to AdminPage, found: {:?}",
-        info.member_accesses
+        has_playwright_fixture_definition_fact(&info, "test", "pages.adminPage", "AdminPage"),
+        "nested alias fixture pages.adminPage should emit typed definition for AdminPage, found: {:?}",
+        info.semantic_facts
     );
     assert!(
-        info.member_accesses.iter().any(|a| {
-            a.object
-                == format!(
-                    "{}test:pages.userPage",
-                    crate::PLAYWRIGHT_FIXTURE_DEF_SENTINEL
-                )
-                && a.member == "UserPage"
-        }),
-        "nested alias fixture pages.userPage should map to UserPage, found: {:?}",
-        info.member_accesses
+        has_playwright_fixture_definition_fact(&info, "test", "pages.userPage", "UserPage"),
+        "nested alias fixture pages.userPage should emit typed definition for UserPage, found: {:?}",
+        info.semantic_facts
     );
 }
 
@@ -3459,16 +3170,19 @@ fn playwright_fixture_type_alias_records_nested_type_bindings() {
     );
 
     assert!(
-        info.member_accesses.iter().any(|a| {
-            a.object
-                == format!(
-                    "{}AppFixture:assert.messageChecks",
-                    crate::PLAYWRIGHT_FIXTURE_TYPE_SENTINEL
-                )
-                && a.member == "MessageChecks"
-        }),
-        "Playwright fixture type alias should record nested type bindings, found: {:?}",
+        !has_legacy_semantic_member_accesses(&info),
+        "Playwright fixture type aliases should not emit synthetic member accesses, found: {:?}",
         info.member_accesses
+    );
+    assert!(
+        has_playwright_fixture_type_fact(
+            &info,
+            "AppFixture",
+            "assert.messageChecks",
+            "MessageChecks"
+        ),
+        "Playwright fixture type alias should emit a typed fixture type fact, found: {:?}",
+        info.semantic_facts
     );
 }
 
@@ -3486,28 +3200,14 @@ fn playwright_nested_fixture_destructure_records_dotted_path_uses() {
     );
 
     assert!(
-        info.member_accesses.iter().any(|a| {
-            a.object
-                == format!(
-                    "{}test:pages.adminPage",
-                    crate::PLAYWRIGHT_FIXTURE_USE_SENTINEL
-                )
-                && a.member == "assertGreeting"
-        }),
-        "nested-destructured adminPage.assertGreeting should record use against pages.adminPage, found: {:?}",
-        info.member_accesses
+        has_playwright_fixture_use_fact(&info, "test", "pages.adminPage", "assertGreeting"),
+        "nested-destructured adminPage.assertGreeting should emit typed use against pages.adminPage, found: {:?}",
+        info.semantic_facts
     );
     assert!(
-        info.member_accesses.iter().any(|a| {
-            a.object
-                == format!(
-                    "{}test:pages.userPage",
-                    crate::PLAYWRIGHT_FIXTURE_USE_SENTINEL
-                )
-                && a.member == "assertGreeting"
-        }),
-        "nested-destructured renamed user.assertGreeting should record use against pages.userPage, found: {:?}",
-        info.member_accesses
+        has_playwright_fixture_use_fact(&info, "test", "pages.userPage", "assertGreeting"),
+        "nested-destructured renamed user.assertGreeting should emit typed use against pages.userPage, found: {:?}",
+        info.semantic_facts
     );
 }
 
@@ -3525,24 +3225,14 @@ fn playwright_nested_fixture_chained_access_records_dotted_path_uses() {
     );
 
     assert!(
-        info.member_accesses.iter().any(|a| {
-            a.object
-                == format!(
-                    "{}test:pages.adminPage",
-                    crate::PLAYWRIGHT_FIXTURE_USE_SENTINEL
-                )
-                && a.member == "assertGreeting"
-        }),
-        "chained pages.adminPage.assertGreeting should record use against pages.adminPage, found: {:?}",
-        info.member_accesses
+        has_playwright_fixture_use_fact(&info, "test", "pages.adminPage", "assertGreeting"),
+        "chained pages.adminPage.assertGreeting should emit typed use against pages.adminPage, found: {:?}",
+        info.semantic_facts
     );
     assert!(
-        !info.member_accesses.iter().any(|a| {
-            a.object == format!("{}test:pages", crate::PLAYWRIGHT_FIXTURE_USE_SENTINEL)
-                && a.member == "adminPage"
-        }),
-        "chained access must not emit a spurious (pages, adminPage) intermediate use, found: {:?}",
-        info.member_accesses
+        !has_playwright_fixture_use_fact(&info, "test", "pages", "adminPage"),
+        "chained access must not emit a spurious typed (pages, adminPage) intermediate use, found: {:?}",
+        info.semantic_facts
     );
 }
 
@@ -3568,16 +3258,14 @@ fn playwright_helper_function_records_fixture_definitions() {
     );
 
     assert!(
-        info.member_accesses.iter().any(|a| {
-            a.object
-                == format!(
-                    "{}appTest:appUi.step.login",
-                    crate::PLAYWRIGHT_FIXTURE_DEF_SENTINEL
-                )
-                && a.member == "LoginActions"
-        }),
-        "helper-function Playwright fixture should record a def sentinel keyed by the function name, found: {:?}",
-        info.member_accesses
+        has_playwright_fixture_definition_fact(
+            &info,
+            "appTest",
+            "appUi.step.login",
+            "LoginActions"
+        ),
+        "helper-function Playwright fixture should emit a typed definition keyed by the function name, found: {:?}",
+        info.semantic_facts
     );
 }
 
@@ -3611,16 +3299,14 @@ fn playwright_helper_function_with_local_setup_records_fixture_definitions() {
     );
 
     assert!(
-        info.member_accesses.iter().any(|a| {
-            a.object
-                == format!(
-                    "{}appTest:appUi.step.login",
-                    crate::PLAYWRIGHT_FIXTURE_DEF_SENTINEL
-                )
-                && a.member == "LoginActions"
-        }),
-        "helper-function Playwright fixture with local setup should record a def sentinel keyed by the function name, found: {:?}",
-        info.member_accesses
+        has_playwright_fixture_definition_fact(
+            &info,
+            "appTest",
+            "appUi.step.login",
+            "LoginActions"
+        ),
+        "helper-function Playwright fixture with local setup should emit a typed definition keyed by the function name, found: {:?}",
+        info.semantic_facts
     );
 }
 
@@ -3640,12 +3326,9 @@ fn playwright_helper_arrow_records_fixture_definitions() {
     );
 
     assert!(
-        info.member_accesses.iter().any(|a| {
-            a.object == format!("{}appTest:login", crate::PLAYWRIGHT_FIXTURE_DEF_SENTINEL)
-                && a.member == "LoginActions"
-        }),
-        "arrow-expression helper should record a def sentinel keyed by the variable name, found: {:?}",
-        info.member_accesses
+        has_playwright_fixture_definition_fact(&info, "appTest", "login", "LoginActions"),
+        "arrow-expression helper should emit a typed definition keyed by the variable name, found: {:?}",
+        info.semantic_facts
     );
 }
 
@@ -3671,29 +3354,19 @@ fn playwright_helper_chain_records_fixture_definitions() {
     );
 
     assert!(
-        info.member_accesses.iter().any(|a| {
-            a.object == format!("{}appTest:login", crate::PLAYWRIGHT_FIXTURE_DEF_SENTINEL)
-                && a.member == "LoginActions"
-        }),
-        "helper chain (appTest -> setupTestFixture) should propagate bindings onto the outer name, found: {:?}",
-        info.member_accesses
+        has_playwright_fixture_definition_fact(&info, "appTest", "login", "LoginActions"),
+        "helper chain should propagate typed bindings onto the outer name, found: {:?}",
+        info.semantic_facts
     );
     assert!(
-        info.member_accesses.iter().any(|a| {
-            a.object
-                == format!(
-                    "{}setupTestFixture:login",
-                    crate::PLAYWRIGHT_FIXTURE_DEF_SENTINEL
-                )
-                && a.member == "LoginActions"
-        }),
-        "the inner helper itself should also retain its own def sentinel, found: {:?}",
-        info.member_accesses
+        has_playwright_fixture_definition_fact(&info, "setupTestFixture", "login", "LoginActions"),
+        "the inner helper itself should also retain its own typed definition, found: {:?}",
+        info.semantic_facts
     );
 }
 
 #[test]
-fn playwright_helper_records_use_sentinels_for_curried_call() {
+fn playwright_helper_records_typed_use_fact_for_curried_call() {
     let info = parse(
         r"
             import { appTest } from './fixtures';
@@ -3705,16 +3378,9 @@ fn playwright_helper_records_use_sentinels_for_curried_call() {
     );
 
     assert!(
-        info.member_accesses.iter().any(|a| {
-            a.object
-                == format!(
-                    "{}appTest:appUi.step.login",
-                    crate::PLAYWRIGHT_FIXTURE_USE_SENTINEL
-                )
-                && a.member == "openLogin"
-        }),
-        "curried `appTest()(...)` call should emit a use sentinel keyed by the helper name, found: {:?}",
-        info.member_accesses
+        has_playwright_fixture_use_fact(&info, "appTest", "appUi.step.login", "openLogin"),
+        "curried `appTest()(...)` call should emit a typed use keyed by the helper name, found: {:?}",
+        info.semantic_facts
     );
 }
 
@@ -3736,12 +3402,9 @@ fn non_playwright_helper_does_not_record_fixture_definitions() {
     );
 
     assert!(
-        !info
-            .member_accesses
-            .iter()
-            .any(|a| a.object.starts_with(crate::PLAYWRIGHT_FIXTURE_DEF_SENTINEL)),
-        "non-Playwright helper should not emit Playwright fixture definitions, found: {:?}",
-        info.member_accesses
+        !has_any_playwright_fixture_definition_fact(&info),
+        "non-Playwright helper should not emit typed Playwright fixture definitions, found: {:?}",
+        info.semantic_facts
     );
 }
 
@@ -4205,7 +3868,7 @@ fn export_destructured_with_default_value() {
 
 #[test]
 fn export_destructured_array() {
-    let info = parse("export const [first,, third] = [1, 2, 3];");
+    let info = parse("export const [first, , third] = [1, 2, 3];");
     assert_eq!(info.exports.len(), 2);
     assert!(
         info.exports
@@ -5395,7 +5058,7 @@ fn dotted_bound_receiver_preserves_suffix() {
 }
 
 #[test]
-fn fluent_chain_emits_sentinel_member_access() {
+fn fluent_chain_emits_typed_member_facts() {
     let info = parse(
         r#"
         import { EventBuilder } from './event-builder';
@@ -5404,31 +5067,40 @@ fn fluent_chain_emits_sentinel_member_access() {
     );
 
     assert!(
-        info.member_accesses.iter().any(|a| a.object
-            == format!("{}EventBuilder:create:", crate::FLUENT_CHAIN_SENTINEL)
-            && a.member == "setProcessId"),
-        "first chained call should emit sentinel with empty chain prefix, found: {:?}",
+        !has_legacy_semantic_member_accesses(&info),
+        "fluent chain should not emit synthetic member accesses, found: {:?}",
         info.member_accesses,
     );
+    let fluent_facts: Vec<_> = info
+        .semantic_facts
+        .iter()
+        .filter_map(|fact| {
+            if let SemanticFact::FluentChainMemberAccess(access) = fact {
+                Some(access)
+            } else {
+                None
+            }
+        })
+        .collect();
     assert!(
-        info.member_accesses.iter().any(|a| a.object
-            == format!(
-                "{}EventBuilder:create:setProcessId",
-                crate::FLUENT_CHAIN_SENTINEL
-            )
-            && a.member == "setSubject"),
-        "second chained call should encode intermediate method in chain prefix, found: {:?}",
-        info.member_accesses,
+        fluent_facts
+            .iter()
+            .any(|fact| fact.root_object == "EventBuilder"
+                && fact.root_method == "create"
+                && fact.chain.is_empty()
+                && fact.member == "setProcessId"),
+        "first chained call should emit typed fluent fact, found: {:?}",
+        info.semantic_facts,
     );
     assert!(
-        info.member_accesses.iter().any(|a| a.object
-            == format!(
-                "{}EventBuilder:create:setProcessId,setSubject",
-                crate::FLUENT_CHAIN_SENTINEL
-            )
-            && a.member == "build"),
-        "terminal call should encode the full prior chain, found: {:?}",
-        info.member_accesses,
+        fluent_facts
+            .iter()
+            .any(|fact| fact.root_object == "EventBuilder"
+                && fact.root_method == "create"
+                && fact.chain == vec!["setProcessId".to_string(), "setSubject".to_string()]
+                && fact.member == "build"),
+        "terminal call should emit typed fluent fact with full prior chain, found: {:?}",
+        info.semantic_facts,
     );
 }
 
@@ -5451,7 +5123,7 @@ fn new_expression_direct_member_access_recorded() {
 }
 
 #[test]
-fn new_expression_fluent_chain_emits_new_sentinel() {
+fn new_expression_fluent_chain_emits_typed_member_facts() {
     let info = parse(
         r"
         import { OptionBuilder } from './option-builder';
@@ -5467,24 +5139,38 @@ fn new_expression_fluent_chain_emits_new_sentinel() {
         info.member_accesses,
     );
     assert!(
-        info.member_accesses.iter().any(|a| a.object
-            == format!(
-                "{}OptionBuilder:addDefault",
-                crate::FLUENT_CHAIN_NEW_SENTINEL
-            )
-            && a.member == "addFromCli"),
-        "second chained call should encode the first method in the chain prefix, found: {:?}",
+        !has_legacy_semantic_member_accesses(&info),
+        "new-expression fluent chain should not emit synthetic member accesses, found: {:?}",
         info.member_accesses,
     );
+    let fluent_new_facts: Vec<_> = info
+        .semantic_facts
+        .iter()
+        .filter_map(|fact| {
+            if let SemanticFact::FluentChainNewMemberAccess(access) = fact {
+                Some(access)
+            } else {
+                None
+            }
+        })
+        .collect();
     assert!(
-        info.member_accesses.iter().any(|a| a.object
-            == format!(
-                "{}OptionBuilder:addDefault,addFromCli",
-                crate::FLUENT_CHAIN_NEW_SENTINEL
-            )
-            && a.member == "build"),
-        "terminal call should encode the full prior chain, found: {:?}",
-        info.member_accesses,
+        fluent_new_facts
+            .iter()
+            .any(|fact| fact.class_name == "OptionBuilder"
+                && fact.chain == vec!["addDefault".to_string()]
+                && fact.member == "addFromCli"),
+        "second chained call should emit typed fluent-new fact, found: {:?}",
+        info.semantic_facts,
+    );
+    assert!(
+        fluent_new_facts
+            .iter()
+            .any(|fact| fact.class_name == "OptionBuilder"
+                && fact.chain == vec!["addDefault".to_string(), "addFromCli".to_string()]
+                && fact.member == "build"),
+        "terminal call should emit typed fluent-new fact, found: {:?}",
+        info.semantic_facts,
     );
 }
 
@@ -6443,7 +6129,7 @@ fn non_component_decorator_ignored() {
 }
 
 #[test]
-fn angular_inline_template_emits_sentinel_member_accesses() {
+fn angular_inline_template_emits_typed_member_facts() {
     let info = parse(
         r#"
         import { Component, signal } from '@angular/core';
@@ -6458,15 +6144,14 @@ fn angular_inline_template_emits_sentinel_member_accesses() {
         }
         "#,
     );
-    let sentinel = crate::sfc_template::angular::ANGULAR_TPL_SENTINEL;
-    let sentinel_refs: Vec<&str> = info
-        .member_accesses
-        .iter()
-        .filter(|a| a.object == sentinel)
-        .map(|a| a.member.as_str())
-        .collect();
-    assert!(sentinel_refs.contains(&"message"));
-    assert!(sentinel_refs.contains(&"onClick"));
+    let fact_refs = angular_template_fact_members(&info);
+    assert!(fact_refs.contains(&"message"));
+    assert!(fact_refs.contains(&"onClick"));
+    assert!(
+        has_no_legacy_semantic_member_accesses(&info),
+        "inline template should not emit synthetic member accesses, found: {:?}",
+        info.member_accesses
+    );
 }
 
 #[test]
@@ -6484,12 +6169,13 @@ fn angular_inline_template_backtick_scanned() {
         }
         ",
     );
-    let sentinel = crate::sfc_template::angular::ANGULAR_TPL_SENTINEL;
-    let has_title = info
-        .member_accesses
-        .iter()
-        .any(|a| a.object == sentinel && a.member == "title");
-    assert!(has_title);
+    let fact_refs = angular_template_fact_members(&info);
+    assert!(fact_refs.contains(&"title"));
+    assert!(
+        has_no_legacy_semantic_member_accesses(&info),
+        "backtick template should not emit synthetic member accesses, found: {:?}",
+        info.member_accesses
+    );
 }
 
 #[test]
@@ -6579,7 +6265,7 @@ export class A {}\n",
 }
 
 #[test]
-fn angular_host_bindings_emit_sentinel_accesses() {
+fn angular_host_bindings_emit_typed_member_facts() {
     let info = parse(
         r"
         import { Component } from '@angular/core';
@@ -6602,17 +6288,16 @@ fn angular_host_bindings_emit_sentinel_accesses() {
         }
         ",
     );
-    let sentinel = crate::sfc_template::angular::ANGULAR_TPL_SENTINEL;
-    let host_refs: Vec<&str> = info
-        .member_accesses
-        .iter()
-        .filter(|a| a.object == sentinel)
-        .map(|a| a.member.as_str())
-        .collect();
-    assert!(host_refs.contains(&"hostClass"));
-    assert!(host_refs.contains(&"isActive"));
-    assert!(host_refs.contains(&"onHostClick"));
-    assert!(host_refs.contains(&"customColor"));
+    let fact_refs = angular_template_fact_members(&info);
+    assert!(fact_refs.contains(&"hostClass"));
+    assert!(fact_refs.contains(&"isActive"));
+    assert!(fact_refs.contains(&"onHostClick"));
+    assert!(fact_refs.contains(&"customColor"));
+    assert!(
+        has_no_legacy_semantic_member_accesses(&info),
+        "host bindings should not emit synthetic member accesses, found: {:?}",
+        info.member_accesses
+    );
 }
 
 #[test]
@@ -6632,19 +6317,20 @@ fn angular_host_binding_skips_keywords() {
         export class App {}
         ",
     );
-    let sentinel = crate::sfc_template::angular::ANGULAR_TPL_SENTINEL;
     assert!(
+        angular_template_fact_members(&info).is_empty(),
+        "keyword-only host bindings should not emit template facts, found: {:?}",
+        info.semantic_facts
+    );
+    assert!(
+        has_no_legacy_semantic_member_accesses(&info),
+        "keyword-only host bindings should not emit synthetic member accesses, found: {:?}",
         info.member_accesses
-            .iter()
-            .filter(|a| a.object == sentinel)
-            .map(|a| a.member.as_str())
-            .next()
-            .is_none()
     );
 }
 
 #[test]
-fn angular_inputs_outputs_metadata_emit_sentinel_accesses() {
+fn angular_inputs_outputs_metadata_emit_typed_member_facts() {
     let info = parse(
         r"
         import { Component } from '@angular/core';
@@ -6662,20 +6348,19 @@ fn angular_inputs_outputs_metadata_emit_sentinel_accesses() {
         }
         ",
     );
-    let sentinel = crate::sfc_template::angular::ANGULAR_TPL_SENTINEL;
-    let refs: Vec<&str> = info
-        .member_accesses
-        .iter()
-        .filter(|a| a.object == sentinel)
-        .map(|a| a.member.as_str())
-        .collect();
+    let refs = angular_template_fact_members(&info);
     assert!(refs.contains(&"bankName"));
     assert!(refs.contains(&"id"));
     assert!(refs.contains(&"clicked"));
+    assert!(
+        has_no_legacy_semantic_member_accesses(&info),
+        "inputs/outputs metadata should not emit synthetic member accesses, found: {:?}",
+        info.member_accesses
+    );
 }
 
 #[test]
-fn angular_queries_metadata_emit_sentinel_accesses() {
+fn angular_queries_metadata_emit_typed_member_facts() {
     let info = parse(
         r"
         import { Component, ViewChild, ContentChild, ElementRef } from '@angular/core';
@@ -6694,15 +6379,39 @@ fn angular_queries_metadata_emit_sentinel_accesses() {
         }
         ",
     );
-    let sentinel = crate::sfc_template::angular::ANGULAR_TPL_SENTINEL;
-    let refs: Vec<&str> = info
-        .member_accesses
-        .iter()
-        .filter(|a| a.object == sentinel)
-        .map(|a| a.member.as_str())
-        .collect();
+    let refs = angular_template_fact_members(&info);
     assert!(refs.contains(&"header"));
     assert!(refs.contains(&"footer"));
+    assert!(
+        has_no_legacy_semantic_member_accesses(&info),
+        "queries metadata should not emit synthetic member accesses, found: {:?}",
+        info.member_accesses
+    );
+}
+
+#[test]
+fn angular_this_spread_emits_typed_abstain_fact() {
+    let info = parse(
+        r"
+        export class App {
+            createBehavior() {
+                return { ...this, role: 'button' };
+            }
+        }
+        ",
+    );
+    assert!(
+        info.semantic_facts
+            .iter()
+            .any(|fact| matches!(fact, SemanticFact::AngularThisSpread(_))),
+        "spread-this should emit a typed Angular abstain fact, found: {:?}",
+        info.semantic_facts
+    );
+    assert!(
+        !has_legacy_semantic_member_accesses(&info),
+        "spread-this should not emit a synthetic member access, found: {:?}",
+        info.member_accesses
+    );
 }
 
 #[test]
@@ -6969,17 +6678,16 @@ fn angular_component_all_metadata_combined() {
         .any(|i| i.source == "./app.html" && matches!(i.imported_name, ImportedName::SideEffect));
     assert!(has_html_import);
 
-    let sentinel = crate::sfc_template::angular::ANGULAR_TPL_SENTINEL;
-    let refs: Vec<&str> = info
-        .member_accesses
-        .iter()
-        .filter(|a| a.object == sentinel)
-        .map(|a| a.member.as_str())
-        .collect();
+    let refs = angular_template_fact_members(&info);
     assert!(refs.contains(&"greeting"));
     assert!(refs.contains(&"handleClick"));
     assert!(refs.contains(&"externalInput"));
     assert!(refs.contains(&"externalOutput"));
+    assert!(
+        has_no_legacy_semantic_member_accesses(&info),
+        "external template should not emit synthetic member accesses, found: {:?}",
+        info.member_accesses
+    );
 
     let app_export = info
         .exports
@@ -8573,13 +8281,10 @@ fn playwright_fixture_destructure_with_default_value_records_binding() {
     // The fixture key is `adminPage`; even though the destructure has a
     // default (`= null`), the binding must still be recognised.
     assert!(
-        info.member_accesses.iter().any(|a| {
-            a.object == format!("{}test:adminPage", crate::PLAYWRIGHT_FIXTURE_USE_SENTINEL)
-                && a.member == "assertGreeting"
-        }),
-        "fixture with default value in destructure should still emit a use sentinel; \
+        has_playwright_fixture_use_fact(&info, "test", "adminPage", "assertGreeting"),
+        "fixture with default value in destructure should still emit a typed use fact; \
          got {:#?}",
-        info.member_accesses
+        info.semantic_facts
     );
 }
 
@@ -8599,12 +8304,9 @@ fn playwright_test_skip_variant_records_fixture_uses() {
         ",
     );
     assert!(
-        info.member_accesses.iter().any(|a| {
-            a.object == format!("{}test:adminPage", crate::PLAYWRIGHT_FIXTURE_USE_SENTINEL)
-                && a.member == "checkTitle"
-        }),
-        "test.skip(...) callback should still emit fixture use sentinels; got {:#?}",
-        info.member_accesses
+        has_playwright_fixture_use_fact(&info, "test", "adminPage", "checkTitle"),
+        "test.skip(...) callback should still emit typed fixture use facts; got {:#?}",
+        info.semantic_facts
     );
 }
 
@@ -8627,20 +8329,14 @@ fn playwright_extend_intersection_type_records_both_fixture_branches() {
     );
 
     assert!(
-        info.member_accesses.iter().any(|a| {
-            a.object == format!("{}test:adminPage", crate::PLAYWRIGHT_FIXTURE_DEF_SENTINEL)
-                && a.member == "AdminPage"
-        }),
+        has_playwright_fixture_definition_fact(&info, "test", "adminPage", "AdminPage"),
         "intersection type left branch (adminPage) must be recorded; got {:#?}",
-        info.member_accesses
+        info.semantic_facts
     );
     assert!(
-        info.member_accesses.iter().any(|a| {
-            a.object == format!("{}test:userPage", crate::PLAYWRIGHT_FIXTURE_DEF_SENTINEL)
-                && a.member == "UserPage"
-        }),
+        has_playwright_fixture_definition_fact(&info, "test", "userPage", "UserPage"),
         "intersection type right branch (userPage) must be recorded; got {:#?}",
-        info.member_accesses
+        info.semantic_facts
     );
 }
 
@@ -8661,12 +8357,9 @@ fn playwright_extend_parenthesized_type_arg_records_fixture_bindings() {
     );
 
     assert!(
-        info.member_accesses.iter().any(|a| {
-            a.object == format!("{}test:adminPage", crate::PLAYWRIGHT_FIXTURE_DEF_SENTINEL)
-                && a.member == "AdminPage"
-        }),
+        has_playwright_fixture_definition_fact(&info, "test", "adminPage", "AdminPage"),
         "parenthesized type argument must be unwrapped; got {:#?}",
-        info.member_accesses
+        info.semantic_facts
     );
 }
 
@@ -8694,21 +8387,15 @@ fn playwright_ts_as_assignment_in_callback_records_alias_correctly() {
     // Both readerA and readerB are fixture locals. The TS `as` cast wraps the
     // assignment target; both branches of the if/else feed into currentReader.
     // At minimum the doWork member must be emitted against both fixtures.
-    let has_reader_a = info.member_accesses.iter().any(|a| {
-        a.object == format!("{}test:readerA", crate::PLAYWRIGHT_FIXTURE_USE_SENTINEL)
-            && a.member == "doWork"
-    });
-    let has_reader_b = info.member_accesses.iter().any(|a| {
-        a.object == format!("{}test:readerB", crate::PLAYWRIGHT_FIXTURE_USE_SENTINEL)
-            && a.member == "doWork"
-    });
+    let has_reader_a = has_playwright_fixture_use_fact(&info, "test", "readerA", "doWork");
+    let has_reader_b = has_playwright_fixture_use_fact(&info, "test", "readerB", "doWork");
     // Either or both must be present -- the key assertion is that the code
     // path exercises the TS-expression assignment target path without panic.
     assert!(
         has_reader_a || has_reader_b,
         "at least one of readerA/readerB.doWork should be recorded via TS-as assignment; \
          got {:#?}",
-        info.member_accesses
+        info.semantic_facts
     );
 }
 
@@ -8788,12 +8475,9 @@ fn playwright_switch_without_default_propagates_alias() {
     // The switch has no default, so the before-alias (readerA) is always
     // possible. `doWork` must appear for at least readerA.
     assert!(
-        info.member_accesses.iter().any(|a| {
-            a.object == format!("{}test:readerA", crate::PLAYWRIGHT_FIXTURE_USE_SENTINEL)
-                && a.member == "doWork"
-        }),
+        has_playwright_fixture_use_fact(&info, "test", "readerA", "doWork"),
         "switch without default must propagate readerA alias to doWork; got {:#?}",
-        info.member_accesses
+        info.semantic_facts
     );
 }
 
@@ -8820,12 +8504,9 @@ fn playwright_fixture_reassigned_to_sibling_fixture_credits_sibling() {
     );
     // After reassignment `r` points at readerB; doWork must appear for readerB.
     assert!(
-        info.member_accesses.iter().any(|a| {
-            a.object == format!("{}test:readerB", crate::PLAYWRIGHT_FIXTURE_USE_SENTINEL)
-                && a.member == "doWork"
-        }),
+        has_playwright_fixture_use_fact(&info, "test", "readerB", "doWork"),
         "after reassigning r to readerB, doWork must be credited to readerB; \
          got {:#?}",
-        info.member_accesses
+        info.semantic_facts
     );
 }

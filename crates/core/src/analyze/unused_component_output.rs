@@ -18,12 +18,12 @@
 //!   negligible shape treated as a call);
 //! - a `member_access` with `object == "this" && member == bar` (the output read
 //!   as a value, e.g. forwarded to a function that may emit it). Over-credit;
-//! - an inline-template sentinel ref (`object == ANGULAR_TPL_SENTINEL &&
-//!   member == bar`), which credits a template-handler emit such as
-//!   `(click)="bar.emit(...)"` (Angular templates emit outputs directly off the
-//!   bare name, with no `this.` prefix);
-//! - the same sentinel ref in the linked external `templateUrl` `.html` module,
-//!   reached via the `SideEffect` import edge.
+//! - a typed Angular template member fact for `bar`, with older cached
+//!   member accesses accepted only as a conservative parse-cache fallback, which
+//!   credits a template-handler emit such as `(click)="bar.emit(...)"` (Angular
+//!   templates emit outputs directly off the bare name, with no `this.` prefix);
+//! - the same template member evidence in the linked external `templateUrl`
+//!   `.html` module, reached via the `SideEffect` import edge.
 //!
 //! Whole-component ABSTAIN (skip ALL outputs for the component) when the
 //! component class declares an `extends` heritage clause: a base class in another
@@ -34,8 +34,7 @@ use std::path::Path;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use fallow_extract::ANGULAR_TPL_SENTINEL;
-use fallow_types::extract::ModuleInfo;
+use fallow_types::extract::{ModuleInfo, SemanticFactView};
 
 use crate::discover::FileId;
 use crate::graph::{ModuleGraph, ModuleNode};
@@ -139,33 +138,28 @@ fn component_abstains_outputs(module: &ModuleInfo) -> bool {
 /// that emits it).
 fn output_is_emitted(component: &ModuleInfo, name: &str) -> bool {
     let emit_object = format!("this.{name}");
-    component.member_accesses.iter().any(|access| {
-        (access.object == emit_object && access.member == "emit")
-            || (access.object == "this" && access.member == name)
-    })
+    SemanticFactView::new(&component.semantic_facts, &component.member_accesses)
+        .ordinary_member_accesses()
+        .any(|access| {
+            (access.object == emit_object && access.member == "emit")
+                || (access.object == "this" && access.member == name)
+        })
 }
 
 /// Build the set of output names emitted through a template handler. An Angular
 /// template emits an output off the bare name (`(click)="bar.emit(...)"`), which
-/// the template scanner records as an `ANGULAR_TPL_SENTINEL` member access for
-/// `bar`. This covers the component's own inline template plus every linked
-/// external `templateUrl` module. Over-credits by design.
+/// extraction records as typed Angular template member evidence for `bar`.
+/// Legacy semantic member accesses are accepted for older parse-cache payloads.
+/// This covers the component's own inline template plus
+/// every linked external `templateUrl` module. Over-credits by design.
 fn template_emitted_outputs<'a>(
     component: &'a ModuleInfo,
     external_templates: &[&'a ModuleInfo],
 ) -> FxHashSet<&'a str> {
     let mut emitted: FxHashSet<&str> = FxHashSet::default();
-    for access in &component.member_accesses {
-        if access.object == ANGULAR_TPL_SENTINEL {
-            emitted.insert(access.member.as_str());
-        }
-    }
+    super::unused_component_input::insert_angular_template_members(component, &mut emitted);
     for template in external_templates {
-        for access in &template.member_accesses {
-            if access.object == ANGULAR_TPL_SENTINEL {
-                emitted.insert(access.member.as_str());
-            }
-        }
+        super::unused_component_input::insert_angular_template_members(template, &mut emitted);
     }
     emitted
 }
@@ -174,7 +168,7 @@ fn template_emitted_outputs<'a>(
 /// an external Angular `templateUrl`. Mirrors the input detector's helper: the
 /// component sets `has_angular_component_template_url`, and the external `.html`
 /// file is reached via a `SideEffect` import edge whose target carries template
-/// sentinel member accesses.
+/// member evidence.
 fn external_template_modules<'a>(
     graph: &ModuleGraph,
     modules_by_id: &FxHashMap<FileId, &'a ModuleInfo>,
@@ -191,10 +185,11 @@ fn external_template_modules<'a>(
         let Some(target_module) = modules_by_id.get(&target) else {
             continue;
         };
-        if target_module
-            .member_accesses
-            .iter()
-            .any(|a| a.object == ANGULAR_TPL_SENTINEL)
+        if SemanticFactView::new(
+            &target_module.semantic_facts,
+            &target_module.member_accesses,
+        )
+        .has_angular_template_members()
         {
             out.push(*target_module);
         }
@@ -223,7 +218,10 @@ fn component_name_for(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use fallow_types::extract::{AngularOutputMember, ClassHeritageInfo, MemberAccess};
+    use fallow_types::extract::{
+        AngularOutputMember, AngularTemplateMemberAccessFact, ClassHeritageInfo, MemberAccess,
+        SemanticFact,
+    };
     use rustc_hash::FxHashSet;
 
     use super::*;
@@ -241,6 +239,12 @@ mod tests {
             object: object.to_string(),
             member: member.to_string(),
         }
+    }
+
+    fn tpl_fact(member: &str) -> SemanticFact {
+        SemanticFact::AngularTemplateMemberAccess(AngularTemplateMemberAccessFact {
+            member: member.to_string(),
+        })
     }
 
     #[test]
@@ -270,11 +274,9 @@ mod tests {
 
     #[test]
     fn inline_template_emit_credits_output() {
-        // `(click)="changed.emit(...)"` records a sentinel member access for the
-        // bare output name (no `this.`); it must credit the output as emitted.
         let component = ModuleInfo {
             angular_outputs: vec![output("changed", 10)],
-            member_accesses: vec![access(ANGULAR_TPL_SENTINEL, "changed")],
+            semantic_facts: vec![tpl_fact("changed")].into(),
             ..empty_module()
         };
         let emitted = template_emitted_outputs(&component, &[]);
@@ -284,7 +286,21 @@ mod tests {
         );
         assert!(
             !output_is_emitted(&component, "changed"),
-            "the template sentinel is not a `this.changed.emit` script call"
+            "template evidence is not a `this.changed.emit` script call"
+        );
+    }
+
+    #[test]
+    fn typed_template_fact_credits_output() {
+        let component = ModuleInfo {
+            angular_outputs: vec![output("changed", 10)],
+            semantic_facts: vec![tpl_fact("changed")].into(),
+            ..empty_module()
+        };
+        let emitted = template_emitted_outputs(&component, &[]);
+        assert!(
+            emitted.contains("changed"),
+            "a typed Angular template fact credits the output"
         );
     }
 

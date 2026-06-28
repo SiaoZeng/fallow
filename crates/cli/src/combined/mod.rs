@@ -5,7 +5,7 @@ use fallow_config::{DuplicatesConfig, OutputFormat};
 
 use crate::check::{CheckOptions, CheckResult, IssueFilters, TraceOptions};
 use crate::dupes::{DupesMode, DupesOptions, DupesResult};
-use crate::health::{HealthOptions, HealthResult, SortBy};
+use crate::health::{HealthOptions, HealthResult};
 use crate::regression;
 use crate::report;
 use crate::{AnalysisKind, load_config_for_analysis};
@@ -355,7 +355,7 @@ fn build_combined_dupes_options<'a>(
 fn shared_dupes_files(
     opts: &CombinedOptions<'_>,
     check_result: Option<&CheckResult>,
-) -> Option<Vec<fallow_core::discover::DiscoveredFile>> {
+) -> Option<Vec<fallow_engine::discover::DiscoveredFile>> {
     let check_production = opts.production_dead_code.unwrap_or(opts.production);
     let health_production = opts.production_health.unwrap_or(opts.production);
     let dupes_production = opts.production_dupes.unwrap_or(opts.production);
@@ -377,11 +377,9 @@ fn build_health_opts<'a>(opts: &'a CombinedOptions<'a>) -> HealthOptions<'a> {
         no_cache: opts.no_cache,
         threads: opts.threads,
         quiet: opts.quiet,
-        max_cyclomatic: None,
-        max_cognitive: None,
-        max_crap: None,
+        thresholds: fallow_engine::HealthThresholdOverrides::default(),
         top: None,
-        sort: SortBy::Cyclomatic,
+        sort: fallow_engine::HealthSort::Cyclomatic,
         production: opts.production_health.unwrap_or(opts.production),
         production_override: opts.production_health,
         changed_since: opts.changed_since,
@@ -392,7 +390,6 @@ fn build_health_opts<'a>(opts: &'a CombinedOptions<'a>) -> HealthOptions<'a> {
         baseline: None,
         save_baseline: None,
         complexity: true,
-        complexity_breakdown: false,
         file_scores: true,
         coverage_gaps: false,
         config_activates_coverage_gaps: false,
@@ -406,7 +403,7 @@ fn build_health_opts<'a>(opts: &'a CombinedOptions<'a>) -> HealthOptions<'a> {
         enforce_coverage_gap_gate: false,
         effort: None,
         score: opts.score || opts.trend,
-        min_score: None,
+        gates: fallow_engine::HealthGateOptions::default(),
         since: None,
         min_commits: None,
         explain: opts.explain,
@@ -415,14 +412,15 @@ fn build_health_opts<'a>(opts: &'a CombinedOptions<'a>) -> HealthOptions<'a> {
             .save_snapshot
             .map(|opt| std::path::PathBuf::from(opt.as_deref().unwrap_or_default())),
         trend: opts.trend,
-        group_by: opts.group_by,
-        coverage: opts.coverage,
-        coverage_root: opts.coverage_root,
+        coverage_inputs: fallow_engine::HealthCoverageInputs {
+            coverage: opts.coverage,
+            coverage_root: opts.coverage_root,
+        },
         performance: opts.performance,
-        min_severity: None,
-        report_only: false,
         runtime_coverage: None,
         churn_file: opts.churn_file,
+        complexity_breakdown: false,
+        group_by: opts.group_by.map(Into::into),
     }
 }
 

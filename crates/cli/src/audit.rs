@@ -4,9 +4,15 @@ use std::process::{Command, ExitCode};
 use std::time::{Duration, Instant};
 
 use fallow_config::{AuditGate, OutputFormat};
-use fallow_core::git_env::clear_ambient_git_env;
+use fallow_engine::git_env::clear_ambient_git_env;
+use fallow_types::audit_cache::{
+    AuditCacheKeyBuilder, AuditConfigFingerprint, AuditCoverageFingerprint,
+};
+use fallow_types::source_fingerprint::SourceFingerprint;
 use rustc_hash::{FxHashMap, FxHashSet};
 use xxhash_rust::xxh3::xxh3_64;
+
+pub use fallow_api::{AuditAttribution, AuditSummary, AuditVerdict};
 
 use crate::base_worktree::{
     BaseWorktree, git_rev_parse, git_toplevel, resolve_cache_max_age, sweep_old_reusable_caches,
@@ -14,47 +20,10 @@ use crate::base_worktree::{
 use crate::check::{CheckOptions, CheckResult, IssueFilters, TraceOptions};
 use crate::dupes::{DupesMode, DupesOptions, DupesResult};
 use crate::error::emit_error;
-use crate::health::{HealthOptions, HealthResult, SortBy};
+use crate::health::{HealthOptions, HealthResult};
 
 const AUDIT_BASE_SNAPSHOT_CACHE_VERSION: u8 = 3;
 const MAX_AUDIT_BASE_SNAPSHOT_CACHE_SIZE: usize = 16 * 1024 * 1024;
-
-/// Verdict for the audit command.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum AuditVerdict {
-    /// No issues in changed files.
-    Pass,
-    /// Issues found, but all are warn-severity.
-    Warn,
-    /// Error-severity issues found in changed files.
-    Fail,
-}
-
-/// Per-category summary counts for the audit result.
-#[derive(Debug, Clone, serde::Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct AuditSummary {
-    pub dead_code_issues: usize,
-    pub dead_code_has_errors: bool,
-    pub complexity_findings: usize,
-    pub max_cyclomatic: Option<u16>,
-    pub duplication_clone_groups: usize,
-}
-
-/// New-vs-inherited issue counts for audit.
-#[derive(Debug, Default, Clone, serde::Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct AuditAttribution {
-    pub gate: AuditGate,
-    pub dead_code_introduced: usize,
-    pub dead_code_inherited: usize,
-    pub complexity_introduced: usize,
-    pub complexity_inherited: usize,
-    pub duplication_introduced: usize,
-    pub duplication_inherited: usize,
-}
 
 /// Full audit result containing verdict, summary, and sub-results.
 pub struct AuditResult {
@@ -659,7 +628,7 @@ fn save_cached_base_snapshot(
 /// surface the most likely culprit so a user hitting an unexpected worktree
 /// failure can short-circuit the diagnosis. Returns `None` otherwise.
 fn ambient_git_env_hint() -> Option<String> {
-    use fallow_core::git_env::AMBIENT_GIT_ENV_VARS;
+    use fallow_engine::git_env::AMBIENT_GIT_ENV_VARS;
     for var in AMBIENT_GIT_ENV_VARS {
         if let Ok(value) = std::env::var(var)
             && !value.is_empty()
@@ -691,7 +660,7 @@ fn normalized_changed_files(root: &Path, changed_files: &FxHashSet<PathBuf>) -> 
     files
 }
 
-fn config_file_fingerprint(opts: &AuditOptions<'_>) -> Result<serde_json::Value, ExitCode> {
+fn config_file_fingerprint(opts: &AuditOptions<'_>) -> Result<AuditConfigFingerprint, ExitCode> {
     let loaded = if let Some(path) = opts.config_path {
         let config = fallow_config::FallowConfig::load(path).map_err(|e| {
             emit_error(
@@ -707,10 +676,10 @@ fn config_file_fingerprint(opts: &AuditOptions<'_>) -> Result<serde_json::Value,
     };
 
     let Some((config, path)) = loaded else {
-        return Ok(serde_json::json!({
-            "path": null,
-            "resolved_hash": null,
-        }));
+        return Ok(AuditConfigFingerprint {
+            path: None,
+            resolved_hash: None,
+        });
     };
     let bytes = serde_json::to_vec(&config).map_err(|e| {
         emit_error(
@@ -719,13 +688,13 @@ fn config_file_fingerprint(opts: &AuditOptions<'_>) -> Result<serde_json::Value,
             opts.output,
         )
     })?;
-    Ok(serde_json::json!({
-        "path": path.to_string_lossy(),
-        "resolved_hash": format!("{:016x}", xxh3_64(&bytes)),
-    }))
+    Ok(AuditConfigFingerprint {
+        path: Some(path.to_string_lossy().to_string()),
+        resolved_hash: Some(format!("{:016x}", xxh3_64(&bytes))),
+    })
 }
 
-fn coverage_file_fingerprint(path: &Path, project_root: &Path) -> serde_json::Value {
+fn coverage_file_fingerprint(path: &Path, project_root: &Path) -> AuditCoverageFingerprint {
     let resolved = crate::health::scoring::resolve_relative_to_root(path, Some(project_root));
     let file_path = if resolved.is_dir() {
         resolved.join("coverage-final.json")
@@ -733,17 +702,27 @@ fn coverage_file_fingerprint(path: &Path, project_root: &Path) -> serde_json::Va
         resolved
     };
     match std::fs::read(&file_path) {
-        Ok(bytes) => serde_json::json!({
-            "path": path.to_string_lossy(),
-            "resolved_path": file_path.to_string_lossy(),
-            "content_hash": format!("{:016x}", xxh3_64(&bytes)),
-            "len": bytes.len(),
-        }),
-        Err(err) => serde_json::json!({
-            "path": path.to_string_lossy(),
-            "resolved_path": file_path.to_string_lossy(),
-            "error": err.kind().to_string(),
-        }),
+        Ok(bytes) => {
+            let source = std::fs::metadata(&file_path)
+                .ok()
+                .map(|metadata| SourceFingerprint::from_metadata(&metadata));
+            AuditCoverageFingerprint {
+                path: path.to_string_lossy().to_string(),
+                resolved_path: file_path.to_string_lossy().to_string(),
+                source,
+                content_hash: Some(format!("{:016x}", xxh3_64(&bytes))),
+                len: Some(bytes.len()),
+                error: None,
+            }
+        }
+        Err(err) => AuditCoverageFingerprint {
+            path: path.to_string_lossy().to_string(),
+            resolved_path: file_path.to_string_lossy().to_string(),
+            source: None,
+            content_hash: None,
+            len: None,
+            error: Some(err.kind().to_string()),
+        },
     }
 }
 
@@ -762,28 +741,39 @@ fn audit_base_snapshot_cache_key(
     let coverage_file = opts
         .coverage
         .map(|p| coverage_file_fingerprint(p, opts.root));
-    let payload = serde_json::json!({
-        "cache_version": AUDIT_BASE_SNAPSHOT_CACHE_VERSION,
-        "cli_version": env!("CARGO_PKG_VERSION"),
-        "base_sha": base_sha,
-        "config_file": config_file,
-        "changed_files": normalized_changed_files(opts.root, changed_files),
-        "production": opts.production,
-        "production_dead_code": opts.production_dead_code,
-        "production_health": opts.production_health,
-        "production_dupes": opts.production_dupes,
-        "workspace": opts.workspace,
-        "changed_workspaces": opts.changed_workspaces,
-        "group_by": opts.group_by.map(|g| format!("{g:?}")),
-        "include_entry_exports": opts.include_entry_exports,
-        "max_crap": opts.max_crap,
-        "coverage": coverage_file,
-        "coverage_root": opts.coverage_root.map(|p| p.to_string_lossy().to_string()),
-        "dead_code_baseline": opts.dead_code_baseline.map(|p| p.to_string_lossy().to_string()),
-        "health_baseline": opts.health_baseline.map(|p| p.to_string_lossy().to_string()),
-        "dupes_baseline": opts.dupes_baseline.map(|p| p.to_string_lossy().to_string()),
-    });
-    let bytes = serde_json::to_vec(&payload).map_err(|e| {
+    let bytes = AuditCacheKeyBuilder::new(
+        AUDIT_BASE_SNAPSHOT_CACHE_VERSION,
+        env!("CARGO_PKG_VERSION"),
+        base_sha.clone(),
+        config_file,
+        normalized_changed_files(opts.root, changed_files),
+    )
+    .production(
+        opts.production,
+        opts.production_dead_code,
+        opts.production_health,
+        opts.production_dupes,
+    )
+    .scope(
+        opts.workspace.map(<[String]>::to_vec),
+        opts.changed_workspaces.map(str::to_string),
+        opts.group_by.map(|g| format!("{g:?}")),
+        opts.include_entry_exports,
+    )
+    .health(
+        opts.max_crap,
+        coverage_file,
+        opts.coverage_root.map(|p| p.to_string_lossy().to_string()),
+    )
+    .baselines(
+        opts.dead_code_baseline
+            .map(|p| p.to_string_lossy().to_string()),
+        opts.health_baseline
+            .map(|p| p.to_string_lossy().to_string()),
+        opts.dupes_baseline.map(|p| p.to_string_lossy().to_string()),
+    )
+    .to_json_bytes()
+    .map_err(|e| {
         emit_error(
             &format!("failed to build audit cache key: {e}"),
             2,
@@ -1216,8 +1206,8 @@ fn js_ts_tokens_equivalent(path: &Path, current: &str, base: &str) -> bool {
     ) {
         return false;
     }
-    let current_tokens = fallow_core::duplicates::tokenize::tokenize_file(path, current, false);
-    let base_tokens = fallow_core::duplicates::tokenize::tokenize_file(path, base, false);
+    let current_tokens = fallow_engine::duplicates::tokenize::tokenize_file(path, current, false);
+    let base_tokens = fallow_engine::duplicates::tokenize::tokenize_file(path, base, false);
     current_tokens
         .tokens
         .iter()
@@ -1401,7 +1391,7 @@ fn compute_brief_impact_closure(
     root: &std::path::Path,
     check: &CheckResult,
     changed_files: &FxHashSet<PathBuf>,
-) -> Option<fallow_core::graph::ImpactClosurePaths> {
+) -> Option<fallow_engine::graph::ImpactClosurePaths> {
     let graph = check
         .shared_parse
         .as_ref()
@@ -1444,7 +1434,7 @@ fn compute_brief_partition_order(
     root: &std::path::Path,
     check: &CheckResult,
     changed_files: &FxHashSet<PathBuf>,
-) -> Option<fallow_core::graph::PartitionOrderPaths> {
+) -> Option<fallow_engine::graph::PartitionOrderPaths> {
     let graph = check
         .shared_parse
         .as_ref()
@@ -1579,7 +1569,7 @@ fn compute_brief_focus_facts(
     root: &std::path::Path,
     check: &CheckResult,
     changed_files: &FxHashSet<PathBuf>,
-) -> Option<Vec<fallow_core::graph::FocusFileFactsPaths>> {
+) -> Option<Vec<fallow_engine::graph::FocusFileFactsPaths>> {
     let graph = check
         .shared_parse
         .as_ref()
@@ -1881,7 +1871,7 @@ fn compute_change_anchors(
     if let Some(raw) = crate::report::ci::diff_filter::shared_diff_raw() {
         return crate::audit_walkthrough::parse_change_anchors(raw);
     }
-    fallow_core::changed_files::try_get_changed_diff(root, base_ref)
+    fallow_engine::changed_files::try_get_changed_diff(root, base_ref)
         .map(|diff| crate::audit_walkthrough::parse_change_anchors(&diff))
         .unwrap_or_default()
 }
@@ -2006,7 +1996,7 @@ fn compute_decision_surface(
 /// the blast and the union of consumed symbols as the contract. Sorted by changed
 /// file for deterministic output.
 fn aggregate_coordination_gaps(
-    gaps: &[fallow_core::graph::CoordinationGapPaths],
+    gaps: &[fallow_engine::graph::CoordinationGapPaths],
 ) -> Vec<crate::audit_decision_surface::CoordinationAnchor> {
     use crate::audit_decision_surface::CoordinationAnchor;
     let mut by_file: FxHashMap<String, (u64, FxHashSet<String>)> = FxHashMap::default();
@@ -2524,7 +2514,7 @@ fn build_audit_dupes_options<'a>(
 fn run_audit_health<'a>(
     opts: &'a AuditOptions<'a>,
     changed_since: Option<&'a str>,
-    shared_parse: Option<crate::health::SharedParseData>,
+    shared_parse: Option<fallow_engine::HealthSharedParseData>,
 ) -> Result<Option<HealthResult>, ExitCode> {
     let runtime_coverage = match opts.runtime_coverage {
         Some(path) => match crate::health::coverage::prepare_options(
@@ -2557,7 +2547,7 @@ fn run_audit_health<'a>(
 fn build_audit_health_options<'a>(
     opts: &'a AuditOptions<'a>,
     changed_since: Option<&'a str>,
-    runtime_coverage: Option<crate::health::RuntimeCoverageOptions>,
+    runtime_coverage: Option<fallow_engine::RuntimeCoverageOptions>,
 ) -> HealthOptions<'a> {
     HealthOptions {
         root: opts.root,
@@ -2566,11 +2556,13 @@ fn build_audit_health_options<'a>(
         no_cache: opts.no_cache,
         threads: opts.threads,
         quiet: opts.quiet,
-        max_cyclomatic: None,
-        max_cognitive: None,
-        max_crap: opts.max_crap,
+        thresholds: fallow_engine::HealthThresholdOverrides {
+            max_cyclomatic: None,
+            max_cognitive: None,
+            max_crap: opts.max_crap,
+        },
         top: None,
-        sort: SortBy::Cyclomatic,
+        sort: fallow_engine::HealthSort::Cyclomatic,
         production: opts.production_health.unwrap_or(opts.production),
         production_override: opts.production_health,
         changed_since,
@@ -2581,7 +2573,6 @@ fn build_audit_health_options<'a>(
         baseline: opts.health_baseline,
         save_baseline: None,
         complexity: true,
-        complexity_breakdown: false,
         file_scores: false,
         coverage_gaps: false,
         config_activates_coverage_gaps: false,
@@ -2595,30 +2586,32 @@ fn build_audit_health_options<'a>(
         enforce_coverage_gap_gate: false,
         effort: None,
         score: false,
-        min_score: None,
+        gates: fallow_engine::HealthGateOptions::default(),
         since: None,
         min_commits: None,
         explain: opts.explain,
         summary: false,
         save_snapshot: None,
         trend: false,
-        group_by: opts.group_by,
-        coverage: opts.coverage,
-        coverage_root: opts.coverage_root,
+        coverage_inputs: fallow_engine::HealthCoverageInputs {
+            coverage: opts.coverage,
+            coverage_root: opts.coverage_root,
+        },
         performance: opts.performance,
-        min_severity: None,
-        report_only: false,
         runtime_coverage,
         churn_file: None,
+        complexity_breakdown: false,
+        group_by: opts.group_by.map(Into::into),
     }
 }
 
 #[path = "audit_output.rs"]
 mod output;
 
+pub use output::audit_json_header_input;
 pub use output::{
     insert_audit_dead_code_json, insert_audit_duplication_json, insert_audit_health_json,
-    insert_audit_json_header, print_audit_findings, print_audit_result,
+    print_audit_findings, print_audit_result,
 };
 
 /// Run the full audit command: execute analyses, print results, return exit code.
@@ -2627,7 +2620,7 @@ pub use output::{
 /// clears. The marker only affects the local Impact store; it never changes
 /// the verdict, exit code, or output.
 pub fn run_audit(opts: &AuditOptions<'_>, gate_marker: Option<&str>) -> ExitCode {
-    if let Err(e) = crate::health::scoring::validate_coverage_root_absolute(opts.coverage_root) {
+    if let Err(e) = fallow_engine::validate_coverage_root_absolute(opts.coverage_root) {
         return emit_error(&e, 2, opts.output);
     }
     let coverage_resolved = opts
@@ -2656,7 +2649,7 @@ pub fn run_audit(opts: &AuditOptions<'_>, gate_marker: Option<&str>) -> ExitCode
                 .as_ref()
                 .map(|d| crate::impact::collect_clone_findings(&d.report))
                 .unwrap_or_default();
-            let empty_supps: Vec<fallow_core::results::ActiveSuppression> = Vec::new();
+            let empty_supps: Vec<fallow_engine::results::ActiveSuppression> = Vec::new();
             let suppressions = result.check.as_ref().map_or(empty_supps.as_slice(), |c| {
                 c.results.active_suppressions.as_slice()
             });
@@ -4073,7 +4066,7 @@ mod tests {
         let second = config_file_fingerprint(&opts).expect("fingerprint should be recomputed");
 
         assert_ne!(
-            first["resolved_hash"], second["resolved_hash"],
+            first.resolved_hash, second.resolved_hash,
             "extended config changes must invalidate cached base snapshots"
         );
     }

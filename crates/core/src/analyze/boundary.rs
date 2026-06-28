@@ -16,7 +16,7 @@ use super::{LineOffsetsMap, byte_offset_to_line_col};
 /// is not allowed to import from, a `BoundaryViolation` is emitted.
 #[deprecated(
     since = "2.76.0",
-    note = "fallow_core is internal; use fallow_cli::programmatic::detect_boundary_violations instead. NOTE: replacement returns serde_json::Value, not typed AnalysisResults. See docs/fallow-core-migration.md and ADR-008."
+    note = "fallow_core is internal; use fallow_api::detect_boundary_violations instead. NOTE: replacement returns serde_json::Value, not typed AnalysisResults. See docs/fallow-core-migration.md and ADR-008."
 )]
 pub fn find_boundary_violations(
     graph: &ModuleGraph,
@@ -259,7 +259,8 @@ mod tests {
             resolved_dynamic_imports: vec![],
             resolved_dynamic_patterns: vec![],
             member_accesses: vec![],
-            whole_object_uses: vec![],
+            semantic_facts: Box::default(),
+            whole_object_uses: Box::default(),
             has_cjs_exports: false,
             has_angular_component_template_url: false,
             unused_import_bindings: FxHashSet::default(),

@@ -9,9 +9,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
-use fallow_cli::programmatic::{
+use fallow_api::{
     AnalysisOptions, ComplexityOptions, DeadCodeOptions, DuplicationMode, DuplicationOptions,
-    compute_health, detect_circular_dependencies, detect_dead_code, detect_duplication,
+    EngineHealthRunner, compute_health_with_runner, detect_circular_dependencies, detect_dead_code,
+    detect_duplication,
 };
 use fallow_core::{
     cache::{CacheStore, module_to_cached},
@@ -753,7 +754,10 @@ fn create_warm_hash_workspace_project() -> ExtractCacheInput {
 
     for file in &files {
         let module = parse_single_file(file).expect("benchmark fixture parses");
-        let cached = module_to_cached(&module, 1, 1);
+        let cached = module_to_cached(
+            &module,
+            fallow_types::source_fingerprint::SourceFingerprint::new(1, 1),
+        );
         cache.insert(&file.path, cached);
     }
 
@@ -774,7 +778,8 @@ fn create_warm_complexity_health_project() -> CommandInput {
         targets: true,
         ..ComplexityOptions::default()
     };
-    let _ = compute_health(&options).expect("warm complexity cache priming succeeds");
+    let _ = compute_health_with_runner(&options, &EngineHealthRunner)
+        .expect("warm complexity cache priming succeeds");
     input
 }
 
@@ -912,7 +917,7 @@ fn health_complex_service_scoring(c: &mut Criterion) {
                     targets: true,
                     ..ComplexityOptions::default()
                 };
-                compute_health(&options)
+                compute_health_with_runner(&options, &EngineHealthRunner)
             },
             BatchSize::LargeInput,
         );
@@ -932,7 +937,7 @@ fn health_complex_service_warm_complexity_hit(c: &mut Criterion) {
                     targets: true,
                     ..ComplexityOptions::default()
                 };
-                compute_health(&options)
+                compute_health_with_runner(&options, &EngineHealthRunner)
             },
             BatchSize::LargeInput,
         );
@@ -950,7 +955,7 @@ fn health_css_tailwind_design_system(c: &mut Criterion) {
                     score: true,
                     ..ComplexityOptions::default()
                 };
-                compute_health(&options)
+                compute_health_with_runner(&options, &EngineHealthRunner)
             },
             BatchSize::LargeInput,
         );

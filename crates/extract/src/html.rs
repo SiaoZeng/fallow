@@ -5,8 +5,7 @@
 //! transitive imports) are reachable from the HTML entry point.
 //!
 //! Also scans for Angular template syntax (`{{ }}`, `[prop]`, `(event)`, `@if`, etc.)
-//! and stores referenced identifiers as `MemberAccess` entries with a sentinel object,
-//! enabling the analysis phase to credit component class members used in external templates.
+//! and stores referenced identifiers as typed semantic facts.
 
 use std::path::Path;
 use std::sync::LazyLock;
@@ -14,8 +13,11 @@ use std::sync::LazyLock;
 use oxc_span::Span;
 
 use crate::asset_url::normalize_asset_url;
-use crate::sfc_template::angular::{self, ANGULAR_TPL_SENTINEL};
-use crate::{ImportInfo, ImportedName, MemberAccess, ModuleInfo};
+use crate::sfc_template::angular;
+use crate::{
+    AngularTemplateMemberAccessFact, ImportInfo, ImportedName, MemberAccess, ModuleInfo,
+    SemanticFact,
+};
 use fallow_types::discover::FileId;
 
 /// Regex to match HTML comments (`<!-- ... -->`) for stripping before extraction.
@@ -154,6 +156,7 @@ pub(crate) fn parse_html_to_module(file_id: FileId, source: &str, content_hash: 
 struct HtmlModuleParts {
     imports: Vec<ImportInfo>,
     member_accesses: Vec<MemberAccess>,
+    semantic_facts: Vec<SemanticFact>,
     security_sinks: Vec<fallow_types::extract::SinkSite>,
     angular_used_selectors: Vec<String>,
     has_dynamic_component_render: bool,
@@ -185,14 +188,15 @@ fn collect_html_module_parts(source: &str, need_complexity: bool) -> HtmlModuleP
         member_accesses: template_member_accesses,
         security_sinks,
     } = angular::collect_angular_template_refs(source);
-    let mut member_accesses: Vec<MemberAccess> = identifiers
-        .into_iter()
-        .map(|name| MemberAccess {
-            object: ANGULAR_TPL_SENTINEL.to_string(),
-            member: name,
+    let identifiers: Vec<String> = identifiers.into_iter().collect();
+    let semantic_facts: Vec<SemanticFact> = identifiers
+        .iter()
+        .cloned()
+        .map(|member| {
+            SemanticFact::AngularTemplateMemberAccess(AngularTemplateMemberAccessFact { member })
         })
         .collect();
-    member_accesses.extend(template_member_accesses);
+    let member_accesses = template_member_accesses;
 
     // Angular external template (`templateUrl`): harvest the custom element
     // selector tags rendered here so the Angular `unrendered-component` detector
@@ -212,6 +216,7 @@ fn collect_html_module_parts(source: &str, need_complexity: bool) -> HtmlModuleP
     HtmlModuleParts {
         imports,
         member_accesses,
+        semantic_facts,
         security_sinks,
         angular_used_selectors,
         has_dynamic_component_render,
@@ -244,6 +249,7 @@ fn html_module_info(
     let HtmlModuleParts {
         imports,
         member_accesses,
+        semantic_facts,
         security_sinks,
         angular_used_selectors,
         has_dynamic_component_render,
@@ -258,9 +264,10 @@ fn html_module_info(
         dynamic_imports: Vec::new(),
         dynamic_import_patterns: Vec::new(),
         require_calls: Vec::new(),
-        package_path_references: Vec::new(),
+        package_path_references: Box::default(),
         member_accesses,
-        whole_object_uses: Vec::new(),
+        semantic_facts: semantic_facts.into(),
+        whole_object_uses: Box::default(),
         has_cjs_exports: false,
         has_angular_component_template_url: false,
         content_hash,
@@ -764,21 +771,31 @@ mod tests {
              <button (click)=\"onButtonClick()\">Toggle</button>",
             0,
         );
-        let names: rustc_hash::FxHashSet<&str> = info
-            .member_accesses
+        let fact_names: rustc_hash::FxHashSet<&str> = info
+            .semantic_facts
             .iter()
-            .filter(|a| a.object == ANGULAR_TPL_SENTINEL)
-            .map(|a| a.member.as_str())
+            .filter_map(|fact| {
+                if let SemanticFact::AngularTemplateMemberAccess(access) = fact {
+                    Some(access.member.as_str())
+                } else {
+                    None
+                }
+            })
             .collect();
-        assert!(names.contains("title"), "should contain 'title'");
+        assert!(fact_names.contains("title"), "should contain 'title'");
         assert!(
-            names.contains("isHighlighted"),
+            fact_names.contains("isHighlighted"),
             "should contain 'isHighlighted'"
         );
-        assert!(names.contains("greeting"), "should contain 'greeting'");
+        assert!(fact_names.contains("greeting"), "should contain 'greeting'");
         assert!(
-            names.contains("onButtonClick"),
+            fact_names.contains("onButtonClick"),
             "should contain 'onButtonClick'"
+        );
+        assert!(
+            info.member_accesses.is_empty(),
+            "Angular template refs should emit typed facts instead of member accesses: {:?}",
+            info.member_accesses
         );
     }
 

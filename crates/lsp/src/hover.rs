@@ -3,27 +3,52 @@ use std::path::Path;
 
 use ls_types::{Hover, HoverContents, MarkupContent, MarkupKind, Position, Range};
 
-use fallow_core::duplicates::DuplicationReport;
-use fallow_core::results::{AnalysisResults, SecurityFindingKind};
+use fallow_api::editor_results::SecurityFindingKind;
+use fallow_api::{
+    EditorAnalysisResults as AnalysisResults, EditorDuplicationReport as DuplicationReport,
+};
 
 use crate::diagnostics::security::security_label;
 use crate::markdown::format_inline_code;
 
-/// Build hover information for a position in a file.
+/// Typed input for building hover information from editor analysis state.
+#[derive(Clone, Copy)]
+pub struct HoverInput<'a> {
+    pub results: &'a AnalysisResults,
+    pub duplication: &'a DuplicationReport,
+    pub file_path: &'a Path,
+    pub position: Position,
+}
+
+impl<'a> HoverInput<'a> {
+    #[must_use]
+    pub const fn new(
+        results: &'a AnalysisResults,
+        duplication: &'a DuplicationReport,
+        file_path: &'a Path,
+        position: Position,
+    ) -> Self {
+        Self {
+            results,
+            duplication,
+            file_path,
+            position,
+        }
+    }
+}
+
+/// Build hover information from a typed editor analysis input.
 ///
-/// Returns a hover with markdown content describing:
-/// - Unused export/type status with explanation
-/// - Used export reference counts with file locations
-/// - Unused file status
-/// - Unused member status
-/// - Unresolved import details
-/// - Code duplication instance details with other locations
-pub fn build_hover(
-    results: &AnalysisResults,
-    duplication: &DuplicationReport,
-    file_path: &Path,
-    position: Position,
-) -> Option<Hover> {
+/// Returns a hover with markdown content describing unused code, unresolved
+/// imports, security candidates, React component intelligence, or duplication
+/// evidence for the requested file position.
+pub fn build_hover(input: HoverInput<'_>) -> Option<Hover> {
+    let HoverInput {
+        results,
+        duplication,
+        file_path,
+        position,
+    } = input;
     if let Some(hover) = check_unused_file(results, file_path) {
         return Some(hover);
     }
@@ -98,6 +123,16 @@ pub fn build_hover(
     None
 }
 
+#[cfg(test)]
+fn build_hover_for_test(
+    results: &AnalysisResults,
+    duplication: &DuplicationReport,
+    file_path: &Path,
+    position: Position,
+) -> Option<Hover> {
+    build_hover(HoverInput::new(results, duplication, file_path, position))
+}
+
 /// Check if the position is on a security candidate's anchor line.
 ///
 /// The hover is a confidence-first TRIAGE surface, not a port of the CLI's
@@ -148,7 +183,7 @@ fn check_security(
 
 /// Build the confidence-first triage markdown body for a security candidate.
 fn security_hover_markdown(
-    finding: &fallow_core::results::SecurityFinding,
+    finding: &fallow_api::editor_results::SecurityFinding,
     file_path: &Path,
 ) -> String {
     let label = security_label(finding);
@@ -203,7 +238,7 @@ fn security_hover_markdown(
 }
 
 /// Kind-appropriate "Next:" guidance line for a security candidate.
-fn security_next_step(finding: &fallow_core::results::SecurityFinding) -> &'static str {
+fn security_next_step(finding: &fallow_api::editor_results::SecurityFinding) -> &'static str {
     match finding.kind {
         SecurityFindingKind::ClientServerLeak => {
             "Next: check whether the import is type-only, server-only, or behind a build-time \
@@ -257,12 +292,12 @@ fn check_unused_export(
     for (exports, kind_label) in [
         (
             Box::new(unused_exports_iter)
-                as Box<dyn Iterator<Item = &fallow_core::results::UnusedExport>>,
+                as Box<dyn Iterator<Item = &fallow_api::editor_results::UnusedExport>>,
             "Export",
         ),
         (
             Box::new(unused_types_iter)
-                as Box<dyn Iterator<Item = &fallow_core::results::UnusedExport>>,
+                as Box<dyn Iterator<Item = &fallow_api::editor_results::UnusedExport>>,
             "Type export",
         ),
     ] {
@@ -356,7 +391,7 @@ fn check_used_export(
 
 /// Build the reference-count markdown body for a used export, listing up to
 /// ten reference locations and a "... and N more" overflow line.
-fn used_export_hover_markdown(usage: &fallow_core::results::ExportUsage) -> String {
+fn used_export_hover_markdown(usage: &fallow_api::editor_results::ExportUsage) -> String {
     let ref_word = if usage.reference_count == 1 {
         "file"
     } else {
@@ -411,15 +446,18 @@ fn check_unused_member(
     let store_iter = results.unused_store_members.iter().map(|f| &f.member);
     for (members, kind_label) in [
         (
-            Box::new(enum_iter) as Box<dyn Iterator<Item = &fallow_core::results::UnusedMember>>,
+            Box::new(enum_iter)
+                as Box<dyn Iterator<Item = &fallow_api::editor_results::UnusedMember>>,
             "Enum member",
         ),
         (
-            Box::new(class_iter) as Box<dyn Iterator<Item = &fallow_core::results::UnusedMember>>,
+            Box::new(class_iter)
+                as Box<dyn Iterator<Item = &fallow_api::editor_results::UnusedMember>>,
             "Class member",
         ),
         (
-            Box::new(store_iter) as Box<dyn Iterator<Item = &fallow_core::results::UnusedMember>>,
+            Box::new(store_iter)
+                as Box<dyn Iterator<Item = &fallow_api::editor_results::UnusedMember>>,
             "Store member",
         ),
     ] {
@@ -1007,7 +1045,7 @@ fn check_react_component_intel(
 /// Build the component summary line for the hover, matching the code-lens
 /// title format: `rendered 12x (8 parents) · 5 props · 9 hooks (4 state, ...)`.
 /// Zero segments are omitted; singular/plural is honored.
-fn react_component_summary(intel: &fallow_core::results::ReactComponentIntel) -> String {
+fn react_component_summary(intel: &fallow_api::editor_results::ReactComponentIntel) -> String {
     let mut segments: Vec<String> = Vec::new();
     if intel.render_sites > 0 {
         let parents = intel_pluralize(intel.distinct_parents, "parent");
@@ -1027,7 +1065,7 @@ fn react_component_summary(intel: &fallow_core::results::ReactComponentIntel) ->
 
 /// `N hooks (a state, b effect, ...)` or `None` when the component uses no
 /// hooks (kind sub-counts omitted when zero).
-fn intel_hook_segment(hooks: &fallow_core::results::ReactHookSummary) -> Option<String> {
+fn intel_hook_segment(hooks: &fallow_api::editor_results::ReactHookSummary) -> Option<String> {
     let total = u32::from(hooks.state)
         + u32::from(hooks.effect)
         + u32::from(hooks.memo)
@@ -1163,8 +1201,8 @@ fn check_duplication(
 /// Build the markdown body for a duplication hover: the block size plus up to
 /// ten other instance locations and a "... and N more" overflow line.
 fn duplication_hover_markdown(
-    group: &fallow_core::duplicates::CloneGroup,
-    instance: &fallow_core::duplicates::CloneInstance,
+    group: &fallow_api::editor_duplicates::CloneGroup,
+    instance: &fallow_api::editor_duplicates::CloneInstance,
 ) -> String {
     let other_count = group.instances.len() - 1;
     let instance_word = if other_count == 1 {
@@ -1217,9 +1255,9 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    use fallow_core::duplicates::{CloneGroup, CloneInstance, DuplicationStats};
-    use fallow_core::extract::MemberKind;
-    use fallow_core::results::{
+    use fallow_api::editor_duplicates::{CloneGroup, CloneInstance, DuplicationStats};
+    use fallow_api::editor_extract::MemberKind;
+    use fallow_api::editor_results::{
         ExportUsage, ReactComponentIntel, ReactHookSummary, ReactPropDrill, ReactPropIntel,
         ReferenceLocation, SecuritySeverity, UnresolvedImport, UnresolvedImportFinding,
         UnusedClassMemberFinding, UnusedEnumMemberFinding, UnusedExport, UnusedExportFinding,
@@ -1262,7 +1300,7 @@ mod tests {
             character: 0,
         };
 
-        let hover = build_hover(&results, &duplication, &path, pos);
+        let hover = build_hover_for_test(&results, &duplication, &path, pos);
         assert!(hover.is_none());
     }
 
@@ -1282,7 +1320,7 @@ mod tests {
             character: 0,
         };
 
-        let hover = build_hover(&results, &duplication, &path, pos).unwrap();
+        let hover = build_hover_for_test(&results, &duplication, &path, pos).unwrap();
         let value = markup_value(&hover);
         assert!(value.contains("not imported"));
         assert!(value.contains("entry point"));
@@ -1314,7 +1352,7 @@ mod tests {
             character: 10,
         };
 
-        let hover = build_hover(&results, &duplication, &path, pos).unwrap();
+        let hover = build_hover_for_test(&results, &duplication, &path, pos).unwrap();
         let value = markup_value(&hover);
         assert!(value.contains("helper"));
         assert!(value.contains("not imported"));
@@ -1346,7 +1384,7 @@ mod tests {
             character: 3,
         };
 
-        let hover = build_hover(&results, &duplication, &path, pos).unwrap();
+        let hover = build_hover_for_test(&results, &duplication, &path, pos).unwrap();
         let value = markup_value(&hover);
         assert!(value.contains("Type export"));
         assert!(value.contains("MyType"));
@@ -1382,7 +1420,7 @@ mod tests {
             character: 10,
         };
 
-        let hover = build_hover(&results, &duplication, &path, pos).unwrap();
+        let hover = build_hover_for_test(&results, &duplication, &path, pos).unwrap();
         let value = markup_value(&hover);
         assert!(value.contains("format"));
         assert!(value.contains("2 files"));
@@ -1413,7 +1451,7 @@ mod tests {
             character: 0,
         };
 
-        let hover = build_hover(&results, &duplication, &path, pos).unwrap();
+        let hover = build_hover_for_test(&results, &duplication, &path, pos).unwrap();
         let value = markup_value(&hover);
         assert!(value.contains("1 file"));
         assert!(!value.contains("1 files"));
@@ -1438,7 +1476,7 @@ mod tests {
             character: 0,
         };
 
-        let hover = build_hover(&results, &duplication, &path, pos);
+        let hover = build_hover_for_test(&results, &duplication, &path, pos);
         assert!(hover.is_none());
     }
 
@@ -1463,7 +1501,7 @@ mod tests {
             character: 5,
         };
 
-        let hover = build_hover(&results, &duplication, &path, pos).unwrap();
+        let hover = build_hover_for_test(&results, &duplication, &path, pos).unwrap();
         let value = markup_value(&hover);
         assert!(value.contains("Color.Blue"));
         assert!(value.contains("never used"));
@@ -1490,7 +1528,7 @@ mod tests {
             character: 6,
         };
 
-        let hover = build_hover(&results, &duplication, &path, pos).unwrap();
+        let hover = build_hover_for_test(&results, &duplication, &path, pos).unwrap();
         let value = markup_value(&hover);
         assert!(value.contains("UserService.reset"));
         assert!(value.contains("Class member"));
@@ -1517,7 +1555,7 @@ mod tests {
             character: 6,
         };
 
-        let hover = build_hover(&results, &duplication, &path, pos).unwrap();
+        let hover = build_hover_for_test(&results, &duplication, &path, pos).unwrap();
         let value = markup_value(&hover);
         assert!(value.contains("useStore.reset"));
         assert!(value.contains("Store member"));
@@ -1543,7 +1581,7 @@ mod tests {
             character: 25, // inside the specifier range [20, 38)
         };
 
-        let hover = build_hover(&results, &duplication, &path, pos).unwrap();
+        let hover = build_hover_for_test(&results, &duplication, &path, pos).unwrap();
         let value = markup_value(&hover);
         assert!(value.contains("./missing-module"));
         assert!(value.contains("Cannot resolve"));
@@ -1599,7 +1637,7 @@ mod tests {
             character: 5,
         };
 
-        let hover = build_hover(&results, &duplication, &path_a, pos).unwrap();
+        let hover = build_hover_for_test(&results, &duplication, &path_a, pos).unwrap();
         let value = markup_value(&hover);
         assert!(value.contains("6 lines"));
         assert!(value.contains("50 tokens"));
@@ -1649,14 +1687,14 @@ mod tests {
             line: 5,
             character: 0,
         };
-        let hover = build_hover(&results, &duplication, &path, pos);
+        let hover = build_hover_for_test(&results, &duplication, &path, pos);
         assert!(hover.is_none());
 
         let pos = Position {
             line: 20,
             character: 0,
         };
-        let hover = build_hover(&results, &duplication, &path, pos);
+        let hover = build_hover_for_test(&results, &duplication, &path, pos);
         assert!(hover.is_none());
     }
 
@@ -1684,7 +1722,7 @@ mod tests {
             character: 0,
         };
 
-        let hover = build_hover(&results, &duplication, &path, pos).unwrap();
+        let hover = build_hover_for_test(&results, &duplication, &path, pos).unwrap();
         let value = markup_value(&hover);
         assert!(value.contains("not imported"));
         assert!(value.contains("entry point"));
@@ -1712,7 +1750,7 @@ mod tests {
             line: 10,
             character: 0,
         };
-        let hover = build_hover(&results, &duplication, &path, pos);
+        let hover = build_hover_for_test(&results, &duplication, &path, pos);
         assert!(hover.is_none());
     }
 
@@ -1738,14 +1776,14 @@ mod tests {
             line: 4,
             character: 20,
         };
-        let hover = build_hover(&results, &duplication, &path, pos);
+        let hover = build_hover_for_test(&results, &duplication, &path, pos);
         assert!(hover.is_none());
 
         let pos = Position {
             line: 4,
             character: 3,
         };
-        let hover = build_hover(&results, &duplication, &path, pos);
+        let hover = build_hover_for_test(&results, &duplication, &path, pos);
         assert!(hover.is_none());
     }
 
@@ -1807,7 +1845,7 @@ mod tests {
             line: 2,
             character: 0,
         };
-        let hover = build_hover(&results, &duplication, &path_a, pos).unwrap();
+        let hover = build_hover_for_test(&results, &duplication, &path_a, pos).unwrap();
         let value = markup_value(&hover);
         assert!(value.contains("2 other instances"));
         assert!(value.contains("b.ts"));
@@ -1833,7 +1871,7 @@ mod tests {
             character: 0,
         };
 
-        let hover = build_hover(&results, &duplication, &path, pos).unwrap();
+        let hover = build_hover_for_test(&results, &duplication, &path, pos).unwrap();
         let value = markup_value(&hover);
         assert!(
             value.ends_with('.'),
@@ -1871,7 +1909,7 @@ mod tests {
             character: 3,
         };
 
-        let hover = build_hover(&results, &duplication, &path, pos).unwrap();
+        let hover = build_hover_for_test(&results, &duplication, &path, pos).unwrap();
         let value = markup_value(&hover);
         assert!(value.contains("15 files"));
         for i in 1..=10 {
@@ -1915,7 +1953,7 @@ mod tests {
             character: 0,
         };
 
-        let hover = build_hover(&results, &duplication, &path, pos).unwrap();
+        let hover = build_hover_for_test(&results, &duplication, &path, pos).unwrap();
         let value = markup_value(&hover);
         for i in 1..=10 {
             assert!(value.contains(&format!("ref{i}.ts")));
@@ -1943,25 +1981,25 @@ mod tests {
             line: 0,
             character: 10,
         };
-        assert!(build_hover(&results, &duplication, &path, pos).is_some());
+        assert!(build_hover_for_test(&results, &duplication, &path, pos).is_some());
 
         let pos = Position {
             line: 0,
             character: 16,
         };
-        assert!(build_hover(&results, &duplication, &path, pos).is_some());
+        assert!(build_hover_for_test(&results, &duplication, &path, pos).is_some());
 
         let pos = Position {
             line: 0,
             character: 17,
         };
-        assert!(build_hover(&results, &duplication, &path, pos).is_none());
+        assert!(build_hover_for_test(&results, &duplication, &path, pos).is_none());
 
         let pos = Position {
             line: 0,
             character: 9,
         };
-        assert!(build_hover(&results, &duplication, &path, pos).is_none());
+        assert!(build_hover_for_test(&results, &duplication, &path, pos).is_none());
     }
 
     #[test]
@@ -1986,19 +2024,19 @@ mod tests {
             line: 0,
             character: 7,
         };
-        assert!(build_hover(&results, &duplication, &path, pos).is_some());
+        assert!(build_hover_for_test(&results, &duplication, &path, pos).is_some());
 
         let pos = Position {
             line: 0,
             character: 9,
         };
-        assert!(build_hover(&results, &duplication, &path, pos).is_some());
+        assert!(build_hover_for_test(&results, &duplication, &path, pos).is_some());
 
         let pos = Position {
             line: 0,
             character: 10,
         };
-        assert!(build_hover(&results, &duplication, &path, pos).is_none());
+        assert!(build_hover_for_test(&results, &duplication, &path, pos).is_none());
     }
 
     #[test]
@@ -2022,13 +2060,13 @@ mod tests {
             line: 2,
             character: 4,
         };
-        assert!(build_hover(&results, &duplication, &path, pos).is_some());
+        assert!(build_hover_for_test(&results, &duplication, &path, pos).is_some());
 
         let pos = Position {
             line: 2,
             character: 7,
         };
-        assert!(build_hover(&results, &duplication, &path, pos).is_none());
+        assert!(build_hover_for_test(&results, &duplication, &path, pos).is_none());
     }
 
     #[test]
@@ -2071,7 +2109,7 @@ mod tests {
             line: 2,
             character: 0,
         };
-        let hover = build_hover(&results, &duplication, &path_main, pos).unwrap();
+        let hover = build_hover_for_test(&results, &duplication, &path_main, pos).unwrap();
         let value = markup_value(&hover);
         assert!(value.contains("12 other instances"));
         for i in 1..=10 {
@@ -2115,7 +2153,7 @@ mod tests {
             character: 1,
         };
 
-        let hover = build_hover(&results, &duplication, &path, pos).unwrap();
+        let hover = build_hover_for_test(&results, &duplication, &path, pos).unwrap();
         let value = markup_value(&hover);
         assert!(value.contains("not imported"));
     }
@@ -2143,7 +2181,7 @@ mod tests {
             character: 1,
         };
 
-        let hover = build_hover(&results, &duplication, &path, pos).unwrap();
+        let hover = build_hover_for_test(&results, &duplication, &path, pos).unwrap();
         let value = markup_value(&hover);
 
         assert!(value.contains("`[click](command:vscode.open?evil)`"));
@@ -2172,7 +2210,7 @@ mod tests {
             character: 1,
         };
 
-        let hover = build_hover(&results, &duplication, &path, pos).unwrap();
+        let hover = build_hover_for_test(&results, &duplication, &path, pos).unwrap();
         let value = markup_value(&hover);
 
         assert!(value.contains("``evil`](command:foo)``"));
@@ -2203,16 +2241,16 @@ mod tests {
             line: 0,
             character: 0,
         };
-        assert!(build_hover(&results, &duplication, &path_b, pos).is_none());
+        assert!(build_hover_for_test(&results, &duplication, &path_b, pos).is_none());
     }
 
-    fn tainted_sink_finding(path: PathBuf) -> fallow_core::results::SecurityFinding {
-        fallow_core::results::SecurityFinding {
+    fn tainted_sink_finding(path: PathBuf) -> fallow_api::editor_results::SecurityFinding {
+        fallow_api::editor_results::SecurityFinding {
             finding_id: String::new(),
-            candidate: fallow_core::results::SecurityCandidate::default(),
+            candidate: fallow_api::editor_results::SecurityCandidate::default(),
             taint_flow: None,
             attack_surface: None,
-            kind: fallow_core::results::SecurityFindingKind::TaintedSink,
+            kind: fallow_api::editor_results::SecurityFindingKind::TaintedSink,
             category: Some("dangerous-html".to_string()),
             cwe: Some(79),
             path,
@@ -2225,7 +2263,7 @@ mod tests {
             trace: vec![],
             actions: vec![],
             dead_code: None,
-            reachability: Some(fallow_core::results::SecurityReachability {
+            reachability: Some(fallow_api::editor_results::SecurityReachability {
                 reachable_from_entry: true,
                 reachable_from_untrusted_source: false,
                 taint_confidence: None,
@@ -2252,7 +2290,7 @@ mod tests {
             character: 10,
         };
 
-        let hover = build_hover(&results, &duplication, &path, pos).unwrap();
+        let hover = build_hover_for_test(&results, &duplication, &path, pos).unwrap();
         let value = markup_value(&hover);
         assert!(value.contains("security candidate"));
         assert!(value.contains("unverified"));
@@ -2283,14 +2321,14 @@ mod tests {
             line: 20,
             character: 6,
         };
-        assert!(build_hover(&results, &duplication, &path, pos).is_none());
+        assert!(build_hover_for_test(&results, &duplication, &path, pos).is_none());
 
         // Before the anchor column.
         let pos = Position {
             line: 7,
             character: 2,
         };
-        assert!(build_hover(&results, &duplication, &path, pos).is_none());
+        assert!(build_hover_for_test(&results, &duplication, &path, pos).is_none());
     }
 
     #[test]
@@ -2307,7 +2345,7 @@ mod tests {
             character: 6,
         };
 
-        let hover = build_hover(&results, &duplication, &path, pos).unwrap();
+        let hover = build_hover_for_test(&results, &duplication, &path, pos).unwrap();
         let value = markup_value(&hover);
         assert!(value.contains("`[click](command:vscode.open?evil)`"));
     }
@@ -2326,8 +2364,8 @@ mod tests {
         let path = root.join("src/components/MyCard.vue");
         let mut results = AnalysisResults::default();
         results.unrendered_components.push(
-            fallow_core::results::UnrenderedComponentFinding::with_actions(
-                fallow_core::results::UnrenderedComponent {
+            fallow_api::editor_results::UnrenderedComponentFinding::with_actions(
+                fallow_api::editor_results::UnrenderedComponent {
                     path: path.clone(),
                     component_name: "MyCard".to_string(),
                     framework: "vue".to_string(),
@@ -2343,7 +2381,7 @@ mod tests {
             character: 3,
         };
 
-        let hover = build_hover(&results, &duplication, &path, pos).unwrap();
+        let hover = build_hover_for_test(&results, &duplication, &path, pos).unwrap();
         let value = markup_value(&hover);
         assert!(value.contains("MyCard"));
         assert!(value.contains("rendered nowhere"));
@@ -2359,8 +2397,8 @@ mod tests {
         let path = root.join("src/components/MyCard.vue");
         let mut results = AnalysisResults::default();
         results.unrendered_components.push(
-            fallow_core::results::UnrenderedComponentFinding::with_actions(
-                fallow_core::results::UnrenderedComponent {
+            fallow_api::editor_results::UnrenderedComponentFinding::with_actions(
+                fallow_api::editor_results::UnrenderedComponent {
                     path: path.clone(),
                     component_name: "MyCard".to_string(),
                     framework: "vue".to_string(),
@@ -2375,7 +2413,7 @@ mod tests {
             line: 5,
             character: 0,
         };
-        assert!(build_hover(&results, &duplication, &path, pos).is_none());
+        assert!(build_hover_for_test(&results, &duplication, &path, pos).is_none());
     }
 
     #[test]
@@ -2384,8 +2422,8 @@ mod tests {
         let path = root.join("src/components/MyCard.vue");
         let mut results = AnalysisResults::default();
         results.unrendered_components.push(
-            fallow_core::results::UnrenderedComponentFinding::with_actions(
-                fallow_core::results::UnrenderedComponent {
+            fallow_api::editor_results::UnrenderedComponentFinding::with_actions(
+                fallow_api::editor_results::UnrenderedComponent {
                     path: path.clone(),
                     component_name: "MyCard".to_string(),
                     framework: "vue".to_string(),
@@ -2400,7 +2438,7 @@ mod tests {
             line: 0,
             character: 2,
         };
-        assert!(build_hover(&results, &duplication, &path, pos).is_none());
+        assert!(build_hover_for_test(&results, &duplication, &path, pos).is_none());
     }
 
     // -------------------------------------------------------------------------
@@ -2417,8 +2455,8 @@ mod tests {
         let path = root.join("src/components/Button.vue");
         let mut results = AnalysisResults::default();
         results.unused_component_props.push(
-            fallow_core::results::UnusedComponentPropFinding::with_actions(
-                fallow_core::results::UnusedComponentProp {
+            fallow_api::editor_results::UnusedComponentPropFinding::with_actions(
+                fallow_api::editor_results::UnusedComponentProp {
                     path: path.clone(),
                     component_name: "Button".to_string(),
                     prop_name: "variant".to_string(),
@@ -2433,7 +2471,7 @@ mod tests {
             character: 5,
         };
 
-        let hover = build_hover(&results, &duplication, &path, pos).unwrap();
+        let hover = build_hover_for_test(&results, &duplication, &path, pos).unwrap();
         let value = markup_value(&hover);
         assert!(value.contains("variant"));
         assert!(value.contains("declared but referenced nowhere"));
@@ -2449,8 +2487,8 @@ mod tests {
         let path = root.join("src/components/Button.vue");
         let mut results = AnalysisResults::default();
         results.unused_component_props.push(
-            fallow_core::results::UnusedComponentPropFinding::with_actions(
-                fallow_core::results::UnusedComponentProp {
+            fallow_api::editor_results::UnusedComponentPropFinding::with_actions(
+                fallow_api::editor_results::UnusedComponentProp {
                     path: path.clone(),
                     component_name: "Button".to_string(),
                     prop_name: "variant".to_string(),
@@ -2464,7 +2502,7 @@ mod tests {
             line: 2,
             character: 50,
         };
-        assert!(build_hover(&results, &duplication, &path, pos).is_none());
+        assert!(build_hover_for_test(&results, &duplication, &path, pos).is_none());
     }
 
     // -------------------------------------------------------------------------
@@ -2481,8 +2519,8 @@ mod tests {
         let path = root.join("src/components/Form.vue");
         let mut results = AnalysisResults::default();
         results.unused_component_emits.push(
-            fallow_core::results::UnusedComponentEmitFinding::with_actions(
-                fallow_core::results::UnusedComponentEmit {
+            fallow_api::editor_results::UnusedComponentEmitFinding::with_actions(
+                fallow_api::editor_results::UnusedComponentEmit {
                     path: path.clone(),
                     component_name: "Form".to_string(),
                     emit_name: "submit".to_string(),
@@ -2497,7 +2535,7 @@ mod tests {
             character: 7,
         };
 
-        let hover = build_hover(&results, &duplication, &path, pos).unwrap();
+        let hover = build_hover_for_test(&results, &duplication, &path, pos).unwrap();
         let value = markup_value(&hover);
         assert!(value.contains("submit"));
         assert!(value.contains("declared but emitted nowhere"));
@@ -2513,8 +2551,8 @@ mod tests {
         let path = root.join("src/components/Form.vue");
         let mut results = AnalysisResults::default();
         results.unused_component_emits.push(
-            fallow_core::results::UnusedComponentEmitFinding::with_actions(
-                fallow_core::results::UnusedComponentEmit {
+            fallow_api::editor_results::UnusedComponentEmitFinding::with_actions(
+                fallow_api::editor_results::UnusedComponentEmit {
                     path: path.clone(),
                     component_name: "Form".to_string(),
                     emit_name: "submit".to_string(),
@@ -2528,7 +2566,7 @@ mod tests {
             line: 4,
             character: 100,
         };
-        assert!(build_hover(&results, &duplication, &path, pos).is_none());
+        assert!(build_hover_for_test(&results, &duplication, &path, pos).is_none());
     }
 
     // -------------------------------------------------------------------------
@@ -2545,8 +2583,8 @@ mod tests {
         let path = root.join("src/app/card/card.component.ts");
         let mut results = AnalysisResults::default();
         results.unused_component_inputs.push(
-            fallow_core::results::UnusedComponentInputFinding::with_actions(
-                fallow_core::results::UnusedComponentInput {
+            fallow_api::editor_results::UnusedComponentInputFinding::with_actions(
+                fallow_api::editor_results::UnusedComponentInput {
                     path: path.clone(),
                     component_name: "CardComponent".to_string(),
                     input_name: "title".to_string(),
@@ -2561,7 +2599,7 @@ mod tests {
             character: 4,
         };
 
-        let hover = build_hover(&results, &duplication, &path, pos).unwrap();
+        let hover = build_hover_for_test(&results, &duplication, &path, pos).unwrap();
         let value = markup_value(&hover);
         assert!(value.contains("title"));
         assert!(value.contains("declared but read nowhere"));
@@ -2577,8 +2615,8 @@ mod tests {
         let path = root.join("src/app/card/card.component.ts");
         let mut results = AnalysisResults::default();
         results.unused_component_inputs.push(
-            fallow_core::results::UnusedComponentInputFinding::with_actions(
-                fallow_core::results::UnusedComponentInput {
+            fallow_api::editor_results::UnusedComponentInputFinding::with_actions(
+                fallow_api::editor_results::UnusedComponentInput {
                     path: path.clone(),
                     component_name: "CardComponent".to_string(),
                     input_name: "title".to_string(),
@@ -2592,7 +2630,7 @@ mod tests {
             line: 20,
             character: 2,
         };
-        assert!(build_hover(&results, &duplication, &path, pos).is_none());
+        assert!(build_hover_for_test(&results, &duplication, &path, pos).is_none());
     }
 
     // -------------------------------------------------------------------------
@@ -2609,8 +2647,8 @@ mod tests {
         let path = root.join("src/app/counter/counter.component.ts");
         let mut results = AnalysisResults::default();
         results.unused_component_outputs.push(
-            fallow_core::results::UnusedComponentOutputFinding::with_actions(
-                fallow_core::results::UnusedComponentOutput {
+            fallow_api::editor_results::UnusedComponentOutputFinding::with_actions(
+                fallow_api::editor_results::UnusedComponentOutput {
                     path: path.clone(),
                     component_name: "CounterComponent".to_string(),
                     output_name: "changed".to_string(),
@@ -2625,7 +2663,7 @@ mod tests {
             character: 6,
         };
 
-        let hover = build_hover(&results, &duplication, &path, pos).unwrap();
+        let hover = build_hover_for_test(&results, &duplication, &path, pos).unwrap();
         let value = markup_value(&hover);
         assert!(value.contains("changed"));
         assert!(value.contains("declared but emitted nowhere"));
@@ -2641,8 +2679,8 @@ mod tests {
         let path = root.join("src/app/counter/counter.component.ts");
         let mut results = AnalysisResults::default();
         results.unused_component_outputs.push(
-            fallow_core::results::UnusedComponentOutputFinding::with_actions(
-                fallow_core::results::UnusedComponentOutput {
+            fallow_api::editor_results::UnusedComponentOutputFinding::with_actions(
+                fallow_api::editor_results::UnusedComponentOutput {
                     path: path.clone(),
                     component_name: "CounterComponent".to_string(),
                     output_name: "changed".to_string(),
@@ -2656,7 +2694,7 @@ mod tests {
             line: 9,
             character: 200,
         };
-        assert!(build_hover(&results, &duplication, &path, pos).is_none());
+        assert!(build_hover_for_test(&results, &duplication, &path, pos).is_none());
     }
 
     // -------------------------------------------------------------------------
@@ -2673,8 +2711,8 @@ mod tests {
         let path = root.join("src/lib/Notification.svelte");
         let mut results = AnalysisResults::default();
         results.unused_svelte_events.push(
-            fallow_core::results::UnusedSvelteEventFinding::with_actions(
-                fallow_core::results::UnusedSvelteEvent {
+            fallow_api::editor_results::UnusedSvelteEventFinding::with_actions(
+                fallow_api::editor_results::UnusedSvelteEvent {
                     path: path.clone(),
                     component_name: "Notification".to_string(),
                     event_name: "close".to_string(),
@@ -2689,7 +2727,7 @@ mod tests {
             character: 3,
         };
 
-        let hover = build_hover(&results, &duplication, &path, pos).unwrap();
+        let hover = build_hover_for_test(&results, &duplication, &path, pos).unwrap();
         let value = markup_value(&hover);
         assert!(value.contains("close"));
         assert!(value.contains("dispatched but listened to nowhere"));
@@ -2705,8 +2743,8 @@ mod tests {
         let path = root.join("src/lib/Notification.svelte");
         let mut results = AnalysisResults::default();
         results.unused_svelte_events.push(
-            fallow_core::results::UnusedSvelteEventFinding::with_actions(
-                fallow_core::results::UnusedSvelteEvent {
+            fallow_api::editor_results::UnusedSvelteEventFinding::with_actions(
+                fallow_api::editor_results::UnusedSvelteEvent {
                     path: path.clone(),
                     component_name: "Notification".to_string(),
                     event_name: "close".to_string(),
@@ -2720,7 +2758,7 @@ mod tests {
             line: 10,
             character: 0,
         };
-        assert!(build_hover(&results, &duplication, &path, pos).is_none());
+        assert!(build_hover_for_test(&results, &duplication, &path, pos).is_none());
     }
 
     // -------------------------------------------------------------------------
@@ -2737,8 +2775,8 @@ mod tests {
         let path = root.join("src/app/actions.ts");
         let mut results = AnalysisResults::default();
         results.unused_server_actions.push(
-            fallow_core::results::UnusedServerActionFinding::with_actions(
-                fallow_core::results::UnusedServerAction {
+            fallow_api::editor_results::UnusedServerActionFinding::with_actions(
+                fallow_api::editor_results::UnusedServerAction {
                     path: path.clone(),
                     action_name: "deleteUser".to_string(),
                     line: 8,
@@ -2752,7 +2790,7 @@ mod tests {
             character: 20,
         };
 
-        let hover = build_hover(&results, &duplication, &path, pos).unwrap();
+        let hover = build_hover_for_test(&results, &duplication, &path, pos).unwrap();
         let value = markup_value(&hover);
         assert!(value.contains("deleteUser"));
         assert!(value.contains("use server"));
@@ -2769,8 +2807,8 @@ mod tests {
         let path = root.join("src/app/actions.ts");
         let mut results = AnalysisResults::default();
         results.unused_server_actions.push(
-            fallow_core::results::UnusedServerActionFinding::with_actions(
-                fallow_core::results::UnusedServerAction {
+            fallow_api::editor_results::UnusedServerActionFinding::with_actions(
+                fallow_api::editor_results::UnusedServerAction {
                     path: path.clone(),
                     action_name: "deleteUser".to_string(),
                     line: 8,
@@ -2783,7 +2821,7 @@ mod tests {
             line: 7,
             character: 0,
         };
-        assert!(build_hover(&results, &duplication, &path, pos).is_none());
+        assert!(build_hover_for_test(&results, &duplication, &path, pos).is_none());
     }
 
     // -------------------------------------------------------------------------
@@ -2800,8 +2838,8 @@ mod tests {
         let path = root.join("src/routes/blog/+page.server.ts");
         let mut results = AnalysisResults::default();
         results.unused_load_data_keys.push(
-            fallow_core::results::UnusedLoadDataKeyFinding::with_actions(
-                fallow_core::results::UnusedLoadDataKey {
+            fallow_api::editor_results::UnusedLoadDataKeyFinding::with_actions(
+                fallow_api::editor_results::UnusedLoadDataKey {
                     path: path.clone(),
                     key_name: "posts".to_string(),
                     line: 12,
@@ -2816,7 +2854,7 @@ mod tests {
             character: 6,
         };
 
-        let hover = build_hover(&results, &duplication, &path, pos).unwrap();
+        let hover = build_hover_for_test(&results, &duplication, &path, pos).unwrap();
         let value = markup_value(&hover);
         assert!(value.contains("posts"));
         assert!(value.contains("load()"));
@@ -2833,8 +2871,8 @@ mod tests {
         let path = root.join("src/routes/blog/+page.server.ts");
         let mut results = AnalysisResults::default();
         results.unused_load_data_keys.push(
-            fallow_core::results::UnusedLoadDataKeyFinding::with_actions(
-                fallow_core::results::UnusedLoadDataKey {
+            fallow_api::editor_results::UnusedLoadDataKeyFinding::with_actions(
+                fallow_api::editor_results::UnusedLoadDataKey {
                     path: path.clone(),
                     key_name: "posts".to_string(),
                     line: 12,
@@ -2848,7 +2886,7 @@ mod tests {
             line: 0,
             character: 4,
         };
-        assert!(build_hover(&results, &duplication, &path, pos).is_none());
+        assert!(build_hover_for_test(&results, &duplication, &path, pos).is_none());
     }
 
     #[test]
@@ -2857,8 +2895,8 @@ mod tests {
         let path = root.join("src/routes/blog/+page.server.ts");
         let mut results = AnalysisResults::default();
         results.unused_load_data_keys.push(
-            fallow_core::results::UnusedLoadDataKeyFinding::with_actions(
-                fallow_core::results::UnusedLoadDataKey {
+            fallow_api::editor_results::UnusedLoadDataKeyFinding::with_actions(
+                fallow_api::editor_results::UnusedLoadDataKey {
                     path: path.clone(),
                     key_name: "posts".to_string(),
                     line: 12,
@@ -2872,7 +2910,7 @@ mod tests {
             line: 11,
             character: 0,
         };
-        assert!(build_hover(&results, &duplication, &path, pos).is_none());
+        assert!(build_hover_for_test(&results, &duplication, &path, pos).is_none());
     }
 
     // -------------------------------------------------------------------------
@@ -2883,12 +2921,12 @@ mod tests {
     fn hover_on_client_server_leak_security_candidate() {
         let root = test_root();
         let path = root.join("src/client/Secrets.tsx");
-        let finding = fallow_core::results::SecurityFinding {
+        let finding = fallow_api::editor_results::SecurityFinding {
             finding_id: String::new(),
-            candidate: fallow_core::results::SecurityCandidate::default(),
+            candidate: fallow_api::editor_results::SecurityCandidate::default(),
             taint_flow: None,
             attack_surface: None,
-            kind: fallow_core::results::SecurityFindingKind::ClientServerLeak,
+            kind: fallow_api::editor_results::SecurityFindingKind::ClientServerLeak,
             category: None,
             cwe: None,
             path: path.clone(),
@@ -2897,7 +2935,7 @@ mod tests {
             evidence: "process.env.SECRET_KEY imported into client bundle".to_string(),
             source_backed: false,
             source_read: None,
-            severity: fallow_core::results::SecuritySeverity::High,
+            severity: fallow_api::editor_results::SecuritySeverity::High,
             trace: vec![],
             actions: vec![],
             dead_code: None,
@@ -2912,7 +2950,7 @@ mod tests {
             character: 5,
         };
 
-        let hover = build_hover(&results, &duplication, &path, pos).unwrap();
+        let hover = build_hover_for_test(&results, &duplication, &path, pos).unwrap();
         let value = markup_value(&hover);
         assert!(value.contains("client-server-leak"));
         assert!(value.contains("source-backed no"));
@@ -2926,8 +2964,8 @@ mod tests {
         let root = test_root();
         let path = root.join("src/utils/xss.ts");
         let mut finding = tainted_sink_finding(path.clone());
-        finding.dead_code = Some(fallow_core::results::SecurityDeadCodeContext {
-            kind: fallow_core::results::SecurityDeadCodeKind::UnusedExport,
+        finding.dead_code = Some(fallow_api::editor_results::SecurityDeadCodeContext {
+            kind: fallow_api::editor_results::SecurityDeadCodeKind::UnusedExport,
             export_name: Some("renderHtml".to_string()),
             line: Some(8),
             guidance: "Verify the dead-code finding and delete the code if safe before hardening."
@@ -2941,7 +2979,7 @@ mod tests {
             character: 10,
         };
 
-        let hover = build_hover(&results, &duplication, &path, pos).unwrap();
+        let hover = build_hover_for_test(&results, &duplication, &path, pos).unwrap();
         let value = markup_value(&hover);
         assert!(value.contains("dead-code:"));
         assert!(value.contains("Verify the dead-code finding"));
@@ -2965,7 +3003,7 @@ mod tests {
             character: 10,
         };
 
-        let hover = build_hover(&results, &duplication, &path, pos).unwrap();
+        let hover = build_hover_for_test(&results, &duplication, &path, pos).unwrap();
         let value = markup_value(&hover);
         assert!(value.contains("blast radius 7"));
         assert!(value.contains("crosses an architecture boundary"));
@@ -2989,7 +3027,7 @@ mod tests {
             line: 7,
             character: 5,
         };
-        assert!(build_hover(&results, &duplication, &path, pos).is_none());
+        assert!(build_hover_for_test(&results, &duplication, &path, pos).is_none());
     }
 
     // -------------------------------------------------------------------------
@@ -3008,8 +3046,8 @@ mod tests {
                 path: path.clone(),
             }));
         results.unrendered_components.push(
-            fallow_core::results::UnrenderedComponentFinding::with_actions(
-                fallow_core::results::UnrenderedComponent {
+            fallow_api::editor_results::UnrenderedComponentFinding::with_actions(
+                fallow_api::editor_results::UnrenderedComponent {
                     path: path.clone(),
                     component_name: "Dead".to_string(),
                     framework: "vue".to_string(),
@@ -3025,7 +3063,7 @@ mod tests {
             character: 0,
         };
 
-        let hover = build_hover(&results, &duplication, &path, pos).unwrap();
+        let hover = build_hover_for_test(&results, &duplication, &path, pos).unwrap();
         let value = markup_value(&hover);
         assert!(
             value.contains("not imported"),
@@ -3086,7 +3124,7 @@ mod tests {
             line: 2,
             character: 0,
         };
-        let hover = build_hover(&results, &duplication, &path_a, pos).unwrap();
+        let hover = build_hover_for_test(&results, &duplication, &path_a, pos).unwrap();
         let value = markup_value(&hover);
         assert!(
             value.contains("1 other instance"),
@@ -3149,7 +3187,7 @@ mod tests {
             line: 2,
             character: 0,
         };
-        let hover = build_hover(&results, &duplication, &path_main, pos).unwrap();
+        let hover = build_hover_for_test(&results, &duplication, &path_main, pos).unwrap();
         let value = markup_value(&hover);
         assert!(
             value.contains("... and 2 more"),
@@ -3182,7 +3220,7 @@ mod tests {
             line: 14,
             character: 100,
         };
-        assert!(build_hover(&results, &duplication, &path, pos).is_none());
+        assert!(build_hover_for_test(&results, &duplication, &path, pos).is_none());
     }
 
     // -------------------------------------------------------------------------
@@ -3209,7 +3247,7 @@ mod tests {
             line: 0,
             character: 12,
         };
-        assert!(build_hover(&results, &duplication, &path_b, pos).is_none());
+        assert!(build_hover_for_test(&results, &duplication, &path_b, pos).is_none());
     }
 
     fn card_intel(path: PathBuf) -> ReactComponentIntel {
@@ -3260,7 +3298,7 @@ mod tests {
             character: 3,
         };
 
-        let hover = build_hover(&results, &duplication, &path, pos).unwrap();
+        let hover = build_hover_for_test(&results, &duplication, &path, pos).unwrap();
         let value = markup_value(&hover);
         assert!(value.contains("title"), "names the prop: {value}");
         assert!(value.contains("read in body"), "read state: {value}");
@@ -3283,7 +3321,7 @@ mod tests {
             character: 4,
         };
 
-        let hover = build_hover(&results, &duplication, &path, pos).unwrap();
+        let hover = build_hover_for_test(&results, &duplication, &path, pos).unwrap();
         let value = markup_value(&hover);
         assert!(value.contains("subtitle"), "names the prop: {value}");
         assert!(value.contains("not read in body"), "read state: {value}");
@@ -3308,7 +3346,7 @@ mod tests {
             character: 3,
         };
 
-        let hover = build_hover(&results, &duplication, &path, pos).unwrap();
+        let hover = build_hover_for_test(&results, &duplication, &path, pos).unwrap();
         let value = markup_value(&hover);
         assert!(
             value.contains("passed from 1 call site"),
@@ -3341,7 +3379,7 @@ mod tests {
             character: 3,
         };
 
-        let hover = build_hover(&results, &duplication, &path, pos).unwrap();
+        let hover = build_hover_for_test(&results, &duplication, &path, pos).unwrap();
         let value = markup_value(&hover);
         // The base read/passed line is preserved.
         assert!(value.contains("read in body"), "base read state: {value}");
@@ -3376,7 +3414,7 @@ mod tests {
             character: 3,
         };
 
-        let hover = build_hover(&results, &duplication, &path, pos).unwrap();
+        let hover = build_hover_for_test(&results, &duplication, &path, pos).unwrap();
         let value = markup_value(&hover);
         assert!(
             value.contains("forwarded 1 level:"),
@@ -3398,7 +3436,7 @@ mod tests {
             character: 15,
         };
 
-        let hover = build_hover(&results, &duplication, &path, pos).unwrap();
+        let hover = build_hover_for_test(&results, &duplication, &path, pos).unwrap();
         let value = markup_value(&hover);
         assert!(value.contains("Card"), "names the component: {value}");
         assert!(
@@ -3421,8 +3459,8 @@ mod tests {
         let path = root.join("src/Card.tsx");
         let mut results = AnalysisResults::default();
         results.unused_component_props.push(
-            fallow_core::results::UnusedComponentPropFinding::with_actions(
-                fallow_core::results::UnusedComponentProp {
+            fallow_api::editor_results::UnusedComponentPropFinding::with_actions(
+                fallow_api::editor_results::UnusedComponentProp {
                     path: path.clone(),
                     component_name: "Card".to_string(),
                     prop_name: "subtitle".to_string(),
@@ -3439,7 +3477,7 @@ mod tests {
             character: 3,
         };
 
-        let hover = build_hover(&results, &duplication, &path, pos).unwrap();
+        let hover = build_hover_for_test(&results, &duplication, &path, pos).unwrap();
         let value = markup_value(&hover);
         // The finding's wording, not the intel's "not read in body / passed".
         assert!(

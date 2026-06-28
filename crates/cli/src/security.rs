@@ -19,505 +19,72 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use fallow_config::{OutputFormat, ProductionAnalysis, Severity};
-use fallow_core::analyze::derive_security_severity;
-use fallow_core::results::{
+use fallow_engine::results::{
     AnalysisResults, SecurityAttackSurfaceEntry, SecurityDeadCodeKind, SecurityFinding,
     SecurityFindingKind, TraceHop, TraceHopRole,
 };
+use fallow_engine::security::{derive_security_severity, security_catalogue_title};
+pub use fallow_output::{
+    SecurityBlindSpotFile, SecurityBlindSpotGroup, SecurityBlindSpotsOutput,
+    SecurityBlindSpotsSchemaVersion, SecurityBlindSpotsSummary, SecurityGateVerdict,
+    SecuritySchemaVersion, SecuritySurvivor, SecuritySurvivorsOutput,
+    SecuritySurvivorsSchemaVersion, SecuritySurvivorsSummary, SecurityUnresolvedCalleeDiagnostics,
+    SecurityUnresolvedCalleeReasonCount, SecurityUnresolvedCalleeSample,
+    SecurityUnresolvedCalleeTopFile, SecurityVerifierVerdict, SecurityVerifierVerdictStatus,
+};
 use fallow_types::discover::DiscoveredFile;
-use fallow_types::envelope::{ElapsedMs, Meta, ToolVersion};
+use fallow_types::envelope::{ElapsedMs, ToolVersion};
 use fallow_types::extract::ModuleInfo;
 use fallow_types::results::{
     SecurityRuntimeContext, SecurityRuntimeState, SecuritySeverity,
     SecurityUnresolvedCalleeDiagnostic, TaintConfidence,
 };
 use rustc_hash::FxHashSet;
-use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh3::xxh3_64;
 
 use crate::base_worktree::{BaseWorktree, git_rev_parse};
 use crate::error::emit_error;
-use crate::health::{HealthOptions, SharedParseData, SortBy};
-use crate::health_types::{
+use crate::health::HealthOptions;
+use crate::load_config_for_analysis;
+use fallow_output::{
     RuntimeCoverageFinding, RuntimeCoverageHotPath, RuntimeCoverageReport, RuntimeCoverageVerdict,
 };
-use crate::load_config_for_analysis;
+
+pub use fallow_api::SecurityGateMode;
 
 const UNRESOLVED_CALLEE_SAMPLE_LIMIT: usize = 25;
 const UNRESOLVED_CALLEE_TOP_FILES_LIMIT: usize = 10;
 
-/// The `fallow security --format json` schema version. Independently versioned
-/// from the main contract, mirroring `ImpactReportSchemaVersion`.
-#[derive(Debug, Clone, Copy, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub enum SecuritySchemaVersion {
-    /// First release of the `fallow security --format json` shape.
-    #[allow(
-        dead_code,
-        reason = "kept so the generated schema documents historical v1"
-    )]
-    #[serde(rename = "1")]
-    V1,
-    /// Adds per-finding `severity` for verification-priority tiering.
-    #[allow(
-        dead_code,
-        reason = "kept so the generated schema documents historical v2"
-    )]
-    #[serde(rename = "2")]
-    V2,
-    /// Adds version, elapsed time, explain metadata, and safe config metadata.
-    #[allow(
-        dead_code,
-        reason = "kept so the generated schema documents historical v3"
-    )]
-    #[serde(rename = "3")]
-    V3,
-    /// Adds bounded diagnostics for unresolved callee blind spots.
-    #[allow(
-        dead_code,
-        reason = "kept so the generated schema documents historical v4"
-    )]
-    #[serde(rename = "4")]
-    V4,
-    /// Adds summary metadata to security summary JSON.
-    #[allow(
-        dead_code,
-        reason = "kept so the generated schema documents historical v5"
-    )]
-    #[serde(rename = "5")]
-    V5,
-    /// Adds `candidate.sink.url_shape` for URL-shaped security candidates.
-    #[allow(
-        dead_code,
-        reason = "kept so the generated schema documents historical v6"
-    )]
-    #[serde(rename = "6")]
-    V6,
-    /// Adds the server-only-import category on client-server-leak findings when a
-    /// use-client cone reaches a server-only module.
-    #[serde(rename = "7")]
-    V7,
-}
-
-/// Gate mode for `fallow security --gate <mode>`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, clap::ValueEnum)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "kebab-case")]
-pub enum SecurityGateMode {
-    /// Fail when the change introduces a NEW security-sink candidate on a changed
-    /// line (not merely a sink in a changed file). There is deliberately no `all`
-    /// mode: gating on the whole candidate backlog is the anti-feature this gate
-    /// exists to avoid.
+/// CLI parser mode for `fallow security --gate <mode>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum SecurityGateArg {
+    /// Fail when the change introduces a new security-sink candidate on a
+    /// changed line.
     New,
     /// Fail when a candidate becomes runtime-reachable from an entry point in
     /// head but the matching candidate was not runtime-reachable in base.
     NewlyReachable,
 }
 
-/// Gate verdict on the wire. `fail` is the CI-state token; human output renders
-/// it as "REVIEW REQUIRED" because these stay unverified candidates, never
-/// confirmed vulnerabilities.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "kebab-case")]
-pub enum SecurityGateVerdict {
-    /// No new candidate in the changed lines.
-    Pass,
-    /// At least one new candidate in the changed lines; review required.
-    Fail,
+impl SecurityGateArg {
+    #[must_use]
+    pub const fn into_mode(self) -> SecurityGateMode {
+        match self {
+            Self::New => SecurityGateMode::New,
+            Self::NewlyReachable => SecurityGateMode::NewlyReachable,
+        }
+    }
 }
 
-/// The `gate` block on `SecurityOutput`, present only when `--gate <mode>` ran.
-/// Invariant: `verdict == Fail  IFF  exit code 8  IFF  new_count > 0`.
-#[derive(Debug, Clone, Copy, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct SecurityGate {
-    /// Which delta the gate checked.
-    pub mode: SecurityGateMode,
-    /// `pass` or `fail`.
-    pub verdict: SecurityGateVerdict,
-    /// Number of candidates matching the selected gate mode.
-    pub new_count: usize,
-}
+pub type SecurityGate = fallow_output::SecurityGate<SecurityGateMode>;
 
-/// Allowlisted config context for `fallow security --format json`.
-#[derive(Debug, Clone, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[cfg_attr(
-    feature = "schema",
-    schemars(extend("required" = ["rules", "categories_include", "categories_exclude"]))
-)]
-pub struct SecurityOutputConfig {
-    /// Relevant rule severities before and after this command applies its
-    /// default-on behavior for security-only rules.
-    pub rules: SecurityOutputRulesConfig,
-    /// `security.categories.include` from config. `null` means unset, `[]`
-    /// means explicitly empty.
-    pub categories_include: Option<Vec<String>>,
-    /// `security.categories.exclude` from config. `null` means unset, `[]`
-    /// means explicitly empty.
-    pub categories_exclude: Option<Vec<String>>,
-}
+pub type SecurityOutputConfig = fallow_output::SecurityOutputConfig<Severity>;
 
-#[derive(Debug, Clone, Copy, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct SecurityOutputRulesConfig {
-    pub security_client_server_leak: SecurityRuleSeverityConfig,
-    pub security_sink: SecurityRuleSeverityConfig,
-}
+pub type SecurityOutputRulesConfig = fallow_output::SecurityOutputRulesConfig<Severity>;
 
-#[derive(Debug, Clone, Copy, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct SecurityRuleSeverityConfig {
-    /// Severity read from resolved config before the security command applies
-    /// its default-on behavior.
-    pub configured: Severity,
-    /// Severity used for this command run.
-    pub effective: Severity,
-}
+pub type SecurityRuleSeverityConfig = fallow_output::SecurityRuleSeverityConfig<Severity>;
 
-/// The `fallow security --format json` envelope. `FallowOutput` discriminates it
-/// by the `kind: "security"` tag; the optional `gate` block is additive and is
-/// not part of that discrimination.
-#[derive(Debug, Clone, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct SecurityOutput {
-    /// Schema version of this envelope.
-    pub schema_version: SecuritySchemaVersion,
-    /// Fallow CLI version that produced this output.
-    pub version: ToolVersion,
-    /// Wall-clock milliseconds spent producing the report.
-    pub elapsed_ms: ElapsedMs,
-    /// Privacy-safe config context relevant to security candidate generation.
-    pub config: SecurityOutputConfig,
-    /// Security-specific rule and field metadata, emitted with `--explain`.
-    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
-    pub meta: Option<Meta>,
-    /// Gate verdict, present only when `--gate <mode>` was set (issue #886).
-    /// Emitted on pass too (`verdict: "pass"`, `new_count: 0`) so consumers
-    /// distinguish "gate ran and passed" from "gate did not run" (absent).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gate: Option<SecurityGate>,
-    /// Security candidates. Paths are project-root-relative, forward-slash.
-    pub security_findings: Vec<SecurityFinding>,
-    /// Opt-in attack-surface inventory from untrusted entry points to reachable
-    /// sinks. Present only when `--surface` was requested.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attack_surface: Option<Vec<SecurityAttackSurfaceEntry>>,
-    /// In-band blind spot: number of `"use client"` files whose transitive
-    /// import cone contains a dynamic `import()` the reachability BFS could not
-    /// follow. A leak hidden behind such an edge would not be reported, so a
-    /// zero finding count with a non-zero value here is NOT a clean bill.
-    pub unresolved_edge_files: usize,
-    /// In-band blind spot: number of sink-shaped nodes the catalogue detector
-    /// could not flatten to a static callee path (dynamic dispatch, computed
-    /// members, aliased bindings). A zero finding count with a non-zero value
-    /// here is NOT a clean bill.
-    pub unresolved_callee_sites: usize,
-    /// Bounded diagnostics for unresolved callee blind spots.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub unresolved_callee_diagnostics: Option<SecurityUnresolvedCalleeDiagnostics>,
-}
-
-/// Bounded unresolved-callee diagnostics for `fallow security --format json`.
-#[derive(Debug, Clone, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct SecurityUnresolvedCalleeDiagnostics {
-    /// Deterministic sample rows, capped by `sample_limit`.
-    pub sampled: Vec<SecurityUnresolvedCalleeSample>,
-    /// Files with the most unresolved callees, capped by `top_files_limit`.
-    pub top_files: Vec<SecurityUnresolvedCalleeTopFile>,
-    /// Full count by unresolved-callee reason, sorted by count then reason.
-    pub by_reason: Vec<SecurityUnresolvedCalleeReasonCount>,
-    /// Maximum number of sample rows emitted.
-    pub sample_limit: usize,
-    /// Maximum number of top-file rows emitted.
-    pub top_files_limit: usize,
-}
-
-/// One sampled unresolved-callee row.
-#[derive(Debug, Clone, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct SecurityUnresolvedCalleeSample {
-    /// Project-relative source path.
-    pub path: String,
-    /// 1-based source line.
-    pub line: u32,
-    /// 0-based byte column.
-    pub col: u32,
-    /// Why the callee was skipped.
-    pub reason: fallow_types::extract::SkippedSecurityCalleeReason,
-    /// Compact syntax shape of the skipped callee.
-    pub expression_kind: fallow_types::extract::SkippedSecurityCalleeExpressionKind,
-}
-
-/// Count of unresolved callees in one file.
-#[derive(Debug, Clone, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct SecurityUnresolvedCalleeTopFile {
-    /// Project-relative source path.
-    pub path: String,
-    /// Number of unresolved callees in this file.
-    pub count: usize,
-}
-
-/// Count of unresolved callees for one reason.
-#[derive(Debug, Clone, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct SecurityUnresolvedCalleeReasonCount {
-    /// Why the callees were skipped.
-    pub reason: fallow_types::extract::SkippedSecurityCalleeReason,
-    /// Number of unresolved callees with this reason.
-    pub count: usize,
-}
-
-/// Compact `fallow security --summary --format json` payload. Uses the same
-/// `kind: "security"` discriminator as the full payload, but omits candidate
-/// arrays and exposes only aggregate counts.
-#[derive(Debug, Clone, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct SecuritySummaryOutput {
-    /// Schema version of this envelope.
-    pub schema_version: SecuritySchemaVersion,
-    /// Fallow CLI version that produced this output.
-    pub version: ToolVersion,
-    /// Wall-clock milliseconds spent producing the report.
-    pub elapsed_ms: ElapsedMs,
-    /// Privacy-safe config context relevant to security candidate generation.
-    pub config: SecurityOutputConfig,
-    /// Security-specific rule and field metadata, emitted with `--explain`.
-    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
-    pub meta: Option<Meta>,
-    /// Gate verdict, present only when `--gate <mode>` was set.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gate: Option<SecurityGate>,
-    /// Aggregate security counts after all filters, gates, and scopes.
-    pub summary: SecuritySummary,
-}
-
-/// Aggregate counts for `fallow security --summary --format json`.
-#[derive(Debug, Clone, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct SecuritySummary {
-    /// Number of security candidates after all filters, gates, and scopes.
-    pub security_findings: usize,
-    /// Fixed severity counts for the closed security severity enum.
-    pub by_severity: SecuritySeverityCounts,
-    /// Finding counts by catalogue category, or by kind for findings without a
-    /// catalogue category.
-    pub by_category: BTreeMap<String, usize>,
-    /// Fixed reachability counts for ranking and triage signals.
-    pub by_reachability: SecurityReachabilityCounts,
-    /// Fixed runtime coverage counts for runtime-state triage signals.
-    pub by_runtime_state: SecurityRuntimeStateCounts,
-    /// Number of client files whose dynamic imports could not be followed.
-    pub unresolved_edge_files: usize,
-    /// Number of sink-shaped callees that could not be statically flattened.
-    pub unresolved_callee_sites: usize,
-    /// Number of attack-surface entries included in the prepared full output.
-    pub attack_surface_entries: usize,
-}
-
-/// Fixed severity counters for summary JSON.
-#[derive(Debug, Clone, Copy, Default, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct SecuritySeverityCounts {
-    pub high: usize,
-    pub medium: usize,
-    pub low: usize,
-}
-
-/// Fixed reachability counters for summary JSON.
-#[derive(Debug, Clone, Copy, Default, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct SecurityReachabilityCounts {
-    pub entry_reachable: usize,
-    pub untrusted_source_reachable: usize,
-    pub arg_level: usize,
-    pub module_level: usize,
-    pub crosses_boundary: usize,
-    pub source_backed: usize,
-}
-
-/// Fixed runtime coverage counters for summary JSON.
-#[derive(Debug, Clone, Copy, Default, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct SecurityRuntimeStateCounts {
-    pub runtime_hot: usize,
-    pub runtime_cold: usize,
-    pub never_executed: usize,
-    pub low_traffic: usize,
-    pub coverage_unavailable: usize,
-    pub runtime_unknown: usize,
-    pub not_collected: usize,
-}
-
-/// The `fallow security survivors --format json` schema version.
-#[derive(Debug, Clone, Copy, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub enum SecuritySurvivorsSchemaVersion {
-    /// Adds `summary.unverdicted` for incomplete verdict files.
-    #[serde(rename = "2")]
-    V2,
-}
-
-/// Verifier verdict status accepted by `fallow security survivors`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "kebab-case")]
-pub enum SecurityVerifierVerdictStatus {
-    /// The verifier could not dismiss the candidate from supplied evidence.
-    Survivor,
-    /// The verifier dismissed the candidate from supplied evidence.
-    Dismissed,
-    /// The verifier needs human review before dismissal or remediation.
-    NeedsHumanReview,
-}
-
-/// One supported verifier verdict input row.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct SecurityVerifierVerdict {
-    /// Must be `fallow-security-verdict/v1`.
-    pub schema_version: String,
-    /// Stable candidate id from `security_findings[].finding_id`.
-    pub finding_id: String,
-    /// External verifier disposition.
-    pub verdict: SecurityVerifierVerdictStatus,
-    /// Short verifier reason.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    /// Short verifier rationale.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rationale: Option<String>,
-    /// Optional verifier-provided confidence or review priority.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub confidence: Option<String>,
-    /// Optional verifier-provided impact statement.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub impact: Option<String>,
-    /// Optional verifier-owned remediation direction.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fix_direction: Option<String>,
-}
-
-/// The `fallow security survivors --format json` envelope.
-#[derive(Debug, Clone, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct SecuritySurvivorsOutput {
-    /// Schema version of this envelope.
-    pub schema_version: SecuritySurvivorsSchemaVersion,
-    /// Fallow CLI version that produced this output.
-    pub version: ToolVersion,
-    /// Wall-clock milliseconds spent producing the report.
-    pub elapsed_ms: ElapsedMs,
-    /// Survivor render summary.
-    pub summary: SecuritySurvivorsSummary,
-    /// Verifier-retained candidates keyed by finding id.
-    pub survivors: BTreeMap<String, SecuritySurvivor>,
-    /// Ambiguous candidates keyed by finding id. These are not dismissed and are
-    /// kept explicit so queues can decide whether to include them.
-    pub needs_human_review: BTreeMap<String, SecuritySurvivor>,
-}
-
-/// Aggregate counts for survivor rendering.
-#[derive(Debug, Clone, Copy, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct SecuritySurvivorsSummary {
-    pub candidates: usize,
-    pub verdicts: usize,
-    pub survivors: usize,
-    pub dismissed: usize,
-    pub needs_human_review: usize,
-    pub unverdicted: usize,
-}
-
-/// One verifier-retained candidate row.
-#[derive(Debug, Clone, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct SecuritySurvivor {
-    /// Stable candidate id from `security_findings[].finding_id`.
-    pub finding_id: String,
-    /// External verifier disposition.
-    pub verdict: SecurityVerifierVerdictStatus,
-    /// Short verifier reason.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    /// Short verifier rationale.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rationale: Option<String>,
-    /// Optional verifier-provided confidence or review priority.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub confidence: Option<String>,
-    /// Optional verifier-provided impact statement.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub impact: Option<String>,
-    /// Optional verifier-owned remediation direction.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fix_direction: Option<String>,
-    /// Original typed fallow security candidate.
-    pub candidate: SecurityFinding,
-}
-
-/// The `fallow security blind-spots --format json` schema version.
-#[derive(Debug, Clone, Copy, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub enum SecurityBlindSpotsSchemaVersion {
-    /// Initial blind-spot grouping output contract.
-    #[serde(rename = "1")]
-    V1,
-}
-
-/// The `fallow security blind-spots --format json` envelope.
-#[derive(Debug, Clone, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct SecurityBlindSpotsOutput {
-    /// Schema version of this envelope.
-    pub schema_version: SecurityBlindSpotsSchemaVersion,
-    /// Fallow CLI version that produced this output.
-    pub version: ToolVersion,
-    /// Wall-clock milliseconds spent producing the report.
-    pub elapsed_ms: ElapsedMs,
-    /// Aggregate blind-spot counts from the security analysis.
-    pub summary: SecurityBlindSpotsSummary,
-    /// Grouped unresolved callee diagnostics, derived from existing samples.
-    pub groups: Vec<SecurityBlindSpotGroup>,
-}
-
-/// Aggregate counts for blind-spot output.
-#[derive(Debug, Clone, Copy, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct SecurityBlindSpotsSummary {
-    pub unresolved_edge_files: usize,
-    pub unresolved_callee_sites: usize,
-    pub sampled_callee_sites: usize,
-}
-
-/// One actionable blind-spot group.
-#[derive(Debug, Clone, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct SecurityBlindSpotGroup {
-    /// Why the callees were skipped.
-    pub reason: fallow_types::extract::SkippedSecurityCalleeReason,
-    /// Compact syntax shape of the skipped callee.
-    pub expression_kind: fallow_types::extract::SkippedSecurityCalleeExpressionKind,
-    /// Count in the bounded diagnostic sample.
-    pub sampled_count: usize,
-    /// Top files in this bounded diagnostic sample.
-    pub files: Vec<SecurityBlindSpotFile>,
-    /// Suggested next action for this group.
-    pub suggestion: String,
-}
-
-/// One file inside a blind-spot group.
-#[derive(Debug, Clone, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct SecurityBlindSpotFile {
-    /// Project-relative source path.
-    pub path: String,
-    /// Count in the bounded diagnostic sample.
-    pub sampled_count: usize,
-}
+pub type SecurityOutput = fallow_output::SecurityOutput<SecurityOutputConfig, SecurityGate>;
 
 /// Options for `fallow security`, mirroring the global CLI flags it honors.
 pub struct SecurityOptions<'a> {
@@ -1084,9 +651,9 @@ fn security_output_config(
 
 fn apply_changed_scope(opts: &SecurityOptions<'_>, results: &mut AnalysisResults) {
     if let Some(git_ref) = opts.changed_since
-        && let Some(changed) = fallow_core::changed_files::get_changed_files(opts.root, git_ref)
+        && let Some(changed) = fallow_engine::changed_files::get_changed_files(opts.root, git_ref)
     {
-        fallow_core::changed_files::filter_results_by_changed_files(results, &changed);
+        fallow_engine::changed_files::filter_results_by_changed_files(results, &changed);
     }
     if opts.use_shared_diff_index
         && let Some(diff_index) = crate::report::ci::diff_filter::shared_diff_index()
@@ -1140,7 +707,7 @@ fn apply_security_gate(
         if let Some(shared) = crate::report::ci::diff_filter::shared_diff_index() {
             shared
         } else if let Some(git_ref) = opts.changed_since {
-            match fallow_core::changed_files::try_get_changed_diff(opts.root, git_ref) {
+            match fallow_engine::changed_files::try_get_changed_diff(opts.root, git_ref) {
                 Ok(text) => owned_gate_diff
                     .insert(crate::report::ci::diff_filter::DiffIndex::from_unified_diff(&text)),
                 Err(err) => {
@@ -1483,21 +1050,17 @@ struct SecurityAnalysisState {
     results: AnalysisResults,
     modules: Option<Vec<ModuleInfo>>,
     files: Option<Vec<DiscoveredFile>>,
-    analysis_output: Option<fallow_core::AnalysisOutput>,
+    analysis_output: Option<fallow_engine::DeadCodeAnalysisArtifacts>,
 }
 
-#[expect(
-    deprecated,
-    reason = "ADR-008 deprecates fallow_core::analyze APIs externally; the CLI uses the workspace path dependency"
-)]
 fn analyze_security_candidates(
     opts: &SecurityOptions<'_>,
     config: &fallow_config::ResolvedConfig,
 ) -> Result<SecurityAnalysisState, ExitCode> {
     if opts.runtime_coverage.is_none() {
-        return fallow_core::analyze(config)
-            .map(|results| SecurityAnalysisState {
-                results,
+        return fallow_engine::analyze(config)
+            .map(|analysis| SecurityAnalysisState {
+                results: analysis.results,
                 modules: None,
                 files: None,
                 analysis_output: None,
@@ -1505,7 +1068,7 @@ fn analyze_security_candidates(
             .map_err(|err| emit_error(&format!("Analysis error: {err}"), 2, opts.output));
     }
 
-    fallow_core::analyze_retaining_modules(config, true, true)
+    fallow_engine::analyze_retaining_modules(config, true, true)
         .map(|mut output| {
             let modules = output.modules.take();
             let files = output.files.take();
@@ -1542,7 +1105,7 @@ fn analyze_security_runtime(
     path: &Path,
     modules: Vec<ModuleInfo>,
     files: Vec<DiscoveredFile>,
-    analysis_output: fallow_core::AnalysisOutput,
+    analysis_output: fallow_engine::DeadCodeAnalysisArtifacts,
 ) -> Result<Option<RuntimeCoverageReport>, ExitCode> {
     let runtime_coverage = crate::health::coverage::prepare_options(
         path,
@@ -1553,7 +1116,7 @@ fn analyze_security_runtime(
     )?;
     let result = crate::health::execute_health_with_shared_parse(
         &security_runtime_health_options(opts, runtime_coverage),
-        SharedParseData {
+        fallow_engine::HealthSharedParseData {
             files,
             modules,
             analysis_output: Some(analysis_output),
@@ -1566,7 +1129,7 @@ fn analyze_security_runtime(
 /// context for security findings (complexity/hotspot/ownership all disabled).
 fn security_runtime_health_options<'a>(
     opts: &SecurityOptions<'a>,
-    runtime_coverage: crate::health::RuntimeCoverageOptions,
+    runtime_coverage: fallow_engine::RuntimeCoverageOptions,
 ) -> HealthOptions<'a> {
     HealthOptions {
         root: opts.root,
@@ -1575,11 +1138,9 @@ fn security_runtime_health_options<'a>(
         no_cache: opts.no_cache,
         threads: opts.threads,
         quiet: opts.quiet,
-        max_cyclomatic: None,
-        max_cognitive: None,
-        max_crap: None,
+        thresholds: fallow_engine::HealthThresholdOverrides::default(),
         top: None,
-        sort: SortBy::Cyclomatic,
+        sort: fallow_engine::HealthSort::Cyclomatic,
         production: true,
         production_override: Some(true),
         changed_since: opts.changed_since,
@@ -1590,7 +1151,6 @@ fn security_runtime_health_options<'a>(
         baseline: None,
         save_baseline: None,
         complexity: false,
-        complexity_breakdown: false,
         file_scores: false,
         coverage_gaps: false,
         config_activates_coverage_gaps: false,
@@ -1604,21 +1164,19 @@ fn security_runtime_health_options<'a>(
         enforce_coverage_gap_gate: false,
         effort: None,
         score: false,
-        min_score: None,
+        gates: fallow_engine::HealthGateOptions::default(),
         since: None,
         min_commits: None,
         explain: false,
         summary: false,
         save_snapshot: None,
         trend: false,
-        group_by: None,
-        coverage: None,
-        coverage_root: None,
+        coverage_inputs: fallow_engine::HealthCoverageInputs::default(),
         performance: false,
-        min_severity: None,
-        report_only: false,
         runtime_coverage: Some(runtime_coverage),
         churn_file: None,
+        complexity_breakdown: false,
+        group_by: None,
     }
 }
 
@@ -1958,12 +1516,7 @@ fn unresolved_callee_diagnostics(
     })
 }
 
-fn filter_to_files(
-    results: &mut fallow_core::results::AnalysisResults,
-    root: &Path,
-    files: &[PathBuf],
-    quiet: bool,
-) {
+fn filter_to_files(results: &mut AnalysisResults, root: &Path, files: &[PathBuf], quiet: bool) {
     if files.is_empty() {
         return;
     }
@@ -1992,7 +1545,7 @@ fn filter_to_files(
     }
 
     let file_set: rustc_hash::FxHashSet<PathBuf> = resolved_files.into_iter().collect();
-    fallow_core::changed_files::filter_results_by_changed_files(results, &file_set);
+    fallow_engine::changed_files::filter_results_by_changed_files(results, &file_set);
 }
 
 fn prepare_findings(
@@ -2061,8 +1614,10 @@ fn relativize(path: &Path, root: &Path) -> PathBuf {
 /// JSON: the `SecurityOutput` envelope, pretty-printed.
 #[must_use]
 pub fn render_json(output: &SecurityOutput) -> String {
-    let Ok(value) = crate::output_envelope::serialize_root_output(
-        crate::output_envelope::FallowOutput::Security(output.clone()),
+    let Ok(value) = fallow_output::serialize_security_json_output(
+        output.clone(),
+        crate::output_runtime::current_root_envelope_mode(),
+        crate::output_runtime::telemetry_analysis_run_id().as_deref(),
     ) else {
         return "{\"error\":\"failed to serialize security output\"}".to_owned();
     };
@@ -2073,17 +1628,10 @@ pub fn render_json(output: &SecurityOutput) -> String {
 /// JSON summary: compact aggregate payload without per-finding arrays.
 #[must_use]
 pub fn render_json_summary(output: &SecurityOutput) -> String {
-    let summary = SecuritySummaryOutput {
-        schema_version: output.schema_version,
-        version: output.version.clone(),
-        elapsed_ms: output.elapsed_ms,
-        config: output.config.clone(),
-        meta: output.meta.clone(),
-        gate: output.gate,
-        summary: security_summary(output),
-    };
-    let Ok(value) = crate::output_envelope::serialize_root_output_without_telemetry(
-        crate::output_envelope::FallowOutput::SecuritySummary(summary),
+    let Ok(value) = fallow_output::serialize_security_summary_json_output(
+        output,
+        crate::output_runtime::current_root_envelope_mode(),
+        None,
     ) else {
         return "{\"error\":\"failed to serialize security summary output\"}".to_owned();
     };
@@ -2104,8 +1652,9 @@ fn render_survivors_output(
 
 #[must_use]
 pub fn render_survivors_json(output: &SecuritySurvivorsOutput) -> String {
-    let Ok(value) = crate::output_envelope::serialize_root_output_without_telemetry(
-        crate::output_envelope::FallowOutput::SecuritySurvivors(output.clone()),
+    let Ok(value) = fallow_output::serialize_security_survivors_json_output(
+        output.clone(),
+        crate::output_runtime::current_root_envelope_mode(),
     ) else {
         return "{\"error\":\"failed to serialize security survivors output\"}".to_owned();
     };
@@ -2304,8 +1853,9 @@ fn render_blind_spots_output(
 
 #[must_use]
 pub fn render_blind_spots_json(output: &SecurityBlindSpotsOutput) -> String {
-    let Ok(value) = crate::output_envelope::serialize_root_output_without_telemetry(
-        crate::output_envelope::FallowOutput::SecurityBlindSpots(output.clone()),
+    let Ok(value) = fallow_output::serialize_security_blind_spots_json_output(
+        output.clone(),
+        crate::output_runtime::current_root_envelope_mode(),
     ) else {
         return "{\"error\":\"failed to serialize security blind-spots output\"}".to_owned();
     };
@@ -2382,102 +1932,6 @@ fn blind_spot_suggestion(
         fallow_types::extract::SkippedSecurityCalleeReason::UnsupportedAssignmentObject => {
             "inspect assignment targets and simplify the object shape if security sink calls are hidden there."
         }
-    }
-}
-
-fn security_summary(output: &SecurityOutput) -> SecuritySummary {
-    let mut counts = SecuritySummaryCounts::default();
-
-    for finding in &output.security_findings {
-        counts.record(finding);
-    }
-
-    SecuritySummary {
-        security_findings: output.security_findings.len(),
-        by_severity: counts.severity,
-        by_category: counts.category,
-        by_reachability: counts.reachability,
-        by_runtime_state: counts.runtime_state,
-        unresolved_edge_files: output.unresolved_edge_files,
-        unresolved_callee_sites: output.unresolved_callee_sites,
-        attack_surface_entries: output.attack_surface.as_ref().map_or(0, Vec::len),
-    }
-}
-
-#[derive(Default)]
-struct SecuritySummaryCounts {
-    severity: SecuritySeverityCounts,
-    category: BTreeMap<String, usize>,
-    reachability: SecurityReachabilityCounts,
-    runtime_state: SecurityRuntimeStateCounts,
-}
-
-impl SecuritySummaryCounts {
-    fn record(&mut self, finding: &SecurityFinding) {
-        record_security_severity(finding.severity, &mut self.severity);
-        record_security_category(finding, &mut self.category);
-        record_security_reachability(finding, &mut self.reachability);
-        record_security_runtime_state(finding, &mut self.runtime_state);
-    }
-}
-
-fn record_security_severity(severity: SecuritySeverity, by_severity: &mut SecuritySeverityCounts) {
-    match severity {
-        SecuritySeverity::High => by_severity.high += 1,
-        SecuritySeverity::Medium => by_severity.medium += 1,
-        SecuritySeverity::Low => by_severity.low += 1,
-    }
-}
-
-fn record_security_category(finding: &SecurityFinding, by_category: &mut BTreeMap<String, usize>) {
-    let category = finding
-        .category
-        .clone()
-        .unwrap_or_else(|| security_kind_key(finding.kind).to_owned());
-    *by_category.entry(category).or_insert(0) += 1;
-}
-
-fn record_security_reachability(
-    finding: &SecurityFinding,
-    by_reachability: &mut SecurityReachabilityCounts,
-) {
-    if finding.source_backed {
-        by_reachability.source_backed += 1;
-    }
-    let Some(reachability) = &finding.reachability else {
-        return;
-    };
-
-    if reachability.reachable_from_entry {
-        by_reachability.entry_reachable += 1;
-    }
-    if reachability.reachable_from_untrusted_source {
-        by_reachability.untrusted_source_reachable += 1;
-    }
-    if reachability.crosses_boundary {
-        by_reachability.crosses_boundary += 1;
-    }
-    match reachability.taint_confidence {
-        Some(TaintConfidence::ArgLevel) => by_reachability.arg_level += 1,
-        Some(TaintConfidence::ModuleLevel) => by_reachability.module_level += 1,
-        None => {}
-    }
-}
-
-fn record_security_runtime_state(
-    finding: &SecurityFinding,
-    by_runtime_state: &mut SecurityRuntimeStateCounts,
-) {
-    match finding.runtime.as_ref().map(|runtime| runtime.state) {
-        Some(SecurityRuntimeState::RuntimeHot) => by_runtime_state.runtime_hot += 1,
-        Some(SecurityRuntimeState::RuntimeCold) => by_runtime_state.runtime_cold += 1,
-        Some(SecurityRuntimeState::NeverExecuted) => by_runtime_state.never_executed += 1,
-        Some(SecurityRuntimeState::LowTraffic) => by_runtime_state.low_traffic += 1,
-        Some(SecurityRuntimeState::CoverageUnavailable) => {
-            by_runtime_state.coverage_unavailable += 1;
-        }
-        Some(SecurityRuntimeState::RuntimeUnknown) => by_runtime_state.runtime_unknown += 1,
-        None => by_runtime_state.not_collected += 1,
     }
 }
 
@@ -2819,7 +2273,7 @@ fn security_finding_label(finding: &SecurityFinding) -> String {
             let title = finding
                 .category
                 .as_deref()
-                .and_then(fallow_core::analyze::security_catalogue_title)
+                .and_then(security_catalogue_title)
                 .or(finding.category.as_deref())
                 .unwrap_or("tainted-sink");
             match finding.cwe {
@@ -3088,7 +2542,7 @@ fn sarif_rule_def_tainted_sink(
     let title = finding
         .category
         .as_deref()
-        .and_then(fallow_core::analyze::security_catalogue_title)
+        .and_then(security_catalogue_title)
         .or(finding.category.as_deref())
         .unwrap_or("tainted-sink");
     let mut rule = serde_json::json!({
@@ -3331,7 +2785,7 @@ fn sarif_location(path: &Path, line: u32, col: u32) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fallow_core::results::{
+    use fallow_engine::results::{
         SecurityCandidate, SecurityCandidateBoundary, SecurityCandidateSink,
         SecurityDeadCodeContext, SecurityDeadCodeKind, SecurityFinding, SecurityFindingKind,
         TraceHop, TraceHopRole,
@@ -3925,7 +3379,7 @@ mod tests {
             reachable_from_entry: true,
             reachable_from_untrusted_source: true,
             // Cross-module reachability is module-level (issue #1093).
-            taint_confidence: Some(fallow_core::results::TaintConfidence::ModuleLevel),
+            taint_confidence: Some(TaintConfidence::ModuleLevel),
             untrusted_source_hop_count: Some(1),
             untrusted_source_trace: vec![
                 TraceHop {
@@ -4641,10 +4095,6 @@ mod tests {
     }
 
     #[test]
-    #[expect(
-        deprecated,
-        reason = "CLI fixture test uses the same workspace path dependency boundary as `run`"
-    )]
     fn source_reachability_fixture_marks_cross_module_sink() {
         let root = source_reachability_fixture_root();
         let mut config = load_config_for_analysis(
@@ -4662,8 +4112,9 @@ mod tests {
         .expect("fixture config loads");
         config.rules.security_sink = Severity::Warn;
 
-        let results = fallow_core::analyze(&config).expect("fixture analyzes");
-        let finding = results
+        let analysis = fallow_engine::analyze(&config).expect("fixture analyzes");
+        let finding = analysis
+            .results
             .security_findings
             .iter()
             .find(|finding| finding.path.ends_with("src/runner.ts"))
@@ -4675,10 +4126,7 @@ mod tests {
         // Cross-module reachability is module-level: the structured discriminator
         // says so, and the source node is honestly labeled `ModuleSource`, never
         // `UntrustedSource` (which is reserved for an arg-level same-module read).
-        assert_eq!(
-            reach.taint_confidence,
-            Some(fallow_core::results::TaintConfidence::ModuleLevel)
-        );
+        assert_eq!(reach.taint_confidence, Some(TaintConfidence::ModuleLevel));
         assert_eq!(
             reach
                 .untrusted_source_trace
@@ -4710,7 +4158,7 @@ mod tests {
     #[test]
     fn file_scope_keeps_security_finding_when_anchor_matches() {
         let root = Path::new("/proj/root");
-        let mut results = fallow_core::results::AnalysisResults::default();
+        let mut results = AnalysisResults::default();
         results.security_findings.push(sample_finding(root));
 
         filter_to_files(&mut results, root, &[PathBuf::from("src/app.tsx")], true);
@@ -4721,7 +4169,7 @@ mod tests {
     #[test]
     fn file_scope_keeps_security_finding_when_trace_hop_matches() {
         let root = Path::new("/proj/root");
-        let mut results = fallow_core::results::AnalysisResults::default();
+        let mut results = AnalysisResults::default();
         results.security_findings.push(sample_finding(root));
 
         filter_to_files(
@@ -4737,7 +4185,7 @@ mod tests {
     #[test]
     fn file_scope_drops_unrelated_security_finding() {
         let root = Path::new("/proj/root");
-        let mut results = fallow_core::results::AnalysisResults::default();
+        let mut results = AnalysisResults::default();
         results.security_findings.push(sample_finding(root));
 
         filter_to_files(&mut results, root, &[PathBuf::from("src/other.ts")], true);

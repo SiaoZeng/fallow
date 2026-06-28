@@ -176,6 +176,7 @@ pub fn resolve_all_imports_with_session(
     };
 
     let tsconfig_warned: Mutex<FxHashSet<String>> = Mutex::new(FxHashSet::default());
+    let tsconfig_cache = types::TsconfigCache::default();
 
     let ctx = ResolveContext {
         resolver: &session.resolver,
@@ -192,6 +193,7 @@ pub fn resolve_all_imports_with_session(
         root: input.root,
         canonical_fallback: canonical_fallback.as_ref(),
         tsconfig_warned: &tsconfig_warned,
+        tsconfig_cache: &tsconfig_cache,
     };
 
     let mut resolved: Vec<ResolvedModule> = input
@@ -356,6 +358,7 @@ fn build_resolved_module(input: ResolvedModuleBuildInput<'_>) -> ResolvedModule 
             input.files,
         ),
         member_accesses: input.module.member_accesses.clone(),
+        semantic_facts: input.module.semantic_facts.clone(),
         whole_object_uses: input.module.whole_object_uses.clone(),
         has_cjs_exports: input.module.has_cjs_exports,
         has_angular_component_template_url: input.module.has_angular_component_template_url,
@@ -435,7 +438,7 @@ fn synthesize_auto_import_edges(
                 }
                 module.resolved_imports.push(ResolvedImport {
                     info: synthetic_auto_import_info(name, *kind),
-                    target: ResolveResult::InternalModule(*target_id),
+                    target: ResolveResult::SyntheticAutoImport(*target_id),
                 });
             }
         }

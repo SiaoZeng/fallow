@@ -431,7 +431,7 @@ pub(super) fn normalize_module_file_relative_path(relative: &str) -> Option<Stri
         return None;
     }
 
-    let normalized = PathBuf::from("__fallow_current_file__").join(relative);
+    let normalized = PathBuf::from("__f_current_file").join(relative);
 
     let mut parts = Vec::new();
     for component in normalized.components() {
@@ -445,11 +445,7 @@ pub(super) fn normalize_module_file_relative_path(relative: &str) -> Option<Stri
         }
     }
 
-    if parts
-        .first()
-        .is_some_and(|part| part == "__fallow_current_file__")
-        || parts.is_empty()
-    {
+    if parts.first().is_some_and(|part| part == "__f_current_file") || parts.is_empty() {
         return None;
     }
 
@@ -915,10 +911,14 @@ pub(super) fn extract_arrow_return_call<'a, 'b>(
     extract_function_body_final_return_call(&arrow.body)
 }
 
+pub(super) struct PlaywrightFixtureMemberUse {
+    pub(super) fixture_name: String,
+    pub(super) member: String,
+}
+
 pub(super) fn collect_playwright_fixture_member_uses(
-    test_name: &str,
     arguments: &[Argument<'_>],
-) -> Vec<MemberAccess> {
+) -> Vec<PlaywrightFixtureMemberUse> {
     let Some(callback) = arguments.iter().find_map(|arg| match arg {
         Argument::ArrowFunctionExpression(arrow) => {
             Some((arrow.params.items.first()?, arrow.body.as_ref()))
@@ -944,13 +944,8 @@ pub(super) fn collect_playwright_fixture_member_uses(
     collector
         .accesses
         .into_iter()
-        .map(|access| MemberAccess {
-            object: format!(
-                "{}{}:{}",
-                crate::PLAYWRIGHT_FIXTURE_USE_SENTINEL,
-                test_name,
-                access.object
-            ),
+        .map(|access| PlaywrightFixtureMemberUse {
+            fixture_name: access.object,
             member: access.member,
         })
         .collect()
@@ -1177,28 +1172,28 @@ mod tests {
 
     #[test]
     fn normalize_current_dir_dot_returns_none() {
-        // "." leaves only __fallow_current_file__ in parts, which is filtered
+        // "." leaves only the synthetic current-file anchor in parts, which is filtered.
         assert!(normalize_module_file_relative_path(".").is_none());
     }
 
     #[test]
     fn normalize_too_many_parent_dirs_returns_none() {
-        // Going above the sentinel anchor with excess ".." pops until empty
+        // Going above the current-file anchor with excess ".." pops until empty
         // then pop() returns None, so the whole function returns None.
         assert!(normalize_module_file_relative_path("../../..").is_none());
     }
 
     #[test]
     fn normalize_dot_slash_prefix_with_filename_returns_none() {
-        // "./foo" -> sentinel stays in parts -> None
-        // (The sentinel represents the current FILE, not directory; "./foo" from
+        // "./foo" leaves the file anchor in parts, so the path is rejected.
+        // (The anchor represents the current FILE, not directory; "./foo" from
         // a file path produces a sub-path of the file itself, which is invalid.)
         assert!(normalize_module_file_relative_path("./foo").is_none());
     }
 
     #[test]
     fn normalize_parent_relative_produces_sibling_path() {
-        // "../sibling" pops the sentinel, leaving only "sibling" with no "../"
+        // "../sibling" pops the file anchor, leaving only "sibling" with no "../"
         // prefix, so the result is "./sibling" (same-directory as the file's dir).
         let result =
             normalize_module_file_relative_path("../sibling").map(|s| s.replace('\\', "/"));
@@ -1207,13 +1202,13 @@ mod tests {
 
     #[test]
     fn normalize_dot_slash_dotdot_inside_returns_none() {
-        // "./a/../b" resolves to sentinel+"b", sentinel stays -> None
+        // "./a/../b" resolves with the file anchor still present, so it is rejected.
         assert!(normalize_module_file_relative_path("./a/../b").is_none());
     }
 
     #[test]
     fn normalize_parent_relative_deep_path_produces_dot_slash() {
-        // "../a/b" pops the sentinel, leaves "a/b" which gets a "./" prefix.
+        // "../a/b" pops the file anchor, leaves "a/b" which gets a "./" prefix.
         let result = normalize_module_file_relative_path("../a/b").map(|s| s.replace('\\', "/"));
         assert_eq!(result.as_deref(), Some("./a/b"));
     }

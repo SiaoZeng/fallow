@@ -1,6 +1,6 @@
 //! fallow-core is the internal implementation crate behind the `fallow`
 //! analyzer. External embedders should consume the curated programmatic
-//! surface at `fallow_cli::programmatic` (e.g. `detect_dead_code`,
+//! surface at `fallow_api` (e.g. `detect_dead_code`,
 //! `detect_boundary_violations`, `detect_duplication`, `compute_complexity`,
 //! `compute_health`); each returns a `serde_json::Value` matching the CLI's
 //! `--format json` shape plus structured `ProgrammaticError` with the CLI's
@@ -41,6 +41,7 @@ pub mod suppress;
 pub mod trace;
 pub mod trace_chain;
 
+pub use fallow_graph::cache as graph_cache;
 pub use fallow_graph::graph;
 pub use fallow_graph::project;
 pub use fallow_graph::resolve;
@@ -173,25 +174,29 @@ fn update_cache(
     store: &mut cache::CacheStore,
     modules: &[extract::ModuleInfo],
     files: &[discover::DiscoveredFile],
-) {
+) -> bool {
+    let mut dirty = false;
     for module in modules {
         if let Some(file) = files.get(module.file_id.0 as usize) {
-            let (mt, sz) = file_mtime_and_size(&file.path);
+            let fingerprint = file_fingerprint(&file.path);
             if let Some(cached) = store.get_by_path_only(&file.path)
                 && cached.content_hash == module.content_hash
             {
-                if cached.mtime_secs != mt || cached.file_size != sz {
+                if cached.source_fingerprint() != fingerprint {
                     let preserved_last_access = cached.last_access_secs;
-                    let mut refreshed = cache::module_to_cached(module, mt, sz);
+                    let mut refreshed = cache::module_to_cached(module, fingerprint);
                     refreshed.last_access_secs = preserved_last_access;
                     store.insert(&file.path, refreshed);
+                    dirty = true;
                 }
                 continue;
             }
-            store.insert(&file.path, cache::module_to_cached(module, mt, sz));
+            store.insert(&file.path, cache::module_to_cached(module, fingerprint));
+            dirty = true;
         }
     }
-    store.retain_paths(files);
+    let removed_stale_paths = store.retain_paths(files);
+    dirty || removed_stale_paths
 }
 
 /// Resolve `config.cache_max_size_mb` into bytes, falling back to the
@@ -210,16 +215,12 @@ pub fn resolve_cache_max_size_bytes(config: &ResolvedConfig) -> usize {
         })
 }
 
-/// Extract mtime (seconds since epoch) and file size from a path.
-fn file_mtime_and_size(path: &std::path::Path) -> (u64, u64) {
-    std::fs::metadata(path).map_or((0, 0), |m| {
-        let mt = m
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
-            .map_or(0, |d| d.as_secs());
-        (mt, m.len())
-    })
+/// Extract source fingerprint metadata from a path.
+fn file_fingerprint(path: &std::path::Path) -> fallow_types::source_fingerprint::SourceFingerprint {
+    std::fs::metadata(path).map_or(
+        fallow_types::source_fingerprint::SourceFingerprint::new(0, 0),
+        |metadata| fallow_types::source_fingerprint::SourceFingerprint::from_metadata(&metadata),
+    )
 }
 
 fn format_undeclared_workspace_warning(
@@ -317,7 +318,7 @@ fn warn_undeclared_workspaces(
 /// Returns an error if file discovery, parsing, or analysis fails.
 #[deprecated(
     since = "2.76.0",
-    note = "fallow_core is internal; use fallow_cli::programmatic::detect_dead_code instead. NOTE: replacement returns serde_json::Value, not typed AnalysisResults. See docs/fallow-core-migration.md and ADR-008."
+    note = "fallow_core is internal; use fallow_api::detect_dead_code instead. NOTE: replacement returns serde_json::Value, not typed AnalysisResults. See docs/fallow-core-migration.md and ADR-008."
 )]
 pub fn analyze(config: &ResolvedConfig) -> Result<AnalysisResults, FallowError> {
     let output = analyze_full(config, false, false, false, false)?;
@@ -331,10 +332,24 @@ pub fn analyze(config: &ResolvedConfig) -> Result<AnalysisResults, FallowError> 
 /// Returns an error if file discovery, parsing, or analysis fails.
 #[deprecated(
     since = "2.76.0",
-    note = "fallow_core is internal; use fallow_cli::programmatic::detect_dead_code instead. NOTE: export-usage collection is not exposed in the programmatic surface today. See docs/fallow-core-migration.md and ADR-008."
+    note = "fallow_core is internal; use fallow_api::detect_dead_code instead. NOTE: export-usage collection is not exposed in the programmatic surface today. See docs/fallow-core-migration.md and ADR-008."
 )]
 pub fn analyze_with_usages(config: &ResolvedConfig) -> Result<AnalysisResults, FallowError> {
     let output = analyze_full(config, false, true, false, false)?;
+    Ok(output.results)
+}
+
+/// Run the full analysis pipeline with export usage collection from a reusable
+/// discovery prelude.
+///
+/// # Errors
+///
+/// Returns an error if parsing or analysis fails.
+pub fn analyze_with_usages_from_discovery(
+    config: &ResolvedConfig,
+    discovery: &AnalysisDiscovery,
+) -> Result<AnalysisResults, FallowError> {
+    let output = analyze_full_from_discovery(config, discovery, false, true, false, false)?;
     Ok(output.results)
 }
 
@@ -350,12 +365,25 @@ pub fn analyze_with_usages(config: &ResolvedConfig) -> Result<AnalysisResults, F
 /// Returns an error if file discovery, parsing, or analysis fails.
 #[deprecated(
     since = "2.90.0",
-    note = "fallow_core is internal; use fallow_cli::programmatic::detect_dead_code and `compute_complexity` instead. NOTE: this combined LSP-only typed surface is not exposed externally. See docs/fallow-core-migration.md and ADR-008."
+    note = "fallow_core is internal; use fallow_api::detect_dead_code and `compute_complexity` instead. NOTE: this combined LSP-only typed surface is not exposed externally. See docs/fallow-core-migration.md and ADR-008."
 )]
 pub fn analyze_with_usages_and_complexity(
     config: &ResolvedConfig,
 ) -> Result<AnalysisOutput, FallowError> {
     analyze_full(config, false, true, true, true)
+}
+
+/// Run the full analysis pipeline with export usage collection and retained
+/// complexity artifacts from a reusable discovery prelude.
+///
+/// # Errors
+///
+/// Returns an error if parsing or analysis fails.
+pub fn analyze_with_usages_and_complexity_from_discovery(
+    config: &ResolvedConfig,
+    discovery: &AnalysisDiscovery,
+) -> Result<AnalysisOutput, FallowError> {
+    analyze_full_from_discovery(config, discovery, false, true, true, true)
 }
 
 /// Run the full analysis pipeline with optional performance timings and graph retention.
@@ -365,7 +393,7 @@ pub fn analyze_with_usages_and_complexity(
 /// Returns an error if file discovery, parsing, or analysis fails.
 #[deprecated(
     since = "2.76.0",
-    note = "fallow_core is internal; use fallow_cli::programmatic::detect_dead_code instead. NOTE: trace timings are not exposed in the programmatic surface today; use `fallow dead-code --performance` for CLI-side timings. See docs/fallow-core-migration.md and ADR-008."
+    note = "fallow_core is internal; use fallow_api::detect_dead_code instead. NOTE: trace timings are not exposed in the programmatic surface today; use `fallow dead-code --performance` for CLI-side timings. See docs/fallow-core-migration.md and ADR-008."
 )]
 pub fn analyze_with_trace(config: &ResolvedConfig) -> Result<AnalysisOutput, FallowError> {
     analyze_full(config, true, false, false, false)
@@ -381,7 +409,7 @@ pub fn analyze_with_trace(config: &ResolvedConfig) -> Result<AnalysisOutput, Fal
 /// Returns an error if file discovery, parsing, or analysis fails.
 #[deprecated(
     since = "2.76.0",
-    note = "fallow_core is internal; the CLI fix command uses this via the workspace path dependency. External embedders should use fallow_cli::programmatic::detect_dead_code. See docs/fallow-core-migration.md and ADR-008."
+    note = "fallow_core is internal; the CLI fix command uses this via the workspace path dependency. External embedders should use fallow_api::detect_dead_code. See docs/fallow-core-migration.md and ADR-008."
 )]
 pub fn analyze_with_file_hashes(config: &ResolvedConfig) -> Result<AnalysisOutput, FallowError> {
     analyze_full(config, false, false, false, false)
@@ -398,7 +426,7 @@ pub fn analyze_with_file_hashes(config: &ResolvedConfig) -> Result<AnalysisOutpu
 /// Returns an error if file discovery, parsing, or analysis fails.
 #[deprecated(
     since = "2.76.0",
-    note = "fallow_core is internal; use fallow_cli::programmatic::detect_dead_code instead. NOTE: combined-mode module retention is not exposed in the programmatic surface today. See docs/fallow-core-migration.md and ADR-008."
+    note = "fallow_core is internal; use fallow_api::detect_dead_code instead. NOTE: combined-mode module retention is not exposed in the programmatic surface today. See docs/fallow-core-migration.md and ADR-008."
 )]
 pub fn analyze_retaining_modules(
     config: &ResolvedConfig,
@@ -406,6 +434,28 @@ pub fn analyze_retaining_modules(
     retain_graph: bool,
 ) -> Result<AnalysisOutput, FallowError> {
     analyze_full(config, retain_graph, false, need_complexity, true)
+}
+
+/// Run the full analysis pipeline with retained modules/files from a reusable
+/// discovery prelude.
+///
+/// # Errors
+///
+/// Returns an error if parsing or analysis fails.
+pub fn analyze_retaining_modules_from_discovery(
+    config: &ResolvedConfig,
+    discovery: &AnalysisDiscovery,
+    need_complexity: bool,
+    retain_graph: bool,
+) -> Result<AnalysisOutput, FallowError> {
+    analyze_full_from_discovery(
+        config,
+        discovery,
+        retain_graph,
+        false,
+        need_complexity,
+        true,
+    )
 }
 
 fn new_analysis_progress(config: &ResolvedConfig) -> progress::AnalysisProgress {
@@ -466,6 +516,252 @@ struct AnalysisSetup {
     workspaces_ms: f64,
 }
 
+/// Reusable discovery prelude for a resolved project.
+///
+/// This carries the file registry plus the workspace and config-candidate state
+/// that plugin detection needs, so engine sessions can run several analyses
+/// over one stable discovery boundary without re-walking the project.
+#[derive(Debug, Clone)]
+pub struct AnalysisDiscovery {
+    files: Vec<discover::DiscoveredFile>,
+    workspaces: Vec<fallow_config::WorkspaceInfo>,
+    root_pkg: Option<PackageJson>,
+    config_candidates: Vec<std::path::PathBuf>,
+    discover_ms: f64,
+    workspaces_ms: f64,
+}
+
+impl AnalysisDiscovery {
+    /// Discovered source files, indexed by stable `FileId` for this session.
+    #[must_use]
+    pub fn files(&self) -> &[discover::DiscoveredFile] {
+        &self.files
+    }
+
+    /// Consume this discovery prelude and return its source file registry.
+    #[must_use]
+    pub fn into_files(self) -> Vec<discover::DiscoveredFile> {
+        self.files
+    }
+}
+
+/// Owned state shared across one core analysis run.
+///
+/// This is the first non-persisted session boundary for the engine. It keeps
+/// discovery, workspace and package prelude state together so later slices can
+/// reuse pipeline products without introducing graph-cache invalidation risk.
+pub(crate) struct AnalysisSession<'a> {
+    config: &'a ResolvedConfig,
+    pipeline_start: Instant,
+    progress: progress::AnalysisProgress,
+    project: project::ProjectState,
+    root_pkg: Option<PackageJson>,
+    config_candidates: Vec<std::path::PathBuf>,
+    discover_ms: f64,
+    workspaces_ms: f64,
+}
+
+impl<'a> AnalysisSession<'a> {
+    fn new(config: &'a ResolvedConfig) -> Self {
+        let pipeline_start = Instant::now();
+        let AnalysisSetup {
+            progress,
+            project,
+            root_pkg,
+            config_candidates,
+            discover_ms,
+            workspaces_ms,
+        } = run_analysis_setup(config);
+
+        Self {
+            config,
+            pipeline_start,
+            progress,
+            project,
+            root_pkg,
+            config_candidates,
+            discover_ms,
+            workspaces_ms,
+        }
+    }
+
+    fn from_discovery(config: &'a ResolvedConfig, discovery: AnalysisDiscovery) -> Self {
+        Self {
+            config,
+            pipeline_start: Instant::now(),
+            progress: new_analysis_progress(config),
+            project: project::ProjectState::new(discovery.files, discovery.workspaces),
+            root_pkg: discovery.root_pkg,
+            config_candidates: discovery.config_candidates,
+            discover_ms: discovery.discover_ms,
+            workspaces_ms: discovery.workspaces_ms,
+        }
+    }
+
+    fn files(&self) -> &[discover::DiscoveredFile] {
+        self.project.files()
+    }
+
+    fn workspaces(&self) -> &[fallow_config::WorkspaceInfo] {
+        self.project.workspaces()
+    }
+
+    fn load_workspace_packages(&self) -> Vec<LoadedWorkspacePackage<'_>> {
+        load_workspace_packages(self.workspaces())
+    }
+
+    fn run_plugins_and_scripts(
+        &self,
+        workspace_pkgs: &[LoadedWorkspacePackage<'_>],
+    ) -> Result<(plugins::AggregatedPluginResult, f64, f64), FallowError> {
+        run_plugins_and_scripts(&PluginScriptInput {
+            config: self.config,
+            progress: &self.progress,
+            files: self.files(),
+            workspaces: self.workspaces(),
+            root_pkg: self.root_pkg.as_ref(),
+            workspace_pkgs,
+            config_candidates: &self.config_candidates,
+        })
+    }
+
+    fn prelude_timings(&self, plugins_ms: f64, scripts_ms: f64) -> PreludeTimings {
+        PreludeTimings {
+            discover_ms: self.discover_ms,
+            workspaces_ms: self.workspaces_ms,
+            plugins_ms,
+            scripts_ms,
+        }
+    }
+
+    fn parse_modules(&self, need_complexity: bool) -> AnalysisParseOutput {
+        let t = Instant::now();
+        self.progress
+            .set_stage(&format!("parsing {} files...", self.files().len()));
+        parse_analysis_modules(self.config, self.files(), need_complexity, t)
+    }
+
+    fn run_owned_core(
+        &self,
+        workspace_pkgs: &[LoadedWorkspacePackage<'_>],
+        plugin_result: &plugins::AggregatedPluginResult,
+        mut modules: Vec<extract::ModuleInfo>,
+        collect_usages: bool,
+    ) -> OwnedAnalysisCore {
+        let shared = AnalysisCoreSharedInput {
+            config: self.config,
+            progress: &self.progress,
+            files: self.files(),
+            workspaces: self.workspaces(),
+            root_pkg: self.root_pkg.as_ref(),
+            workspace_pkgs,
+            plugin_result,
+        };
+
+        let entry_points = discover_analysis_entry_points(&shared);
+        let resolved = resolve_analysis_imports_timed(&shared, &modules);
+        let graph =
+            build_analysis_graph_timed(&shared, &resolved.resolved, &entry_points, &modules);
+        release_resolution_payloads(&mut modules);
+        let analysis = analyze_dead_code_timed(
+            &shared,
+            &graph.graph,
+            &resolved.resolved,
+            &modules,
+            collect_usages,
+            entry_points.summary,
+        );
+
+        OwnedAnalysisCore {
+            result: analysis.result,
+            graph: graph.graph,
+            modules,
+            entry_point_count: entry_points.count,
+            entry_points_ms: entry_points.elapsed_ms,
+            resolve_ms: resolved.elapsed_ms,
+            graph_ms: graph.elapsed_ms,
+            analyze_ms: analysis.elapsed_ms,
+        }
+    }
+
+    fn run_full(
+        self,
+        retain: bool,
+        collect_usages: bool,
+        need_complexity: bool,
+        retain_modules: bool,
+    ) -> Result<AnalysisOutput, FallowError> {
+        let workspace_pkgs = self.load_workspace_packages();
+        let (plugin_result, plugins_ms, scripts_ms) =
+            self.run_plugins_and_scripts(&workspace_pkgs)?;
+
+        let AnalysisParseOutput { modules, metrics } = self.parse_modules(need_complexity);
+        let core = self.run_owned_core(&workspace_pkgs, &plugin_result, modules, collect_usages);
+        self.progress.finish();
+
+        let profile = full_analysis_pipeline_profile(
+            &self.prelude_timings(plugins_ms, scripts_ms),
+            self.pipeline_start,
+            self.files(),
+            self.workspaces(),
+            &core,
+            &metrics,
+        );
+        trace_pipeline_profile(&profile);
+
+        Ok(assemble_full_output(
+            core,
+            plugin_result,
+            &profile,
+            self.files(),
+            retain,
+            retain_modules,
+        ))
+    }
+
+    fn run_with_parse_result(
+        self,
+        modules: &[extract::ModuleInfo],
+    ) -> Result<AnalysisOutput, FallowError> {
+        let workspace_pkgs = self.load_workspace_packages();
+        let (plugin_result, plugins_ms, scripts_ms) =
+            self.run_plugins_and_scripts(&workspace_pkgs)?;
+
+        let core = run_reused_analysis_core(&ReusedAnalysisCoreInput {
+            config: self.config,
+            progress: &self.progress,
+            files: self.files(),
+            workspaces: self.workspaces(),
+            root_pkg: self.root_pkg.as_ref(),
+            workspace_pkgs: &workspace_pkgs,
+            plugin_result: &plugin_result,
+            modules,
+        });
+        self.progress.finish();
+
+        let timings = self.prelude_timings(plugins_ms, scripts_ms);
+        let prelude = prelude_metrics(
+            &timings,
+            self.pipeline_start,
+            self.files(),
+            self.workspaces(),
+            modules.len(),
+        );
+        let profile = reused_pipeline_profile(&prelude, &core);
+        trace_reused_pipeline_profile(&profile);
+
+        Ok(AnalysisOutput {
+            results: core.result,
+            timings: retained_pipeline_timings(true, &profile),
+            graph: Some(core.graph),
+            modules: None,
+            files: None,
+            script_used_packages: plugin_result.script_used_packages,
+            file_hashes: collect_file_hashes(modules, self.files()),
+        })
+    }
+}
+
 /// Run the shared prelude: progress setup, node_modules check, workspace and
 /// root-package discovery, hidden-dir scoping, and file discovery.
 fn run_analysis_setup(config: &ResolvedConfig) -> AnalysisSetup {
@@ -488,6 +784,35 @@ fn run_analysis_setup(config: &ResolvedConfig) -> AnalysisSetup {
     AnalysisSetup {
         progress,
         project,
+        root_pkg,
+        config_candidates,
+        discover_ms,
+        workspaces_ms,
+    }
+}
+
+/// Run the shared discovery prelude once for callers that need a reusable
+/// analysis session.
+///
+/// # Panics
+///
+/// Panics only when the underlying source discovery walk hits its documented
+/// compile-time glob/template invariants.
+#[must_use]
+pub fn prepare_analysis_discovery(config: &ResolvedConfig) -> AnalysisDiscovery {
+    let AnalysisSetup {
+        progress,
+        project,
+        root_pkg,
+        config_candidates,
+        discover_ms,
+        workspaces_ms,
+    } = run_analysis_setup(config);
+    progress.finish();
+
+    AnalysisDiscovery {
+        files: project.files().to_vec(),
+        workspaces: project.workspaces().to_vec(),
         root_pkg,
         config_candidates,
         discover_ms,
@@ -549,68 +874,14 @@ fn run_plugins_and_scripts(
 /// Returns an error if discovery, graph construction, or analysis fails.
 #[deprecated(
     since = "2.76.0",
-    note = "fallow_core is internal; use fallow_cli::programmatic::detect_dead_code instead. NOTE: pre-parsed module reuse is not exposed in the programmatic surface today. See docs/fallow-core-migration.md and ADR-008."
+    note = "fallow_core is internal; use fallow_api::detect_dead_code instead. NOTE: pre-parsed module reuse is not exposed in the programmatic surface today. See docs/fallow-core-migration.md and ADR-008."
 )]
 pub fn analyze_with_parse_result(
     config: &ResolvedConfig,
     modules: &[extract::ModuleInfo],
 ) -> Result<AnalysisOutput, FallowError> {
     let _span = tracing::info_span!("fallow_analyze_with_parse_result").entered();
-    let pipeline_start = Instant::now();
-
-    let AnalysisSetup {
-        progress,
-        project,
-        root_pkg,
-        config_candidates,
-        discover_ms,
-        workspaces_ms,
-    } = run_analysis_setup(config);
-    let files = project.files();
-    let workspaces = project.workspaces();
-    let workspace_pkgs = load_workspace_packages(workspaces);
-
-    let (plugin_result, plugins_ms, scripts_ms) = run_plugins_and_scripts(&PluginScriptInput {
-        config,
-        progress: &progress,
-        files,
-        workspaces,
-        root_pkg: root_pkg.as_ref(),
-        workspace_pkgs: &workspace_pkgs,
-        config_candidates: &config_candidates,
-    })?;
-
-    let core = run_reused_analysis_core(&ReusedAnalysisCoreInput {
-        config,
-        progress: &progress,
-        files,
-        workspaces,
-        root_pkg: root_pkg.as_ref(),
-        workspace_pkgs: &workspace_pkgs,
-        plugin_result: &plugin_result,
-        modules,
-    });
-    progress.finish();
-
-    let timings = PreludeTimings {
-        discover_ms,
-        workspaces_ms,
-        plugins_ms,
-        scripts_ms,
-    };
-    let prelude = prelude_metrics(&timings, pipeline_start, files, workspaces, modules.len());
-    let profile = reused_pipeline_profile(&prelude, &core);
-    trace_reused_pipeline_profile(&profile);
-
-    Ok(AnalysisOutput {
-        results: core.result,
-        timings: retained_pipeline_timings(true, &profile),
-        graph: Some(core.graph),
-        modules: None,
-        files: None,
-        script_used_packages: plugin_result.script_used_packages,
-        file_hashes: collect_file_hashes(modules, files),
-    })
+    AnalysisSession::new(config).run_with_parse_result(modules)
 }
 
 /// Prelude/aggregate metrics shared between the parse and reuse pipeline paths
@@ -838,13 +1109,15 @@ fn build_analysis_graph_timed(
 ) -> TimedGraph {
     let t = Instant::now();
     input.progress.set_stage("building module graph...");
-    let graph = build_analysis_graph(
+    let graph = build_analysis_graph(&BuildAnalysisGraphInput {
+        config: input.config,
+        plugin_result: input.plugin_result,
         resolved,
-        &entry_points.entry_points,
-        input.files,
+        entry_points: &entry_points.entry_points,
+        files: input.files,
         modules,
-        input.workspaces,
-    );
+        workspaces: input.workspaces,
+    });
     TimedGraph {
         graph,
         elapsed_ms: t.elapsed().as_secs_f64() * 1000.0,
@@ -895,116 +1168,24 @@ fn analyze_full(
     retain_modules: bool,
 ) -> Result<AnalysisOutput, FallowError> {
     let _span = tracing::info_span!("fallow_analyze").entered();
-    let pipeline_start = Instant::now();
-
-    let AnalysisSetup {
-        progress,
-        project,
-        root_pkg,
-        config_candidates,
-        discover_ms,
-        workspaces_ms,
-    } = run_analysis_setup(config);
-    let files = project.files();
-    let workspaces = project.workspaces();
-    let workspace_pkgs = load_workspace_packages(workspaces);
-
-    let (plugin_result, plugins_ms, scripts_ms) = run_plugins_and_scripts(&PluginScriptInput {
-        config,
-        progress: &progress,
-        files,
-        workspaces,
-        root_pkg: root_pkg.as_ref(),
-        workspace_pkgs: &workspace_pkgs,
-        config_candidates: &config_candidates,
-    })?;
-
-    let FullAnalysisCoreOutput { core, metrics } = run_full_analysis_core(&FullAnalysisCoreInput {
-        config,
-        progress: &progress,
-        files,
-        workspaces,
-        root_pkg: root_pkg.as_ref(),
-        workspace_pkgs: &workspace_pkgs,
-        plugin_result: &plugin_result,
-        need_complexity,
-        collect_usages,
-    });
-    progress.finish();
-
-    let profile = full_analysis_pipeline_profile(
-        &PreludeTimings {
-            discover_ms,
-            workspaces_ms,
-            plugins_ms,
-            scripts_ms,
-        },
-        pipeline_start,
-        files,
-        workspaces,
-        &core,
-        &metrics,
-    );
-    trace_pipeline_profile(&profile);
-
-    Ok(assemble_full_output(
-        core,
-        plugin_result,
-        &profile,
-        files,
-        retain,
-        retain_modules,
-    ))
+    AnalysisSession::new(config).run_full(retain, collect_usages, need_complexity, retain_modules)
 }
 
-struct FullAnalysisCoreInput<'a> {
-    config: &'a ResolvedConfig,
-    progress: &'a progress::AnalysisProgress,
-    files: &'a [discover::DiscoveredFile],
-    workspaces: &'a [fallow_config::WorkspaceInfo],
-    root_pkg: Option<&'a PackageJson>,
-    workspace_pkgs: &'a [LoadedWorkspacePackage<'a>],
-    plugin_result: &'a plugins::AggregatedPluginResult,
-    need_complexity: bool,
+fn analyze_full_from_discovery(
+    config: &ResolvedConfig,
+    discovery: &AnalysisDiscovery,
+    retain: bool,
     collect_usages: bool,
-}
-
-struct FullAnalysisCoreOutput {
-    core: OwnedAnalysisCore,
-    metrics: ParseMetrics,
-}
-
-fn run_full_analysis_core(input: &FullAnalysisCoreInput<'_>) -> FullAnalysisCoreOutput {
-    let &FullAnalysisCoreInput {
-        config,
-        progress,
-        files,
-        workspaces,
-        root_pkg,
-        workspace_pkgs,
-        plugin_result,
+    need_complexity: bool,
+    retain_modules: bool,
+) -> Result<AnalysisOutput, FallowError> {
+    let _span = tracing::info_span!("fallow_analyze").entered();
+    AnalysisSession::from_discovery(config, discovery.clone()).run_full(
+        retain,
+        collect_usages,
         need_complexity,
-        collect_usages,
-    } = input;
-
-    let t = Instant::now();
-    progress.set_stage(&format!("parsing {} files...", files.len()));
-    let AnalysisParseOutput { modules, metrics } =
-        parse_analysis_modules(config, files, need_complexity, t);
-
-    let core = run_owned_analysis_core(OwnedAnalysisCoreInput {
-        config,
-        progress,
-        files,
-        workspaces,
-        root_pkg,
-        workspace_pkgs,
-        plugin_result,
-        modules,
-        collect_usages,
-    });
-
-    FullAnalysisCoreOutput { core, metrics }
+        retain_modules,
+    )
 }
 
 fn full_analysis_pipeline_profile(
@@ -1055,19 +1236,6 @@ fn assemble_full_output(
     }
 }
 
-/// Borrowed inputs (plus owned `modules`) for `run_owned_analysis_core`.
-struct OwnedAnalysisCoreInput<'a> {
-    config: &'a ResolvedConfig,
-    progress: &'a progress::AnalysisProgress,
-    files: &'a [discover::DiscoveredFile],
-    workspaces: &'a [fallow_config::WorkspaceInfo],
-    root_pkg: Option<&'a PackageJson>,
-    workspace_pkgs: &'a [LoadedWorkspacePackage<'a>],
-    plugin_result: &'a plugins::AggregatedPluginResult,
-    modules: Vec<extract::ModuleInfo>,
-    collect_usages: bool,
-}
-
 /// Result of the freshly-parsed analysis core; returns the owned `modules` (so the
 /// caller can retain them) plus the per-phase timings.
 struct OwnedAnalysisCore {
@@ -1079,56 +1247,6 @@ struct OwnedAnalysisCore {
     resolve_ms: f64,
     graph_ms: f64,
     analyze_ms: f64,
-}
-
-/// Run entry-point discovery, import resolution, graph construction (releasing
-/// each module's resolution payload in place), and dead-code analysis over the
-/// freshly parsed, owned modules.
-fn run_owned_analysis_core(input: OwnedAnalysisCoreInput<'_>) -> OwnedAnalysisCore {
-    let OwnedAnalysisCoreInput {
-        config,
-        progress,
-        files,
-        workspaces,
-        root_pkg,
-        workspace_pkgs,
-        plugin_result,
-        mut modules,
-        collect_usages,
-    } = input;
-    let shared = AnalysisCoreSharedInput {
-        config,
-        progress,
-        files,
-        workspaces,
-        root_pkg,
-        workspace_pkgs,
-        plugin_result,
-    };
-
-    let entry_points = discover_analysis_entry_points(&shared);
-    let resolved = resolve_analysis_imports_timed(&shared, &modules);
-    let graph = build_analysis_graph_timed(&shared, &resolved.resolved, &entry_points, &modules);
-    release_resolution_payloads(&mut modules);
-    let analysis = analyze_dead_code_timed(
-        &shared,
-        &graph.graph,
-        &resolved.resolved,
-        &modules,
-        collect_usages,
-        entry_points.summary,
-    );
-
-    OwnedAnalysisCore {
-        result: analysis.result,
-        graph: graph.graph,
-        modules,
-        entry_point_count: entry_points.count,
-        entry_points_ms: entry_points.elapsed_ms,
-        resolve_ms: resolved.elapsed_ms,
-        graph_ms: graph.elapsed_ms,
-        analyze_ms: analysis.elapsed_ms,
-    }
 }
 
 /// Assemble the `PipelineProfile` for the full (freshly parsed) pipeline path.
@@ -1299,12 +1417,13 @@ fn update_parse_cache_if_enabled(
     let t = Instant::now();
     if !config.no_cache {
         let store = cache_store.get_or_insert_with(cache::CacheStore::new);
-        update_cache(store, modules, files);
-        if let Err(error) = store.save(
-            &config.cache_dir,
-            config.cache_config_hash,
-            cache_max_size_bytes,
-        ) {
+        if update_cache(store, modules, files)
+            && let Err(error) = store.save(
+                &config.cache_dir,
+                config.cache_config_hash,
+                cache_max_size_bytes,
+            )
+        {
             tracing::warn!("Failed to save cache: {error}");
         }
     }
@@ -1339,23 +1458,205 @@ fn resolve_analysis_imports(
     resolved
 }
 
-fn build_analysis_graph(
-    resolved: &[resolve::ResolvedModule],
-    entry_points: &discover::CategorizedEntryPoints,
-    files: &[discover::DiscoveredFile],
-    modules: &[extract::ModuleInfo],
-    workspaces: &[fallow_config::WorkspaceInfo],
-) -> graph::ModuleGraph {
+struct BuildAnalysisGraphInput<'a> {
+    config: &'a ResolvedConfig,
+    plugin_result: &'a plugins::AggregatedPluginResult,
+    resolved: &'a [resolve::ResolvedModule],
+    entry_points: &'a discover::CategorizedEntryPoints,
+    files: &'a [discover::DiscoveredFile],
+    modules: &'a [extract::ModuleInfo],
+    workspaces: &'a [fallow_config::WorkspaceInfo],
+}
+
+/// Build the analysis graph, transparently backed by a persisted graph cache.
+///
+/// On a re-run whose file set + fingerprints + graph-affecting options are
+/// byte-identical to the previous run, the previously-built `ModuleGraph` is
+/// loaded from `.fallow/graph-cache.bin` and the (potentially large) build is
+/// skipped. The persisted graph already includes the `credit_*` post-build
+/// steps, so the cache hit returns it directly; a miss builds fresh, runs both
+/// credit steps, and persists for next time. The cache is gated on
+/// `config.no_cache` (same flag as the extraction cache) and is a strict
+/// performance optimization: a cache hit produces an identical `ModuleGraph`,
+/// so analysis results are unchanged (the mandatory correctness gate).
+fn build_analysis_graph(input: &BuildAnalysisGraphInput<'_>) -> graph::ModuleGraph {
+    let caching_enabled = !input.config.no_cache;
+
+    let current_manifest = caching_enabled.then(|| build_graph_cache_manifest(input));
+
+    if let Some(current) = current_manifest.as_ref()
+        && let Some(store) = graph_cache::GraphCacheStore::load(&input.config.cache_dir)
+        && store.manifest.matches_inputs(current)
+    {
+        // Cache hit: the persisted graph already includes the post-build credit
+        // steps and a reconstructed `namespace_imported` bitset (rebuilt inside
+        // `GraphCacheStore::load`), so it is returned verbatim.
+        tracing::debug!("Graph cache hit: skipping graph build");
+        return store.graph;
+    }
+
     let mut graph = graph::ModuleGraph::build_with_reachability_roots(
-        resolved,
-        &entry_points.all,
-        &entry_points.runtime,
-        &entry_points.test,
-        files,
+        input.resolved,
+        &input.entry_points.all,
+        &input.entry_points.runtime,
+        &input.entry_points.test,
+        input.files,
     );
-    credit_package_path_references(&mut graph, modules);
-    credit_workspace_package_usage(&mut graph, resolved, workspaces);
+    credit_package_path_references(&mut graph, input.modules);
+    credit_workspace_package_usage(&mut graph, input.resolved, input.workspaces);
+
+    if let Some(manifest) = current_manifest {
+        let store = graph_cache::GraphCacheStore {
+            version: graph_cache::GRAPH_CACHE_VERSION,
+            manifest,
+            graph,
+        };
+        store.save(&input.config.cache_dir);
+        // `save` borrows the store, so the freshly built graph is moved back out
+        // and returned in-memory. The warm path loads-and-reconstructs an
+        // identical graph from this same persisted blob (proven by the
+        // cold-vs-warm correctness gate).
+        return store.graph;
+    }
+
     graph
+}
+
+/// Build the current `GraphCacheManifest` from the run's discovered files and
+/// graph-affecting option hashes.
+fn build_graph_cache_manifest(
+    input: &BuildAnalysisGraphInput<'_>,
+) -> graph_cache::GraphCacheManifest {
+    let mode = graph_cache::GraphCacheMode::new(
+        resolver_options_hash(input.config),
+        entry_points_hash(input.entry_points),
+        plugin_config_hash(input.plugin_result),
+    );
+    graph_cache::GraphCacheManifest::from_discovered_files(
+        &input.config.root,
+        input.files,
+        mode,
+        |path| {
+            std::fs::metadata(path).map_or(
+                fallow_types::source_fingerprint::SourceFingerprint::new(0, 0),
+                |metadata| {
+                    fallow_types::source_fingerprint::SourceFingerprint::from_metadata(&metadata)
+                },
+            )
+        },
+    )
+}
+
+/// Hash the resolver-affecting options: the project root, extraction config
+/// hash (which already folds tsconfig / resolver-relevant config), and the
+/// user-supplied resolve `conditions`.
+///
+/// `production` and `ignore_patterns` intentionally stay out of this hash:
+/// they shape discovery, so changed file sets already miss through stable file
+/// keys and source fingerprints in the manifest.
+fn resolver_options_hash(config: &ResolvedConfig) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = rustc_hash::FxHasher::default();
+    config.root.hash(&mut hasher);
+    config.cache_config_hash.hash(&mut hasher);
+    config.resolve.conditions.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Hash the entry-point set (sorted paths per role) so any change in reachability
+/// roots misses the cache.
+fn entry_points_hash(entry_points: &discover::CategorizedEntryPoints) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = rustc_hash::FxHasher::default();
+    for role in [&entry_points.all, &entry_points.runtime, &entry_points.test] {
+        let mut paths: Vec<&std::path::Path> = role.iter().map(|ep| ep.path.as_path()).collect();
+        paths.sort_unstable();
+        paths.len().hash(&mut hasher);
+        for path in paths {
+            path.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+/// Hash the plugin-derived graph-affecting configuration.
+fn plugin_config_hash(plugin_result: &plugins::AggregatedPluginResult) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = rustc_hash::FxHasher::default();
+
+    let mut active: Vec<&str> = plugin_result
+        .active_plugins
+        .iter()
+        .map(String::as_str)
+        .collect();
+    active.sort_unstable();
+    active.len().hash(&mut hasher);
+    for name in active {
+        name.hash(&mut hasher);
+    }
+
+    let mut aliases: Vec<(&str, &str)> = plugin_result
+        .path_aliases
+        .iter()
+        .map(|(prefix, replacement)| (prefix.as_str(), replacement.as_str()))
+        .collect();
+    aliases.sort_unstable();
+    aliases.len().hash(&mut hasher);
+    for (prefix, replacement) in aliases {
+        prefix.hash(&mut hasher);
+        replacement.hash(&mut hasher);
+    }
+
+    let mut auto_imports: Vec<(&str, &std::path::Path, fallow_config::AutoImportKind)> =
+        plugin_result
+            .auto_imports
+            .iter()
+            .map(|rule| (rule.name.as_str(), rule.source.as_path(), rule.kind))
+            .collect();
+    auto_imports.sort_unstable_by(|a, b| {
+        a.0.cmp(b.0)
+            .then_with(|| a.1.cmp(b.1))
+            .then_with(|| auto_import_kind_rank(a.2).cmp(&auto_import_kind_rank(b.2)))
+    });
+    auto_imports.len().hash(&mut hasher);
+    for (name, source, kind) in auto_imports {
+        name.hash(&mut hasher);
+        source.hash(&mut hasher);
+        auto_import_kind_rank(kind).hash(&mut hasher);
+    }
+
+    let mut scss_include_paths: Vec<&std::path::Path> = plugin_result
+        .scss_include_paths
+        .iter()
+        .map(std::path::PathBuf::as_path)
+        .collect();
+    scss_include_paths.sort_unstable();
+    scss_include_paths.len().hash(&mut hasher);
+    for path in scss_include_paths {
+        path.hash(&mut hasher);
+    }
+
+    let mut static_dir_mappings: Vec<(&std::path::Path, &str)> = plugin_result
+        .static_dir_mappings
+        .iter()
+        .map(|(from_dir, mount)| (from_dir.as_path(), mount.as_str()))
+        .collect();
+    static_dir_mappings.sort_unstable();
+    static_dir_mappings.len().hash(&mut hasher);
+    for (from_dir, mount) in static_dir_mappings {
+        from_dir.hash(&mut hasher);
+        mount.hash(&mut hasher);
+    }
+
+    hasher.finish()
+}
+
+fn auto_import_kind_rank(kind: fallow_config::AutoImportKind) -> u8 {
+    match kind {
+        fallow_config::AutoImportKind::Named => 0,
+        fallow_config::AutoImportKind::Default => 1,
+        fallow_config::AutoImportKind::DefaultComponent => 2,
+    }
 }
 
 fn collect_file_hashes(
@@ -2080,7 +2381,7 @@ fn collect_config_search_roots(
 /// Returns an error if config loading, file discovery, parsing, or analysis fails.
 #[deprecated(
     since = "2.76.0",
-    note = "fallow_core is internal; use fallow_cli::programmatic::detect_dead_code instead (build a `DeadCodeOptions { analysis: AnalysisOptions { root, ..default() }, ..default() }`). See docs/fallow-core-migration.md and ADR-008."
+    note = "fallow_core is internal; use fallow_api::detect_dead_code instead (build a `DeadCodeOptions { analysis: AnalysisOptions { root, ..default() }, ..default() }`). See docs/fallow-core-migration.md and ADR-008."
 )]
 pub fn analyze_project(root: &Path) -> Result<AnalysisResults, FallowError> {
     let config = default_config(root);
@@ -2205,12 +2506,90 @@ fn num_cpus() -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        bucket_files_by_workspace, collect_config_search_roots,
-        format_undeclared_workspace_warning, warn_undeclared_workspaces,
+        AnalysisSession, bucket_files_by_workspace, collect_config_search_roots, default_config,
+        format_undeclared_workspace_warning, plugin_config_hash, resolver_options_hash,
+        warn_undeclared_workspaces,
     };
     use std::path::{Path, PathBuf};
 
-    use fallow_config::{WorkspaceDiagnostic, WorkspaceDiagnosticKind};
+    use fallow_config::{
+        AutoImportKind, AutoImportRule, WorkspaceDiagnostic, WorkspaceDiagnosticKind,
+    };
+
+    fn plugin_result() -> crate::plugins::AggregatedPluginResult {
+        let mut result = crate::plugins::AggregatedPluginResult::default();
+        result.active_plugins.push("nuxt".to_string());
+        result
+            .path_aliases
+            .push(("@/".to_string(), "src/".to_string()));
+        result
+    }
+
+    #[test]
+    fn graph_cache_resolver_hash_includes_project_root() {
+        let dir_a = tempfile::tempdir().expect("create temp dir a");
+        let dir_b = tempfile::tempdir().expect("create temp dir b");
+        let config_a = session_config(dir_a.path());
+        let config_b = session_config(dir_b.path());
+
+        assert_ne!(
+            resolver_options_hash(&config_a),
+            resolver_options_hash(&config_b),
+            "shared cache dirs must not reuse graphs across project roots"
+        );
+    }
+
+    #[test]
+    fn graph_cache_plugin_hash_includes_auto_imports() {
+        let mut without_auto_import = plugin_result();
+        let mut with_auto_import = plugin_result();
+        with_auto_import.auto_imports.push(AutoImportRule {
+            name: "useCounter".to_string(),
+            source: PathBuf::from("/project/composables/useCounter.ts"),
+            kind: AutoImportKind::Named,
+        });
+
+        assert_ne!(
+            plugin_config_hash(&without_auto_import),
+            plugin_config_hash(&with_auto_import),
+            "auto-import edge changes must invalidate the graph cache"
+        );
+
+        without_auto_import.auto_imports.push(AutoImportRule {
+            name: "useCounter".to_string(),
+            source: PathBuf::from("/project/composables/useCounter.ts"),
+            kind: AutoImportKind::Default,
+        });
+        assert_ne!(
+            plugin_config_hash(&without_auto_import),
+            plugin_config_hash(&with_auto_import),
+            "auto-import kind changes must invalidate the graph cache"
+        );
+    }
+
+    #[test]
+    fn graph_cache_plugin_hash_includes_style_and_static_mappings() {
+        let base = plugin_result();
+        let mut with_scss = base.clone();
+        with_scss
+            .scss_include_paths
+            .push(PathBuf::from("/project/styles"));
+        assert_ne!(
+            plugin_config_hash(&base),
+            plugin_config_hash(&with_scss),
+            "SCSS include path changes must invalidate the graph cache"
+        );
+
+        let mut with_static_dir = base.clone();
+        with_static_dir
+            .static_dir_mappings
+            .push((PathBuf::from("/project/public"), "/".to_string()));
+        assert_ne!(
+            plugin_config_hash(&base),
+            plugin_config_hash(&with_static_dir),
+            "static directory mapping changes must invalidate the graph cache"
+        );
+    }
 
     fn diag(root: &Path, relative: &str) -> WorkspaceDiagnostic {
         WorkspaceDiagnostic::new(
@@ -2218,6 +2597,90 @@ mod tests {
             root.join(relative),
             WorkspaceDiagnosticKind::UndeclaredWorkspace,
         )
+    }
+
+    fn session_config(root: &Path) -> fallow_config::ResolvedConfig {
+        let mut config = default_config(root);
+        config.no_cache = true;
+        config.quiet = true;
+        config
+    }
+
+    fn write_session_fixture(root: &Path) {
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).expect("create src");
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"name":"session-fixture","type":"module"}"#,
+        )
+        .expect("write package json");
+        std::fs::write(
+            src.join("index.ts"),
+            "import { used } from './used';\nconsole.log(used);\n",
+        )
+        .expect("write index");
+        std::fs::write(src.join("used.ts"), "export const used = 1;\n").expect("write used");
+    }
+
+    #[test]
+    fn analysis_session_discovers_project_files() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        write_session_fixture(dir.path());
+        let config = session_config(dir.path());
+
+        let session = AnalysisSession::new(&config);
+
+        assert!(
+            session
+                .files()
+                .iter()
+                .any(|file| file.path.ends_with("src/index.ts")),
+            "session should own discovered project files"
+        );
+        assert_eq!(session.workspaces().len(), 0);
+    }
+
+    #[test]
+    fn analysis_session_parses_owned_modules() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        write_session_fixture(dir.path());
+        let config = session_config(dir.path());
+
+        let session = AnalysisSession::new(&config);
+        let parsed = session.parse_modules(false);
+
+        assert!(
+            parsed
+                .modules
+                .iter()
+                .any(|module| session.files()[module.file_id.0 as usize]
+                    .path
+                    .ends_with("src/index.ts")),
+            "session parsing should return modules keyed to session files"
+        );
+    }
+
+    #[test]
+    fn analysis_session_reuses_parse_result_with_matching_results() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        write_session_fixture(dir.path());
+        let config = session_config(dir.path());
+
+        let fresh = AnalysisSession::new(&config)
+            .run_full(true, false, false, true)
+            .expect("fresh analysis succeeds");
+        let modules = fresh.modules.as_ref().expect("fresh modules retained");
+        let reused = AnalysisSession::new(&config)
+            .run_with_parse_result(modules)
+            .expect("reused analysis succeeds");
+
+        assert!(reused.graph.is_some());
+        assert!(reused.timings.is_some());
+        assert_eq!(reused.file_hashes, fresh.file_hashes);
+        assert_eq!(
+            serde_json::to_value(&reused.results).expect("serialize reused results"),
+            serde_json::to_value(&fresh.results).expect("serialize fresh results")
+        );
     }
 
     #[test]

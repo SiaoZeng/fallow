@@ -278,7 +278,8 @@ fn create_re_export_input() -> ReExportInput {
         resolved_dynamic_imports: vec![],
         resolved_dynamic_patterns: vec![],
         member_accesses: vec![],
-        whole_object_uses: vec![],
+        semantic_facts: Box::default(),
+        whole_object_uses: Box::default(),
         has_cjs_exports: false,
         has_angular_component_template_url: false,
         unused_import_bindings: FxHashSet::default(),
@@ -352,7 +353,8 @@ fn create_re_export_input() -> ReExportInput {
             resolved_dynamic_imports: vec![],
             resolved_dynamic_patterns: vec![],
             member_accesses: vec![],
-            whole_object_uses: vec![],
+            semantic_facts: Box::default(),
+            whole_object_uses: Box::default(),
             has_cjs_exports: false,
             has_angular_component_template_url: false,
             unused_import_bindings: FxHashSet::default(),
@@ -409,7 +411,8 @@ fn create_re_export_input() -> ReExportInput {
             resolved_dynamic_imports: vec![],
             resolved_dynamic_patterns: vec![],
             member_accesses: vec![],
-            whole_object_uses: vec![],
+            semantic_facts: Box::default(),
+            whole_object_uses: Box::default(),
             has_cjs_exports: false,
             has_angular_component_template_url: false,
             unused_import_bindings: FxHashSet::default(),
@@ -660,7 +663,7 @@ fn create_cache_round_trip_input() -> fallow_core::extract::ModuleInfo {
             local_name: None,
             source_span: oxc_span::Span::default(),
         }],
-        package_path_references: vec![],
+        package_path_references: Box::default(),
         member_accesses: vec![
             MemberAccess {
                 object: "Status".to_string(),
@@ -675,7 +678,8 @@ fn create_cache_round_trip_input() -> fallow_core::extract::ModuleInfo {
                 member: "log".to_string(),
             },
         ],
-        whole_object_uses: vec![],
+        semantic_facts: Box::default(),
+        whole_object_uses: Box::default(),
         dynamic_import_patterns: vec![],
         has_cjs_exports: false,
         has_angular_component_template_url: false,
@@ -745,12 +749,13 @@ fn create_cache_round_trip_input() -> fallow_core::extract::ModuleInfo {
 fn cache_round_trip(c: &mut Criterion) {
     use fallow_core::cache::{cached_to_module, module_to_cached};
     use fallow_core::discover::FileId;
+    use fallow_types::source_fingerprint::SourceFingerprint;
 
     c.bench_function("cache_round_trip", |bencher| {
         bencher.iter_batched_ref(
             create_cache_round_trip_input,
             |module| {
-                let cached = module_to_cached(module, 0, 0);
+                let cached = module_to_cached(module, SourceFingerprint::new(0, 0));
                 let _ = cached_to_module(&cached, FileId(0));
             },
             BatchSize::LargeInput,

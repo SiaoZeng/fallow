@@ -979,12 +979,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "fallow-api"
+version = "2.102.0"
+dependencies = [
+ "fallow-config",
+ "fallow-engine",
+ "fallow-output",
+ "fallow-types",
+ "globset",
+ "rayon",
+ "rustc-hash 2.1.2",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "fallow-benchmarks"
 version = "2.102.0"
 dependencies = [
  "criterion2",
- "fallow-cli",
+ "fallow-api",
  "fallow-core",
+ "fallow-types",
  "tempfile",
 ]
 
@@ -998,10 +1016,13 @@ dependencies = [
  "colored 3.1.1",
  "dunce",
  "ed25519-dalek",
+ "fallow-api",
  "fallow-config",
  "fallow-core",
  "fallow-cov-protocol",
+ "fallow-engine",
  "fallow-license",
+ "fallow-output",
  "fallow-types",
  "fallow-v8-coverage",
  "globset",
@@ -1013,7 +1034,6 @@ dependencies = [
  "miette",
  "notify",
  "oxc_coverage_instrument",
- "oxc_span",
  "proc-macro2",
  "proptest",
  "rayon",
@@ -1043,6 +1063,7 @@ name = "fallow-config"
 version = "2.102.0"
 dependencies = [
  "dunce",
+ "fallow-output",
  "fallow-types",
  "glob",
  "globset",
@@ -1113,6 +1134,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "fallow-engine"
+version = "2.102.0"
+dependencies = [
+ "colored 3.1.1",
+ "dunce",
+ "fallow-config",
+ "fallow-core",
+ "fallow-extract",
+ "fallow-graph",
+ "fallow-output",
+ "fallow-types",
+ "globset",
+ "oxc_coverage_instrument",
+ "oxc_span",
+ "rustc-hash 2.1.2",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml",
+ "tracing",
+ "xxhash-rust",
+]
+
+[[package]]
 name = "fallow-extract"
 version = "2.102.0"
 dependencies = [
@@ -1147,9 +1192,11 @@ dependencies = [
  "jsonc-parser",
  "oxc_resolver",
  "oxc_span",
+ "postcard",
  "proptest",
  "rayon",
  "rustc-hash 2.1.2",
+ "serde",
  "serde_json",
  "tempfile",
  "tracing",
@@ -1170,11 +1217,10 @@ dependencies = [
 name = "fallow-lsp"
 version = "2.102.0"
 dependencies = [
+ "fallow-api",
  "fallow-config",
- "fallow-core",
  "fallow-types",
  "futures",
- "globset",
  "ls-types",
  "rustc-hash 2.1.2",
  "serde",
@@ -1206,11 +1252,32 @@ dependencies = [
 name = "fallow-node"
 version = "2.102.0"
 dependencies = [
- "fallow-cli",
+ "fallow-api",
  "napi",
  "napi-build",
  "napi-derive",
  "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "fallow-output"
+version = "2.102.0"
+dependencies = [
+ "fallow-types",
+ "rustc-hash 2.1.2",
+ "schemars",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "fallow-programmatic-cli"
+version = "2.102.0"
+dependencies = [
+ "fallow-api",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

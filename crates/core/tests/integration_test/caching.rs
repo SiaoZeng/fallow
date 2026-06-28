@@ -3,6 +3,10 @@ use std::path::PathBuf;
 use super::common::{create_config, create_config_with_cache, fixture_path};
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "roundtrip fixture enumerates cache fields"
+)]
 fn cache_roundtrip() {
     use fallow_core::cache::CacheStore;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -19,7 +23,7 @@ fn cache_roundtrip() {
 
     let cached = fallow_core::cache::CachedModule {
         content_hash: 12345,
-        mtime_secs: 0,
+        mtime_ns: 0,
         file_size: 0,
         last_access_secs: 0,
         exports: vec![],
@@ -27,9 +31,10 @@ fn cache_roundtrip() {
         re_exports: vec![],
         dynamic_imports: vec![],
         require_calls: vec![],
-        package_path_references: vec![],
+        package_path_references: Box::default(),
         member_accesses: vec![],
-        whole_object_uses: vec![],
+        semantic_facts: None,
+        whole_object_uses: Box::default(),
         dynamic_import_patterns: vec![],
         has_cjs_exports: false,
         has_angular_component_template_url: false,
@@ -200,7 +205,10 @@ fn incremental_with_cache_all_hits() {
         if let Some(file) = files.get(module.file_id.0 as usize) {
             cache_store.insert(
                 &file.path,
-                fallow_core::cache::module_to_cached(module, 0, 0),
+                fallow_core::cache::module_to_cached(
+                    module,
+                    fallow_types::source_fingerprint::SourceFingerprint::new(0, 0),
+                ),
             );
         }
     }
@@ -223,7 +231,10 @@ fn incremental_results_identical() {
         if let Some(file) = files.get(module.file_id.0 as usize) {
             cache_store.insert(
                 &file.path,
-                fallow_core::cache::module_to_cached(module, 0, 0),
+                fallow_core::cache::module_to_cached(
+                    module,
+                    fallow_types::source_fingerprint::SourceFingerprint::new(0, 0),
+                ),
             );
         }
     }
@@ -267,7 +278,7 @@ fn incremental_cache_prune_stale_entries() {
     let mut store = fallow_core::cache::CacheStore::new();
     let make_module = || fallow_core::cache::CachedModule {
         content_hash: 1,
-        mtime_secs: 0,
+        mtime_ns: 0,
         file_size: 0,
         last_access_secs: 0,
         exports: vec![],
@@ -275,9 +286,10 @@ fn incremental_cache_prune_stale_entries() {
         re_exports: vec![],
         dynamic_imports: vec![],
         require_calls: vec![],
-        package_path_references: vec![],
+        package_path_references: Box::default(),
         member_accesses: vec![],
-        whole_object_uses: vec![],
+        semantic_facts: None,
+        whole_object_uses: Box::default(),
         dynamic_import_patterns: vec![],
         has_cjs_exports: false,
         has_angular_component_template_url: false,
