@@ -980,7 +980,7 @@ dependencies = [
 
 [[package]]
 name = "fallow-api"
-version = "2.102.0"
+version = "2.103.0"
 dependencies = [
  "fallow-config",
  "fallow-engine",
@@ -997,7 +997,7 @@ dependencies = [
 
 [[package]]
 name = "fallow-benchmarks"
-version = "2.102.0"
+version = "2.103.0"
 dependencies = [
  "criterion2",
  "fallow-api",
@@ -1008,7 +1008,7 @@ dependencies = [
 
 [[package]]
 name = "fallow-cli"
-version = "2.102.0"
+version = "2.103.0"
 dependencies = [
  "base64",
  "bitcode",
@@ -1060,7 +1060,7 @@ dependencies = [
 
 [[package]]
 name = "fallow-config"
-version = "2.102.0"
+version = "2.103.0"
 dependencies = [
  "dunce",
  "fallow-output",
@@ -1085,7 +1085,7 @@ dependencies = [
 
 [[package]]
 name = "fallow-core"
-version = "2.102.0"
+version = "2.103.0"
 dependencies = [
  "bitcode",
  "criterion2",
@@ -1135,7 +1135,7 @@ dependencies = [
 
 [[package]]
 name = "fallow-engine"
-version = "2.102.0"
+version = "2.103.0"
 dependencies = [
  "colored 3.1.1",
  "dunce",
@@ -1159,7 +1159,7 @@ dependencies = [
 
 [[package]]
 name = "fallow-extract"
-version = "2.102.0"
+version = "2.103.0"
 dependencies = [
  "bitcode",
  "fallow-cov-protocol",
@@ -1182,7 +1182,7 @@ dependencies = [
 
 [[package]]
 name = "fallow-graph"
-version = "2.102.0"
+version = "2.103.0"
 dependencies = [
  "dunce",
  "fallow-config",
@@ -1204,7 +1204,7 @@ dependencies = [
 
 [[package]]
 name = "fallow-license"
-version = "2.102.0"
+version = "2.103.0"
 dependencies = [
  "base64",
  "ed25519-dalek",
@@ -1215,7 +1215,7 @@ dependencies = [
 
 [[package]]
 name = "fallow-lsp"
-version = "2.102.0"
+version = "2.103.0"
 dependencies = [
  "fallow-api",
  "fallow-config",
@@ -1234,7 +1234,7 @@ dependencies = [
 
 [[package]]
 name = "fallow-mcp"
-version = "2.102.0"
+version = "2.103.0"
 dependencies = [
  "fallow-types",
  "regex",
@@ -1250,7 +1250,7 @@ dependencies = [
 
 [[package]]
 name = "fallow-node"
-version = "2.102.0"
+version = "2.103.0"
 dependencies = [
  "fallow-api",
  "napi",
@@ -1262,7 +1262,7 @@ dependencies = [
 
 [[package]]
 name = "fallow-output"
-version = "2.102.0"
+version = "2.103.0"
 dependencies = [
  "fallow-types",
  "rustc-hash 2.1.2",
@@ -1273,7 +1273,7 @@ dependencies = [
 
 [[package]]
 name = "fallow-programmatic-cli"
-version = "2.102.0"
+version = "2.103.0"
 dependencies = [
  "fallow-api",
  "serde_json",
@@ -1282,7 +1282,7 @@ dependencies = [
 
 [[package]]
 name = "fallow-types"
-version = "2.102.0"
+version = "2.103.0"
 dependencies = [
  "bitcode",
  "oxc_span",
@@ -1294,7 +1294,7 @@ dependencies = [
 
 [[package]]
 name = "fallow-v8-coverage"
-version = "2.102.0"
+version = "2.103.0"
 dependencies = [
  "proptest",
  "serde",

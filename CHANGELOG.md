@@ -7,7 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.103.0] - 2026-06-28
+
+### Added
+
+- **`coverage analyze --format json` now emits the runtime trust-output contract
+  on the local report.** Each report carries `actionable`,
+  `actionability_reason`, and `actionability_verdict` (a capture with no tracked
+  functions is a first-class `insufficient_evidence` verdict, never silently read
+  as cold), plus a `provenance` block (`data_source`, `freshness_days`,
+  `untracked_ratio`, `unresolved_ratio`, `stale`, `stale_after_days`). The block
+  is context only: it never gates a positive verdict or a confidence score.
+  Additive, JSON-only.
+
+- **`coverage analyze` findings now carry a `discriminators` block.** Alongside
+  each verdict, the inputs that produced it are now legible instead of needing to
+  be re-derived: `tracking_state` (called / never_called / untracked),
+  `invocation_ratio`, the `low_traffic_threshold` and `min_observation_volume`
+  in effect, and `trace_count` with `meets_observation_volume`. It makes the
+  existing signals visible and gates nothing. Additive and backwards-compatible
+  (omitted when absent).
+
+- **`get_blast_radius` and `get_importance` MCP tools now state the
+  augment-not-gate rule in their descriptions.** Both return review context
+  (caller counts, risk bands, importance scores); the descriptions now make
+  explicit that these signals must not gate a `safe_to_delete` decision or a
+  confidence score. Only the three-state runtime tracking signal (called /
+  never_called / untracked) can issue a deletion verdict, matching the
+  server-side enforcement.
+
+- **`coverage analyze --cloud` now hints the source-map upload command when
+  coverage is unresolved.** When the cloud cannot map runtime positions to source
+  (almost always because no source maps were uploaded for the commit) and built
+  source maps exist on disk, fallow prints the exact
+  `fallow coverage upload-source-maps --dir <dir>` command and build directory.
+  Human output only; JSON consumers already get the structured
+  `coverage_unresolved` warning in `report.warnings`.
+
 ### Changed
+
+- **Typed output contracts across every consumer.** Engine results now feed the
+  CLI, LSP, NAPI, MCP, and programmatic callers through shared typed contracts
+  instead of CLI rendering being the implicit API surface. As part of this,
+  `workspace_diagnostics` is now a typed `WorkspaceDiagnostic` array on
+  `CheckOutput` and `DupesOutput` (and the combined and audit envelopes),
+  matching `WorkspacesOutput`, so `docs/output-schema.json` and the generated
+  npm / VS Code `.d.ts` describe it precisely instead of as an opaque value.
+  Thanks [@riker-wamf](https://github.com/riker-wamf) for flagging it.
+  (Closes [#1635](https://github.com/fallow-rs/fallow/issues/1635))
 
 - **`fallow dupes` now ignores test and mock files by default.** Duplicate-code
   analysis skips `*.test.*`, `*.spec.*`, `__tests__`, and `__mocks__` paths out
@@ -25,7 +72,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `use:`/`transition:`/`in:`/`out:`/`animate:` handling. Directives written with
   an explicit value (`style:height={h}`) are unchanged: the value names the
   reference, and the bare target (CSS property, class name, child prop) does
-  not.
+  not. Thanks [@hniedner](https://github.com/hniedner) for the report.
   (Closes [#1641](https://github.com/fallow-rs/fallow/issues/1641))
 
 - **`unused-component-props` no longer false-flags a Vue prop used only through
@@ -52,7 +99,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is now credited instead of reported as unused. Resolution is gated on the
   `use<Name>Store` naming convention, so a non-store call or
   `ReturnType<typeof ...>` param never masks a genuinely unused member.
-  (Closes [#1489](https://github.com/fallow-rs/fallow/issues/1489))
+  Member usage in `.ts` files is credited alongside `.vue` SFCs. Thanks
+  [@Jerc92](https://github.com/Jerc92) and [@Ericlm](https://github.com/Ericlm)
+  for the reports.
+  (Closes [#1489](https://github.com/fallow-rs/fallow/issues/1489) and
+  [#1488](https://github.com/fallow-rs/fallow/issues/1488))
 
 - **`unused-class-members` no longer false-flags a member reached through a
   factory or composable return value.** When a class instance reaches a call
@@ -60,14 +111,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   singleton getter), `const api = useApi(); api.Member()` now credits
   `Class.Member`, including when the factory's return type is inferred rather
   than annotated. Previously the member was reported as unused unless the
-  instance was reached through a directly-typed reference.
+  instance was reached through a directly-typed reference. Thanks
+  [@Jerc92](https://github.com/Jerc92) for the report.
   (Closes [#1441](https://github.com/fallow-rs/fallow/issues/1441))
 
 - **`unused-component-props` no longer aborts on a spaced `</template >` closing
   tag.** Whitespace inside a Vue SFC closing template tag previously aborted
   template-usage extraction for the entire component, so every prop and emit in
   that SFC was reported as unused. The closing tag is now matched regardless of
-  internal whitespace.
+  internal whitespace. Thanks [@Jerc92](https://github.com/Jerc92) for the
+  report.
   (Closes [#1439](https://github.com/fallow-rs/fallow/issues/1439))
 
 - **`ignorePatterns` now accepts a leading `./`.** Entries such as
@@ -3462,7 +3515,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--changed-since` and `--fail-on-issues` for CI
 - Cross-workspace resolution for npm/yarn/pnpm workspaces
 
-[Unreleased]: https://github.com/fallow-rs/fallow/compare/v2.102.0...HEAD
+[Unreleased]: https://github.com/fallow-rs/fallow/compare/v2.103.0...HEAD
+[2.103.0]: https://github.com/fallow-rs/fallow/compare/v2.102.0...v2.103.0
 [2.102.0]: https://github.com/fallow-rs/fallow/compare/v2.101.0...v2.102.0
 [2.101.0]: https://github.com/fallow-rs/fallow/compare/v2.100.0...v2.101.0
 [2.100.0]: https://github.com/fallow-rs/fallow/compare/v2.99.0...v2.100.0

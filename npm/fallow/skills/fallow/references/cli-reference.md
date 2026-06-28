@@ -508,7 +508,7 @@ fallow health --format json --quiet --trend
 {
   "kind": "health",
   "schema_version": 7,
-  "version": "2.102.0",
+  "version": "2.103.0",
   "elapsed_ms": 32,
   "summary": {
     "files_analyzed": 482,
@@ -900,7 +900,7 @@ fallow audit \
 {
   "kind": "audit",
   "schema_version": 7,
-  "version": "2.102.0",
+  "version": "2.103.0",
   "command": "audit",
   "verdict": "fail",
   "changed_files_count": 12,
@@ -975,7 +975,7 @@ fallow flags --format json --quiet --workspace my-package
 ```json
 {
   "schema_version": 7,
-  "version": "2.102.0",
+  "version": "2.103.0",
   "elapsed_ms": 116,
   "feature_flags": [],
   "total_flags": 0
@@ -1076,7 +1076,7 @@ fallow security --gate newly-reachable --changed-since origin/main
 {
   "kind": "security",
   "schema_version": "4",
-  "version": "2.102.0",
+  "version": "2.103.0",
   "elapsed_ms": 42,
   "config": {
     "rules": {
@@ -1105,7 +1105,7 @@ fallow security --gate newly-reachable --changed-since origin/main
 {
   "kind": "security",
   "schema_version": "4",
-  "version": "2.102.0",
+  "version": "2.103.0",
   "elapsed_ms": 42,
   "config": {
     "rules": {
@@ -1305,9 +1305,9 @@ fallow schema
 
 Top-level blocks:
 
-- `manifest_version`: manifest shape discriminator (currently `"1"`). Additive nullable fields on existing rows do not bump this value.
+- `manifest_version`: manifest shape discriminator (currently `"1"`).
 - `commands` + `global_flags`: every CLI command and flag, derived live from the CLI definition.
-- `issue_types`: one row per reportable issue type across ALL analyses (dead-code, health, dupes, flags, security). Each row carries `id` (the bare rule id; several rows share one suppression token, e.g. all complexity rules suppress via `complexity`), `rule_id` (SARIF id), `command`, `category`, `filter_flag` (null when none), `result_key` (the `AnalysisResults` array for dead-code rows, null when none), `counts_in_total`, `fixable`, `suppressible`, `suppress_comment` (copy-pasteable, null when not suppressible), `note`, `license` (`free` | `freemium`), and `docs_url`. Nullable fields are always present (null, never absent).
+- `issue_types`: one row per reportable issue type across ALL analyses (dead-code, health, dupes, flags, security). Each row carries `id` (the bare rule id; several rows share one suppression token, e.g. all complexity rules suppress via `complexity`), `rule_id` (SARIF id), `command`, `category`, `filter_flag` (null when none), `fixable`, `suppressible`, `suppress_comment` (copy-pasteable, null when not suppressible), `note`, `license` (`free` | `freemium`), and `docs_url`. Nullable fields are always present (null, never absent).
 - `mcp_tools`: all MCP server tools with `kind` grouping (analysis/trace/fix/introspection/runtime-coverage/composition), one-line description, `key_params` (curated subset; live MCP `list_tools` schemas are authoritative), `license` + `license_note` (the 5 runtime-coverage tools are `freemium`: a single local capture is free, continuous monitoring is paid), and `read_only`.
 - `plugins`: built-in framework plugin count + names, derived live from the registry.
 - `environment_variables`: every user-facing `FALLOW_*` variable (internal plumbing excluded).
@@ -1813,7 +1813,7 @@ The HTTP layer mirrors the bash `gh_api_retry` / `curl_retry` helpers: `FALLOW_A
 {
   "kind": "dead-code",
   "schema_version": 7,
-  "version": "2.102.0",
+  "version": "2.103.0",
   "elapsed_ms": 45,
   "total_issues": 12,
   "entry_points": {
@@ -1973,7 +1973,7 @@ When `--baseline` is used in combined output, the JSON includes a `baseline_delt
 {
   "kind": "dupes",
   "schema_version": 7,
-  "version": "2.102.0",
+  "version": "2.103.0",
   "elapsed_ms": 82,
   "total_clones": 15,
   "total_lines_duplicated": 230,
@@ -2017,11 +2017,11 @@ When running `fallow` with no subcommand (all analyses), the JSON output combine
 {
   "kind": "combined",
   "schema_version": 7,
-  "version": "2.102.0",
+  "version": "2.103.0",
   "elapsed_ms": 159,
   "check": {
     "schema_version": 7,
-    "version": "2.102.0",
+    "version": "2.103.0",
     "elapsed_ms": 45,
     "total_issues": 12,
     "unused_files": [],
